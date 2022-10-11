@@ -308,7 +308,58 @@
       "author": "@miracolau",
       "repo": "leafxcy的库",
       "script": "https://tg.leaf-x-dg.tk/meituan.js"
+    },
+    {
+      "id": "leaf.ele.me",
+      "name": "leaf.ele.me",
+      "keys": [
+        "elmCookie",
+        "elmck",
+        "elmCouponTime"
+        ],
+      "descs_html": [
+        "elmCookie: 清空它，qx用它没有用",
+        "elmck：CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;",
+        "elmCouponTime：可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+      ],
+      "settings": [
+        {
+          "id": "elmCookie",
+          "name": "elmCookie",
+          "val": "",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 1,
+          "desc": "清空它，qx用它没有用"
+        },
+                {
+          "id": "elmck",
+          "name": "elmck",
+          "val": "",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 1,
+          "desc": "CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;"
+        },
+                {
+          "id": "elmCouponTime",
+          "name": "meituanDrawKeyword",
+          "val": "9:59:59:200",
+          "type": "textarea",
+          "autoGrow": true,
+          "rows": 1,
+          "desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+        }
+        ],
+      "icons": [
+        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png",
+        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png"
+      ],
+      "author": "@miracolau",
+      "repo": "leafxcy的库",
+      "https://raw.githubusercontent.com/leafTheFish/DeathNote/main/elm.js"
     }
+
 
 ]
 
