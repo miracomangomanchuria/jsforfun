@@ -243,8 +243,8 @@
 			"script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/txstockV2.js"
 		},
 		{
-			"id": "leafmeituan",
-			"name": "leafmeituan",
+			"id": "美团（leaf）",
+			"name": "美团（leaf）",
 			"keys": [
 				"meituanCookie",
 				"meituanNotify",
@@ -304,8 +304,8 @@
 			"script": "https://tg.leaf-x-dg.tk/meituan.js"
 		},
 		{
-			"id": "leaf.ele.me",
-			"name": "leaf.ele.me",
+			"id": "饿了么（leaf）",
+			"name": "饿了么（leaf）",
 			"keys": [
 				"elmCookie",
 				"elmck",
