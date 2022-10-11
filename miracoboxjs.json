@@ -3,7 +3,7 @@
   "name": "miraco自用订阅",
   "author": "@miracolau",
   "icon": "https://gitee.com/miracolau/nothingbutcode/raw/pics/miracoboxjs.png",
-  "repo": "https://gitee.com/miracolau/nothingbutcode/new/hide/miracoboxjs.json",
+  "repo": "https://github.com/miracomangomanchuria/jsforfun/blob/main/miracoboxjs.json",
   "apps": [
     {
       "id": "TodayNewsLite",
