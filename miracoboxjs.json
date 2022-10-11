@@ -27,7 +27,7 @@
           "val": "",
           "type": "textarea",
           "autoGrow": true,
-          "rows": 2,
+          "rows": 2, 
           "desc": "自定义UA：捉己UA，填至此处，不填则默认安卓UA"
         },
                 {
