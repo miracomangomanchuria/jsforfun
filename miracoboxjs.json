@@ -1,366 +1,359 @@
 {
-  "id": "com.miracoboxjs",
-  "name": "miraco自用订阅",
-  "author": "@miracolau",
-  "icon": "https://gitee.com/miracolau/nothingbutcode/raw/pics/miracoboxjs.png",
-  "repo": "https://github.com/miracomangomanchuria/jsforfun/blob/main/miracoboxjs.json",
-  "apps": [
-    {
-      "id": "TodayNewsLite",
-      "name": "TodayNewsLite",
-      "keys": [
-        "jrttjsbUA",
-        "jrttjsbReadNum",
-        "jrttjsbFarm",
-        "jrttjsbHeader"
-        ],
-      "descs_html": [
-        "jrttjsbUA: 自定义UA：捉己UA，填至此处，不填则默认安卓UA",
-        "jrttjsbReadNum: 自定义每次阅文之数：填至此处，不填则默认10",
-        "jrttjsbFarm: 农场和种树任务：默认不做，需做则须填其为1",
-        "jrttjsbHeader: i.snssdk.com/luckycat/lite/v1/task/page_data里面的header"
-      ],
-      "settings": [
-        {
-          "id": "jrttjsbUA",
-          "name": "jrttjsbUA",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 2, 
-          "desc": "自定义UA：捉己UA，填至此处，不填则默认安卓UA"
-        },
-                {
-          "id": "jrttjsbReadNum",
-          "name": "jrttjsbReadNum",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "自定义每次阅文之数：填至此处，不填则默认10"
-        },
-                {
-          "id": "jrttjsbFarm",
-          "name": "jrttjsbFarm",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "农场和种树任务：默认不做，需做则须填其为1"
-        },    
-        {
-          "id": "jrttjsbHeader",
-          "name": "jrttjsbHeader",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "i.snssdk.com/luckycat/lite/v1/task/page_data里面的header,多账户用@隔开"
-        }],
-      "icons": [
-        "https://raw.githubusercontent.com/ZhiYi-N/Private-Script/master/img/jrtt.png",
-        "https://raw.githubusercontent.com/ZhiYi-N/Private-Script/master/img/jrtt.png"
-      ],
-      "author": "@miracolau",
-      "repo": "leafxcy的库",
-      "script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/jrttjsb.js"
-    },
-     {
-      "id": "YZSports",
-      "name": "YZSports",
-      "keys": [
-          "@YZSports.tcurl",
-          "@YZSports.tcheaders",
-          "@YZSports.qsburl",
-          "@YZSports.qsbheaders"
-        ],
-      "descs_html": [
-        "签到url里面json?后面的部分",
-        "签到链接里面的请求头"
-      ],
-      "settings": [
-        {
-          "id": "@YZSports.tcurl",
-          "name": "@YZSports.tcurl",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 3,
-          "desc": "签到url里面json?后面的部分"
-        },{
-          "id": "@YZSports.tcheaders",
-          "name": "@YZSports.tcheaders",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 8,
-          "desc": "同策签到链接里面的请求头"
-        },
-        {
-          "id": "@YZSports.qsburl",
-          "name": "@YZSports.qsburl",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 3,
-          "desc": "签到url里面json?后面的部分"
-        },{
-          "id": "@YZSports.qsbheaders",
-          "name": "@YZSports.qsbheaders",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 8,
-          "desc": "方爆签到链接里面的请求头"
-        }
-      ],
-      "icons": [
-        "https://gitee.com/miracolau/nothingbutcode/raw/pics/tcty.png",
-        "https://gitee.com/miracolau/nothingbutcode/raw/pics/tcty.png"
-      ],
-      "author": "@miracolau",
-      "repo": "自己写着玩",
-      "script": "https://gitee.com/miracolau/nothingbutcode/raw/hide/tcty.js"
-  
-},    {
-      "id": "自选股",
-      "name": "自选股",
-      "keys": [
-        "TxStockCash",
-        "TxStockNewbie",
-        "TxStockHelp",
-        "TxStockCookie"
-        ],
-      "descs_html": [
-        "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元",
-        "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1",
-        "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0",
-        "TxStockCookie:打开APP，捉wzq.tenpay.com包，把url里的openid和fskey用&连起来填到TxStockCookie"
-      ],
-      "settings": [
-        {
-          "id": "TxStockCash",
-          "name": "TxStockCash",
-          "val": "5",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元"
-        },
-                {
-          "id": "TxStockNewbie",
-          "name": "TxStockNewbie",
-          "val": "0",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1"
-        },
-                {
-          "id": "TxStockHelp",
-          "name": "TxStockHelp",
-          "val": "1",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0"
-        },
-        {
-          "id": "TxStockCookie",
-          "name": "TxStockCookie",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "把Cookie里的wzq_qlskey和wzq_qluin用&连起来填到TxStockCookie,格式如下：'openid=xx&fskey=yy&wzq_qlskey=zz&wzq_qluin=aa'"
-            
-        }
-        ],
-      "icons": [
-        "https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png",
-        "https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png"
-      ],
-      "author": "@miracolau",
-      "repo": "leafxcy的库",
-      "script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/txstockV2.js"
-    }
-,
- {
-      "id": "自选股",
-      "name": "自选股",
-      "keys": [
-        "TxStockCash",
-        "TxStockNewbie",
-        "TxStockHelp",
-        "TxStockCookie"
-        ],
-      "descs_html": [
-        "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元",
-        "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1",
-        "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0",
-        "TxStockCookie:打开APP，捉wzq.tenpay.com包，把url里的openid和fskey用&连起来填到TxStockCookie"
-      ],
-      "settings": [
-        {
-          "id": "TxStockCash",
-          "name": "TxStockCash",
-          "val": "5",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元"
-        },
-                {
-          "id": "TxStockNewbie",
-          "name": "TxStockNewbie",
-          "val": "0",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1"
-        },
-                {
-          "id": "TxStockHelp",
-          "name": "TxStockHelp",
-          "val": "1",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0"
-        },
-        {
-          "id": "TxStockCookie",
-          "name": "TxStockCookie",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "把Cookie里的wzq_qlskey和wzq_qluin用&连起来填到TxStockCookie,格式如下：'openid=xx&fskey=yy&wzq_qlskey=zz&wzq_qluin=aa'"
-            
-        }
-        ],
-      "icons": [
-        "https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png",
-        "https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png"
-      ],
-      "author": "@miracolau",
-      "repo": "leafxcy的库",
-      "script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/txstockV2.js"
-    },
-    {
-      "id": "leafmeituan",
-      "name": "leafmeituan",
-      "keys": [
-        "meituanCookie",
-        "meituanNotify",
-        "meituanDrawKeyword",
-        "meituanPosition"
-        ],
-      "descs_html": [
-        "meituanCookie: 必填，账号cookie，多账号换行或者@或者&隔开，格式: userId=12345678&token=ccccccccccccccccc",
-        "meituanNotify：可选，推送开关，填0为不推送，填1或其他推送。默认为1",
-        "meituanDrawKeyword：可选，抽奖的关键词，留空的话就不抽奖。默认为空",
-        "meituanPosition： 可选，虚拟定位坐标，注意长度，格式: 113233330,23166670 (如113.233330,23.166670需要转换为113233330,23166670，即保留6位小数点)"
-      ],
-      "settings": [
-        {
-          "id": "meituanCookie",
-          "name": "meituanCookie",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "必填，账号cookie，多账号换行或者@或者&隔开，格式: userId=12345678&token=ccccccccccccccccc"
-        },
-                {
-          "id": "meituanNotify",
-          "name": "meituanNotify",
-          "val": "1",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "可选，推送开关，填0为不推送，填1或其他推送。默认为1"
-        },
-                {
-          "id": "meituanDrawKeyword",
-          "name": "meituanDrawKeyword",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "可选，抽奖的关键词，留空的话就不抽奖。默认为空"
-        },
-        {
-          "id": "meituanPosition",
-          "name": "meituanPosition",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "可选，虚拟定位坐标，注意长度，格式: 113233330,23166670 (如113.233330,23.166670需要转换为113233330,23166670，即保留6位小数点)"
-            
-        }
-        ],
-      "icons": [
-        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/meituan.png",
-        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/meituan.png"
-      ],
-      "author": "@miracolau",
-      "repo": "leafxcy的库",
-      "script": "https://tg.leaf-x-dg.tk/meituan.js"
-    },
-    {
-      "id": "leaf.ele.me",
-      "name": "leaf.ele.me",
-      "keys": [
-        "elmCookie",
-        "elmck",
-        "elmCouponTime"
-        ],
-      "descs_html": [
-        "elmCookie: 清空它，qx用它没有用",
-        "elmck：CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;",
-        "elmCouponTime：可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
-      ],
-      "settings": [
-        {
-          "id": "elmCookie",
-          "name": "elmCookie",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "清空它，qx用它没有用"
-        },
-                {
-          "id": "elmck",
-          "name": "elmck",
-          "val": "",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;"
-        },
-                {
-          "id": "elmCouponTime",
-          "name": "meituanDrawKeyword",
-          "val": "9:59:59:200",
-          "type": "textarea",
-          "autoGrow": true,
-          "rows": 1,
-          "desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
-        }
-        ],
-      "icons": [
-        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png",
-        "https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png"
-      ],
-      "author": "@miracolau",
-      "repo": "leafxcy的库",
-      "https://raw.githubusercontent.com/leafTheFish/DeathNote/main/elm.js"
-    }
+	"id": "com.miracoboxjs",
+	"name": "miraco自用订阅",
+	"author": "@miracolau",
+	"icon": "https://gitee.com/miracolau/nothingbutcode/raw/pics/miracoboxjs.png",
+	"repo": "https://github.com/miracomangomanchuria/jsforfun/blob/main/miracoboxjs.json",
+	"apps": [{
+			"id": "TodayNewsLite",
+			"name": "TodayNewsLite",
+			"keys": [
+				"jrttjsbUA",
+				"jrttjsbReadNum",
+				"jrttjsbFarm",
+				"jrttjsbHeader"
+			],
+			"descs_html": [
+				"jrttjsbUA: 自定义UA：捉己UA，填至此处，不填则默认安卓UA",
+				"jrttjsbReadNum: 自定义每次阅文之数：填至此处，不填则默认10",
+				"jrttjsbFarm: 农场和种树任务：默认不做，需做则须填其为1",
+				"jrttjsbHeader: i.snssdk.com/luckycat/lite/v1/task/page_data里面的header"
+			],
+			"settings": [{
+					"id": "jrttjsbUA",
+					"name": "jrttjsbUA",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 2,
+					"desc": "自定义UA：捉己UA，填至此处，不填则默认安卓UA"
+				},
+				{
+					"id": "jrttjsbReadNum",
+					"name": "jrttjsbReadNum",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "自定义每次阅文之数：填至此处，不填则默认10"
+				},
+				{
+					"id": "jrttjsbFarm",
+					"name": "jrttjsbFarm",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "农场和种树任务：默认不做，需做则须填其为1"
+				},
+				{
+					"id": "jrttjsbHeader",
+					"name": "jrttjsbHeader",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "i.snssdk.com/luckycat/lite/v1/task/page_data里面的header,多账户用@隔开"
+				}
+			],
+			"icons": [
+				"https://raw.githubusercontent.com/ZhiYi-N/Private-Script/master/img/jrtt.png",
+				"https://raw.githubusercontent.com/ZhiYi-N/Private-Script/master/img/jrtt.png"
+			],
+			"author": "@miracolau",
+			"repo": "leafxcy的库",
+			"script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/jrttjsb.js"
+		},
+		{
+			"id": "YZSports",
+			"name": "YZSports",
+			"keys": [
+				"@YZSports.tcurl",
+				"@YZSports.tcheaders",
+				"@YZSports.qsburl",
+				"@YZSports.qsbheaders"
+			],
+			"descs_html": [
+				"签到url里面json?后面的部分",
+				"签到链接里面的请求头"
+			],
+			"settings": [{
+					"id": "@YZSports.tcurl",
+					"name": "@YZSports.tcurl",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 3,
+					"desc": "签到url里面json?后面的部分"
+				}, {
+					"id": "@YZSports.tcheaders",
+					"name": "@YZSports.tcheaders",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 8,
+					"desc": "同策签到链接里面的请求头"
+				},
+				{
+					"id": "@YZSports.qsburl",
+					"name": "@YZSports.qsburl",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 3,
+					"desc": "签到url里面json?后面的部分"
+				}, {
+					"id": "@YZSports.qsbheaders",
+					"name": "@YZSports.qsbheaders",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 8,
+					"desc": "方爆签到链接里面的请求头"
+				}
+			],
+			"icons": [
+				"https://gitee.com/miracolau/nothingbutcode/raw/pics/tcty.png",
+				"https://gitee.com/miracolau/nothingbutcode/raw/pics/tcty.png"
+			],
+			"author": "@miracolau",
+			"repo": "自己写着玩",
+			"script": "https://gitee.com/miracolau/nothingbutcode/raw/hide/tcty.js"
+
+		}, {
+			"id": "自选股",
+			"name": "自选股",
+			"keys": [
+				"TxStockCash",
+				"TxStockNewbie",
+				"TxStockHelp",
+				"TxStockCookie"
+			],
+			"descs_html": [
+				"提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元",
+				"新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1",
+				"分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0",
+				"TxStockCookie:打开APP，捉wzq.tenpay.com包，把url里的openid和fskey用&连起来填到TxStockCookie"
+			],
+			"settings": [{
+					"id": "TxStockCash",
+					"name": "TxStockCash",
+					"val": "5",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元"
+				},
+				{
+					"id": "TxStockNewbie",
+					"name": "TxStockNewbie",
+					"val": "0",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1"
+				},
+				{
+					"id": "TxStockHelp",
+					"name": "TxStockHelp",
+					"val": "1",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0"
+				},
+				{
+					"id": "TxStockCookie",
+					"name": "TxStockCookie",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "把Cookie里的wzq_qlskey和wzq_qluin用&连起来填到TxStockCookie,格式如下：'openid=xx&fskey=yy&wzq_qlskey=zz&wzq_qluin=aa'"
+
+				}
+			],
+			"icons": [
+				"https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png",
+				"https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png"
+			],
+			"author": "@miracolau",
+			"repo": "leafxcy的库",
+			"script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/txstockV2.js"
+		},
+		{
+			"id": "自选股",
+			"name": "自选股",
+			"keys": [
+				"TxStockCash",
+				"TxStockNewbie",
+				"TxStockHelp",
+				"TxStockCookie"
+			],
+			"descs_html": [
+				"提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元",
+				"新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1",
+				"分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0",
+				"TxStockCookie:打开APP，捉wzq.tenpay.com包，把url里的openid和fskey用&连起来填到TxStockCookie"
+			],
+			"settings": [{
+					"id": "TxStockCash",
+					"name": "TxStockCash",
+					"val": "5",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "提现设置：默认提现5元，需要改的话自己设置TxStockCash变量，0代表不提现，1代表提现1元，5代表提现5元"
+				},
+				{
+					"id": "TxStockNewbie",
+					"name": "TxStockNewbie",
+					"val": "0",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "新手任务设置：默认不做新手任务，需要做的话设置TxStockNewbie为1"
+				},
+				{
+					"id": "TxStockHelp",
+					"name": "TxStockHelp",
+					"val": "1",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "分享任务设置：默认会做互助任务，需要多账号。不想做的话设置TxStockHelp为0"
+				},
+				{
+					"id": "TxStockCookie",
+					"name": "TxStockCookie",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "把Cookie里的wzq_qlskey和wzq_qluin用&连起来填到TxStockCookie,格式如下：'openid=xx&fskey=yy&wzq_qlskey=zz&wzq_qluin=aa'"
+
+				}
+			],
+			"icons": [
+				"https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png",
+				"https://raw.githubusercontent.com/CenBoMin/GithubSync/main/TXSTOCK/txzxg.png"
+			],
+			"author": "@miracolau",
+			"repo": "leafxcy的库",
+			"script": "https://raw.githubusercontent.com/leafxcy/JavaScript/main/txstockV2.js"
+		},
+		{
+			"id": "leafmeituan",
+			"name": "leafmeituan",
+			"keys": [
+				"meituanCookie",
+				"meituanNotify",
+				"meituanDrawKeyword",
+				"meituanPosition"
+			],
+			"descs_html": [
+				"meituanCookie: 必填，账号cookie，多账号换行或者@或者&隔开，格式: userId=12345678&token=ccccccccccccccccc",
+				"meituanNotify：可选，推送开关，填0为不推送，填1或其他推送。默认为1",
+				"meituanDrawKeyword：可选，抽奖的关键词，留空的话就不抽奖。默认为空",
+				"meituanPosition： 可选，虚拟定位坐标，注意长度，格式: 113233330,23166670 (如113.233330,23.166670需要转换为113233330,23166670，即保留6位小数点)"
+			],
+			"settings": [{
+					"id": "meituanCookie",
+					"name": "meituanCookie",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "必填，账号cookie，多账号换行或者@或者&隔开，格式: userId=12345678&token=ccccccccccccccccc"
+				},
+				{
+					"id": "meituanNotify",
+					"name": "meituanNotify",
+					"val": "1",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "可选，推送开关，填0为不推送，填1或其他推送。默认为1"
+				},
+				{
+					"id": "meituanDrawKeyword",
+					"name": "meituanDrawKeyword",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "可选，抽奖的关键词，留空的话就不抽奖。默认为空"
+				},
+				{
+					"id": "meituanPosition",
+					"name": "meituanPosition",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "可选，虚拟定位坐标，注意长度，格式: 113233330,23166670 (如113.233330,23.166670需要转换为113233330,23166670，即保留6位小数点)"
+
+				}
+			],
+			"icons": [
+				"https://raw.githubusercontent.com/Orz-3/mini/master/Color/meituan.png",
+				"https://raw.githubusercontent.com/Orz-3/mini/master/Color/meituan.png"
+			],
+			"author": "@miracolau",
+			"repo": "leafxcy的库",
+			"script": "https://tg.leaf-x-dg.tk/meituan.js"
+		},
+		{
+			"id": "leaf.ele.me",
+			"name": "leaf.ele.me",
+			"keys": [
+				"elmCookie",
+				"elmck",
+				"elmCouponTime"
+			],
+			"descs_html": [
+				"elmCookie: 清空它，qx用它没有用",
+				"elmck：CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;",
+				"elmCouponTime：可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+			],
+			"settings": [{
+					"id": "elmCookie",
+					"name": "elmCookie",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "清空它，qx用它没有用"
+				},
+				{
+					"id": "elmck",
+					"name": "elmck",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "CK可以填全部或者只填SID和cookie2，建议USERID也填上方便更新CK，例如SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678;需要抢10元券的号请在对应账号ck后面加上 grabCoupon=1; ，否则默认不抢SID=xxxxxxxx; cookie2=yyyyyyy; USERID=12345678; grabCoupon=1;"
+				},
+				{
+					"id": "elmCouponTime",
+					"name": "meituanDrawKeyword",
+					"val": "9:59:59:200",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 1,
+					"desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+				}
+			],
+			"icons": [
+				"https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png",
+				"https://raw.githubusercontent.com/Orz-3/mini/master/Color/elem.png"
+			],
+			"author": "@miracolau",
+			"repo": "leafxcy的库",
+			"script": "https://raw.githubusercontent.com/leafTheFish/DeathNote/main/elm.js"
+		}
 
 
-]
+	]
 
 }
