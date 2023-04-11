@@ -26,7 +26,7 @@ const $ = new API("mtmc_getToken");
             console.log("===========t位置===============")
             console.log(tk)
             $.write(tk, '#mt_cookies');
-            $.notify('美团买菜脚本获取token成功', '', tk);
+            $.notify('美菜CK Get!', '', tk);
             console.log(tk);
         }
     }
