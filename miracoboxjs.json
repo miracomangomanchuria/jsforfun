@@ -352,7 +352,6 @@
 			"repo": "leafxcy的库",
 			"script": "https://raw.githubusercontent.com/leafTheFish/DeathNote/main/elm.js"
 		},
-		 ,
 		{
 			"id": "100010",
 			"name": "10010_",
@@ -360,18 +359,17 @@
 				"chinaUnicomCookie_请复制token_online字段出来"
 			],
 			"descs_html": [
-				"chinaUnicomCookie: 请从中复制token_online字段出来"]
-			"settings": [
-				{
-					"id": "chinaUnicomCookie",
-					"name": "chinaUnicomCookie",
-					"val": "",
-					"type": "textarea",
-					"autoGrow": true,
-					"rows": 4,
-					"desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
-				}
+				"chinaUnicomCookie: 请从中复制token_online字段出来"
 			],
+			"settings": [{
+				"id": "chinaUnicomCookie",
+				"name": "chinaUnicomCookie",
+				"val": "",
+				"type": "textarea",
+				"autoGrow": true,
+				"rows": 4,
+				"desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+			}],
 			"icons": [
 				"https://wx.qlogo.cn/mmhead/Q3auHgzwzM4AHWuc9ichnKGicT3b7B2dNcXHIFRm2pia0QqiaAtpm3u2lg/132",
 				"https://wx.qlogo.cn/mmhead/Q3auHgzwzM4AHWuc9ichnKGicT3b7B2dNcXHIFRm2pia0QqiaAtpm3u2lg/132"
