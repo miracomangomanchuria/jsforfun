@@ -3,7 +3,7 @@
 
 
 */
-const $ = new API("10010_get_ck");
+const $ = new API("");
 !(async () => {
     if ($.env.isNode) {
         console.log('仅限iOS设备抓包用!');
