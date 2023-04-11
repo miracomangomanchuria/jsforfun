@@ -356,7 +356,7 @@
 			"id": "100010",
 			"name": "10010_",
 			"keys": [
-				"chinaUnicomCookie_请复制token_online字段出来"
+				"chinaUnicomCookie"
 			],
 			"descs_html": [
 				"chinaUnicomCookie: 请从中复制token_online字段出来"
