@@ -9,6 +9,7 @@ const $ = new API("");
         console.log('仅限iOS设备抓包用!');
     }
     else {
+        console.log("===========chinaUnicomCookie命中重写===============")
         let url  = $request.url;
         let headers = $request.headers;
         if ($request.body) {
@@ -37,7 +38,6 @@ const $ = new API("");
             console.log(tk)
             if ($.read("#chinaUnicomCookie") !== tk) {
             $.write(tk, '#chinaUnicomCookie');
-            
             $.notify('10010_ck Get!', '', tk);
             console.log($.read("#chinaUnicomCookie"));
             }
