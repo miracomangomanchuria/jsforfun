@@ -13,8 +13,9 @@ const $ = new API("");
         let url  = $request.url;
         let headers = $request.headers;
         if ($request.body) {
-            body = $request.body;
-            body = JSON.parse(body);
+            body = JSON.parse($request.body);
+            console.log(body)
+            
         } 
         let url_host = 'm.client.10010.com';
         let marker1 = 'mobileService';
