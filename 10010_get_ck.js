@@ -13,9 +13,8 @@ const $ = new API("");
         let url  = $request.url;
         let headers = $request.headers;
         if ($request.body) {
-            body = JSON.parse($request.body);
+            body = $request.body;
             console.log(body)
-            
         } 
         let url_host = 'm.client.10010.com';
         let marker1 = 'mobileService';
@@ -34,7 +33,7 @@ const $ = new API("");
             console.log(headers)
             if (body) {console.log(body)} 
 
-            tk = body['token_online']
+            tk = body.match(/token_online=([^&]*)/)[1]  
             console.log("===========chinaUnicomCookie的详情===============")
             console.log(tk)
             if ($.read("#chinaUnicomCookie") !== tk) {
