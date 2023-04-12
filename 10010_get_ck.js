@@ -37,6 +37,8 @@ const $ = new API("");
             tk = body.match(/token_online=([^&]*)/)[1]  
             console.log("===========当前chinaUnicomCookie的详情===============")
             console.log(tk)
+            console.log(old_tk !== tk)
+            console.log(!(old_tk === tk))
             if (old_tk !== tk) {
             $.write(tk, '#chinaUnicomCookie');
             $.notify('10010_ck 更新成功!', '', tk);
