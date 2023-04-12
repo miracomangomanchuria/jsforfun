@@ -13,6 +13,7 @@ const $ = new API("");
         let headers = $request.headers;
         if ($request.body) {
             body = $request.body;
+            body = JSON.parse(body);
         } 
         let url_host = 'm.client.10010.com';
         let marker1 = 'mobileService';
@@ -32,11 +33,14 @@ const $ = new API("");
             if (body) {console.log(body)} 
 
             tk = body['token_online']
-            console.log("===========t位置===============")
+            console.log("===========chinaUnicomCookie的详情===============")
             console.log(tk)
+            if ($.read("#chinaUnicomCookie") !== tk) {
             $.write(tk, '#chinaUnicomCookie');
+            
             $.notify('10010_ck Get!', '', tk);
-            console.log(tk);
+            console.log($.read("#chinaUnicomCookie"));
+            }
         }
     }
 
