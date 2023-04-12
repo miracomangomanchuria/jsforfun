@@ -36,12 +36,10 @@ const $ = new API("");
             tk = body.match(/token_online=([^&]*)/)[1]  
             console.log("===========chinaUnicomCookie的详情===============")
             console.log(tk)
-            let old_tk = $.read("chinaUnicomCookie")
-            console.log($.read("chinaUnicomCookie"))
-            console.log($.read("#chinaUnicomCookie"))
+            let old_tk = $.read("#chinaUnicomCookie")
             if (old_tk !== tk) {
             $.write(tk, '#chinaUnicomCookie');
-            $.notify('10010_ck Get!', '', tk);
+            $.notify('10010_ck 更新成功!', '', tk);
             console.log($.read("#chinaUnicomCookie"));
             }
         }
