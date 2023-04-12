@@ -31,16 +31,15 @@ const $ = new API("");
         if (((url.indexOf(url_host) > -1) && (url.indexOf(marker1) > -1)) && (url.indexOf(marker2) > -1)) {
             let tk = '';
             console.log(headers)
-            if (body) {console.log(body)} 
-
-            tk = body.match(/token_online=([^&]*)/)[1]  
-            console.log("===========chinaUnicomCookie的详情===============")
-            console.log(tk)
             let old_tk = $.read("#chinaUnicomCookie")
+            console.log("===========旧chinaUnicomCookie的详情===============")
+            console.log(old_tk)
+            tk = body.match(/token_online=([^&]*)/)[1]  
+            console.log("===========当前chinaUnicomCookie的详情===============")
+            console.log(tk)
             if (old_tk !== tk) {
             $.write(tk, '#chinaUnicomCookie');
             $.notify('10010_ck 更新成功!', '', tk);
-            console.log($.read("#chinaUnicomCookie"));
             }
         }
     }
