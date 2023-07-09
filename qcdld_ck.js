@@ -10,7 +10,7 @@ const $ = new API("");
         console.log('仅限iOS设备抓包用!');
     }
     else {
-        console.log("===========chinaUnicomCookie命中重写===============")
+        console.log("===========qcdld_Cookie命中重写===============")
         let url  = $request.url;
         let headers = $request.headers;
         if (headers.Cookie) {
@@ -28,31 +28,7 @@ const $ = new API("");
         console.log("===========标志物2位置===============")
         console.log(url.indexOf(marker2))
 
-        if (((url.indexOf(url_host) > -1) && (url.indexOf(marker1) > -1)) && (url.indexOf(marker2) > -1)) {
-            let tk = '';
-            console.log(headers)
-            let old_tk = $.read("#qcdld_Cookie")
-            console.log("===========旧qcdld_Cookie的详情===============")
-            console.log(old_tk)
 
-
-            const rk = cookies.match(/RK=([^;]+)/)[1];
-            const ptcz = cookies.match(/ptcz=([^;]+)/)[1];
-            const skey = cookies.match(/skey=([^;]+)/)[1];
-            const uin = cookies.match(/uin=([^;]+)/)[1];
-          
-            // 重排变量并返回新的字符串
-            tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
-
-            console.log("===========当前qcdld_Cookie的详情===============")
-            console.log(tk)
-            console.log(old_tk !== tk)
-            console.log(!(old_tk === tk))
-            if (old_tk !== tk) {
-            $.write(tk, '#qcdld_Cookie');
-            $.notify('qcdld_Cookie 更新成功!', '', tk);
-            }
-        }
     }
 
 })().catch((e) => {
