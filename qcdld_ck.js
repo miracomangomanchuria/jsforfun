@@ -14,7 +14,7 @@ const $ = new API("");
         let url  = $request.url;
         let headers = $request.headers;
         if (headers['Cookie']) {
-            const cookies = headers['Cookie']
+            let cookies = headers['Cookie']}
 
         let url_host = 'dld.qzapp.z.qq.com';
         let marker1 = 'qpet';
@@ -36,12 +36,11 @@ const $ = new API("");
             console.log(old_tk)
 
 
-            const rk = cookies.match(/RK=([^;]+)/)[1];
-            const ptcz = cookies.match(/ptcz=([^;]+)/)[1];
-            const skey = cookies.match(/skey=([^;]+)/)[1];
-            const uin = cookies.match(/uin=([^;]+)/)[1];
+            let rk = cookies.match(/RK=([^;]+)/)[1];
+            let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
+            let skey = cookies.match(/skey=([^;]+)/)[1];
+            let uin = cookies.match(/uin=([^;]+)/)[1];
           
-            // 重排变量并返回新的字符串
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
 
             console.log("===========当前qcdld_Cookie的详情===============")
