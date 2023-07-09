@@ -13,9 +13,7 @@ const $ = new API("");
         console.log("===========qcdld_Cookie命中重写===============")
         let url  = $request.url;
         let headers = $request.headers;
-        if (headers['Cookie']) {
-            let cookies = headers['Cookie']}
-            console.log(cookies)
+        let cookies = headers['Cookie']}
 
         let url_host = 'dld.qzapp.z.qq.com';
         let marker1 = 'qpet';
