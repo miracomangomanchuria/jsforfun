@@ -1,19 +1,9 @@
 /*
-https://dld.qzapp.z.qq.com/qpet/cgi-bin/phonepk url script-request-header https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/qcdld_ck.js
+
+https://dld.qzapp.z.qq.com/qpet/cgi-bin/phonepk?cmd=index&channel=0
 
 */
 const $ = new API("");
-
-function rearrangeString(str) {
-    // 使用正则表达式匹配变量并提取值
-    const rk = str.match(/RK=([^;]+)/)[1];
-    const ptcz = str.match(/ptcz=([^;]+)/)[1];
-    const skey = str.match(/skey=([^;]+)/)[1];
-    const uin = str.match(/uin=([^;]+)/)[1];
-  
-    // 重排变量并返回新的字符串
-    return `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
-  }
 
 !(async () => {
     if ($.env.isNode) {
@@ -46,8 +36,14 @@ function rearrangeString(str) {
             console.log(old_tk)
 
 
-              
-            tk =  rearrangeString(cookies);
+            const rk = cookies.match(/RK=([^;]+)/)[1];
+            const ptcz = cookies.match(/ptcz=([^;]+)/)[1];
+            const skey = cookies.match(/skey=([^;]+)/)[1];
+            const uin = cookies.match(/uin=([^;]+)/)[1];
+          
+            // 重排变量并返回新的字符串
+            tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
+
             console.log("===========当前qcdld_Cookie的详情===============")
             console.log(tk)
             console.log(old_tk !== tk)
