@@ -15,6 +15,7 @@ const $ = new API("");
         let headers = $request.headers;
         if (headers['Cookie']) {
             let cookies = headers['Cookie']}
+            console.log(cookies)
 
         let url_host = 'dld.qzapp.z.qq.com';
         let marker1 = 'qpet';
@@ -30,12 +31,11 @@ const $ = new API("");
 
         if (((url.indexOf(url_host) > -1) && (url.indexOf(marker1) > -1)) && (url.indexOf(marker2) > -1)) {
             let tk = '';
-            console.log(headers)
+            console.log(JSON.stringify(headers));
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
             console.log(old_tk)
-
-
+            
             let rk = cookies.match(/RK=([^;]+)/)[1];
             let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
             let skey = cookies.match(/skey=([^;]+)/)[1];
