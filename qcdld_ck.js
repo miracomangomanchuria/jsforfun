@@ -75,10 +75,8 @@ const $ = new API("");
         
             console.log("===========这是tk===============")
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
+            console.log(tk)
             
-
-            
-
             console.log("===========当前qcdld_Cookie的详情===============")
             console.log(tk)
             console.log(old_tk !== tk)
