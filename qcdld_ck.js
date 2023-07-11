@@ -64,22 +64,6 @@ const $ = new API("");
         
             
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
-            let rk = cookies.match(/RK=([^;]+)/);
-            let ptcz = cookies.match(/ptcz=([^;]+)/);
-            let skey = cookies.match(/skey=([^;]+)/);
-            let uin = cookies.match(/uin=([^;]+)/);
-
-            if 
-
-            let old_rk = old_tk.match(/RK=([^;]+)/);
-            let old_ptcz = old_tk.match(/ptcz=([^;]+)/);
-            let old_skey = old_tk.match(/skey=([^;]+)/);
-            let old_uin = old_tk.match(/uin=([^;]+)/);
-
-
-
-
-          
             }    
 
             console.log("===========当前qcdld_Cookie的详情===============")
