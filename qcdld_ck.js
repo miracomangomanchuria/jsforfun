@@ -29,6 +29,11 @@ const $ = new API("");
 
         if (((url.indexOf(url_host) > -1) && (url.indexOf(marker1) > -1)) && (url.indexOf(marker2) > -1)) {
             let tk = '';
+            let rk = '';
+            let ptcz = '';
+            let skey = '';
+            let uin = '';
+
             console.log(JSON.stringify(headers));
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
@@ -40,10 +45,10 @@ const $ = new API("");
             if (!old_tk){
 
                 console.log("===========old_tk上循环===============")
-                let rk = cookies.match(/RK=([^;]+)/)[1];
-                let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
-                let skey = cookies.match(/skey=([^;]+)/)[1];
-                let uin = cookies.match(/uin=([^;]+)/)[1];
+                rk = cookies.match(/RK=([^;]+)/)[1];
+                ptcz = cookies.match(/ptcz=([^;]+)/)[1];
+                skey = cookies.match(/skey=([^;]+)/)[1];
+                uin = cookies.match(/uin=([^;]+)/)[1];
             } else {
 
                 console.log("===========old_tk下循环===============")
@@ -57,26 +62,26 @@ const $ = new API("");
                 if (rk_s) {
 
                     console.log("===========rk上循环===============")
-                    let rk = rk_s[1];
-                    let ptcz = ptcz_s[1];
-                    let skey = skey_s[1];
-                    let uin = uin_s[1];
+                    rk = rk_s[1];
+                    ptcz = ptcz_s[1];
+                    skey = skey_s[1];
+                    uin = uin_s[1];
                 }else{
 
                     console.log("===========rk下循环===============")
                     let old_rk = old_tk.match(/RK=([^;]+)/)[1];
                     let old_ptcz = old_tk.match(/ptcz=([^;]+)/)[1];
-                    let rk = old_rk;
-                    let ptcz = old_ptcz;
-                    let skey = skey_s[1];
-                    let uin = uin_s[1];
+                    rk = old_rk;
+                    ptcz = old_ptcz;
+                    skey = skey_s[1];
+                    uin = uin_s[1];
                 }
             }
         
             console.log("===========这是tk===============")
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
             console.log(tk)
-            
+
             console.log("===========当前qcdld_Cookie的详情===============")
             console.log(tk)
             console.log(old_tk !== tk)
