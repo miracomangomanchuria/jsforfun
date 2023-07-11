@@ -33,6 +33,7 @@ const $ = new API("");
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
             console.log(old_tk)
+            console.log(!old_tk)
 
             if (!old_tk){
                 let rk = cookies.match(/RK=([^;]+)/)[1];
