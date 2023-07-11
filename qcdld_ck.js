@@ -37,14 +37,16 @@ const $ = new API("");
             console.log(!old_tk)
             console.log("===========!old_tk的详情在上边===============")
 
-            if (!old_tk){
+            if (old_tk){
 
+                console.log("===========old_tk上循环===============")
                 let rk = cookies.match(/RK=([^;]+)/)[1];
                 let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
                 let skey = cookies.match(/skey=([^;]+)/)[1];
                 let uin = cookies.match(/uin=([^;]+)/)[1];
             } else {
 
+                console.log("===========old_tk下循环===============")
                 let rk_s = cookies.match(/RK=([^;]+)/);
                 let ptcz_s = cookies.match(/ptcz=([^;]+)/);
                 let skey_s = cookies.match(/skey=([^;]+)/);
