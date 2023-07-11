@@ -37,7 +37,7 @@ const $ = new API("");
             console.log(!old_tk)
             console.log("===========!old_tk的详情在上边===============")
 
-            if (old_tk){
+            if (!old_tk){
 
                 console.log("===========old_tk上循环===============")
                 let rk = cookies.match(/RK=([^;]+)/)[1];
