@@ -33,6 +33,9 @@ const $ = new API("");
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
             console.log(old_tk)
+            console.log("===========!old_tk的详情===============")
+            console.log(!old_tk)
+            console.log("===========!old_tk的详情在上边===============")
 
             if (!old_tk){
 
