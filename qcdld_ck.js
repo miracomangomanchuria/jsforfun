@@ -52,12 +52,18 @@ const $ = new API("");
                 let skey_s = cookies.match(/skey=([^;]+)/);
                 let uin_s = cookies.match(/uin=([^;]+)/);
 
+                console.log(rk_s)
+
                 if (rk_s) {
+
+                    console.log("===========rk上循环===============")
                     let rk = rk_s[1];
                     let ptcz = ptcz_s[1];
                     let skey = skey_s[1];
                     let uin = uin_s[1];
                 }else{
+
+                    console.log("===========rk下循环===============")
                     let old_rk = old_tk.match(/RK=([^;]+)/)[1];
                     let old_ptcz = old_tk.match(/ptcz=([^;]+)/)[1];
                     let rk = old_rk;
@@ -67,8 +73,10 @@ const $ = new API("");
                 }
             }
         
-            
+            console.log("===========这是tk===============")
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
+            
+
             
 
             console.log("===========当前qcdld_Cookie的详情===============")
