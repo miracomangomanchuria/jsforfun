@@ -33,18 +33,15 @@ const $ = new API("");
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
             console.log(old_tk)
-            console.log(!old_tk)
 
             if (!old_tk){
+
                 let rk = cookies.match(/RK=([^;]+)/)[1];
                 let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
                 let skey = cookies.match(/skey=([^;]+)/)[1];
                 let uin = cookies.match(/uin=([^;]+)/)[1];
-            }else{
-                let old_rk = old_tk.match(/RK=([^;]+)/)[1];
-                let old_ptcz = old_tk.match(/ptcz=([^;]+)/)[1];
-                let old_skey = old_tk.match(/skey=([^;]+)/)[1];
-                let old_uin = old_tk.match(/uin=([^;]+)/)[1];
+            } else {
+
                 let rk_s = cookies.match(/RK=([^;]+)/);
                 let ptcz_s = cookies.match(/ptcz=([^;]+)/);
                 let skey_s = cookies.match(/skey=([^;]+)/);
@@ -56,6 +53,8 @@ const $ = new API("");
                     let skey = skey_s[1];
                     let uin = uin_s[1];
                 }else{
+                    let old_rk = old_tk.match(/RK=([^;]+)/)[1];
+                    let old_ptcz = old_tk.match(/ptcz=([^;]+)/)[1];
                     let rk = old_rk;
                     let ptcz = old_ptcz;
                     let skey = skey_s[1];
