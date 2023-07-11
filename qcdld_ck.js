@@ -33,13 +33,54 @@ const $ = new API("");
             let old_tk = $.read("#qcdld_Cookie")
             console.log("===========旧qcdld_Cookie的详情===============")
             console.log(old_tk)
+
+            if (!old_tk){
+                let rk = cookies.match(/RK=([^;]+)/)[1];
+                let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
+                let skey = cookies.match(/skey=([^;]+)/)[1];
+                let uin = cookies.match(/uin=([^;]+)/)[1];
+            }else{
+                let old_rk = old_tk.match(/RK=([^;]+)/)[1];
+                let old_ptcz = old_tk.match(/ptcz=([^;]+)/)[1];
+                let old_skey = old_tk.match(/skey=([^;]+)/)[1];
+                let old_uin = old_tk.match(/uin=([^;]+)/)[1];
+                let rk_s = cookies.match(/RK=([^;]+)/);
+                let ptcz_s = cookies.match(/ptcz=([^;]+)/);
+                let skey_s = cookies.match(/skey=([^;]+)/);
+                let uin_s = cookies.match(/uin=([^;]+)/);
+
+                if (rk_s) {
+                    let rk = rk_s[1];
+                    let ptcz = ptcz_s[1];
+                    let skey = skey_s[1];
+                    let uin = uin_s[1];
+                }else{
+                    let rk = old_rk;
+                    let ptcz = old_ptcz;
+                    let skey = skey_s[1];
+                    let uin = uin_s[1];
+                }
+            }
+        
             
-            let rk = cookies.match(/RK=([^;]+)/)[1];
-            let ptcz = cookies.match(/ptcz=([^;]+)/)[1];
-            let skey = cookies.match(/skey=([^;]+)/)[1];
-            let uin = cookies.match(/uin=([^;]+)/)[1];
-          
             tk = `RK=${rk}; ptcz=${ptcz}; uin=${uin}; skey=${skey}`;
+            let rk = cookies.match(/RK=([^;]+)/);
+            let ptcz = cookies.match(/ptcz=([^;]+)/);
+            let skey = cookies.match(/skey=([^;]+)/);
+            let uin = cookies.match(/uin=([^;]+)/);
+
+            if 
+
+            let old_rk = old_tk.match(/RK=([^;]+)/);
+            let old_ptcz = old_tk.match(/ptcz=([^;]+)/);
+            let old_skey = old_tk.match(/skey=([^;]+)/);
+            let old_uin = old_tk.match(/uin=([^;]+)/);
+
+
+
+
+          
+            }    
 
             console.log("===========当前qcdld_Cookie的详情===============")
             console.log(tk)
