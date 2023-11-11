@@ -353,7 +353,7 @@
 			"script": "https://raw.githubusercontent.com/leafTheFish/DeathNote/main/elm.js"
 		},
 		{
-			"id": "100010",
+			"id": "10010",
 			"name": "10010_",
 			"keys": [
 				"chinaUnicomCookie"
@@ -368,11 +368,47 @@
 				"type": "textarea",
 				"autoGrow": true,
 				"rows": 4,
-				"desc": "可选，抢券时间默认为9点59分59秒200毫秒开始，需要改的话自己设置变量elmCouponTime如：9:59:59:700"
+				"desc": ""
 			}],
 			"icons": [
 				"https://wx.qlogo.cn/mmhead/Q3auHgzwzM4AHWuc9ichnKGicT3b7B2dNcXHIFRm2pia0QqiaAtpm3u2lg/132",
 				"https://wx.qlogo.cn/mmhead/Q3auHgzwzM4AHWuc9ichnKGicT3b7B2dNcXHIFRm2pia0QqiaAtpm3u2lg/132"
+			],
+			"author": "@miracolau"
+
+		},
+		{
+			"id": "CCB_CFJ",
+			"name": "CCB_CFJ",
+			"keys": [
+				"jhcfj_wParam",
+				"jhcfj_ccbck"
+			],
+			"descs_html": [
+				"chinaUnicomCookie: 请从中复制token_online字段出来"
+			],
+			"settings": [{
+				"id": "jhcfj_wParam",
+				"name": "jhcfj_wParam",
+				"val": "",
+				"type": "textarea",
+				"autoGrow": true,
+				"rows": 4,
+				"desc": "微信端,搜wParam，复制wParam值"
+			}, {
+				{
+					"id": "jhcfj_ccbck",
+					"name": "jhcfj_ccbck",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 4,
+					"desc": "fission-events.ccbft.com里面含有_ck_bbq_224，全部cookie"
+				}
+			}],
+			"icons": [
+				"http://wx.qlogo.cn/mmhead/Q3auHgzwzM7vyicKsRro9x4nraI1Ou2a53STmtF8llBuJnfYIHdrxWA/132",
+				"http://wx.qlogo.cn/mmhead/Q3auHgzwzM7vyicKsRro9x4nraI1Ou2a53STmtF8llBuJnfYIHdrxWA/132"
 			],
 			"author": "@miracolau"
 
