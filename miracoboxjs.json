@@ -388,14 +388,14 @@
 				"chinaUnicomCookie: 请从中复制token_online字段出来"
 			],
 			"settings": [{
-				"id": "jhcfj_wParam",
-				"name": "jhcfj_wParam",
-				"val": "",
-				"type": "textarea",
-				"autoGrow": true,
-				"rows": 4,
-				"desc": "微信端,搜wParam，复制wParam值"
-			}, {
+					"id": "jhcfj_wParam",
+					"name": "jhcfj_wParam",
+					"val": "",
+					"type": "textarea",
+					"autoGrow": true,
+					"rows": 4,
+					"desc": "微信端,搜wParam，复制wParam值"
+				},
 				{
 					"id": "jhcfj_ccbck",
 					"name": "jhcfj_ccbck",
@@ -404,8 +404,9 @@
 					"autoGrow": true,
 					"rows": 4,
 					"desc": "fission-events.ccbft.com里面含有_ck_bbq_224，全部cookie"
+
 				}
-			}],
+			],
 			"icons": [
 				"http://wx.qlogo.cn/mmhead/Q3auHgzwzM7vyicKsRro9x4nraI1Ou2a53STmtF8llBuJnfYIHdrxWA/132",
 				"http://wx.qlogo.cn/mmhead/Q3auHgzwzM7vyicKsRro9x4nraI1Ou2a53STmtF8llBuJnfYIHdrxWA/132"
