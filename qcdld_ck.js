@@ -3,7 +3,7 @@
 
 【抓包方式】
 1) 在 QX 添加重写：
-   https://dld.qzapp.z.qq.com/qpet/cgi-bin/phonepk?cmd=index&channel=0 ^GET url-and-header script-request-header qcdld_ck.js
+   ^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
 2) 打开大乐斗简版页面，触发请求即可写入。
 
 【MITM】
