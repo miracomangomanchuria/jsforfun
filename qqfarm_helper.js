@@ -494,11 +494,12 @@ function getHeader(headers, key) {
 
 function getHtmlWithStatus(url, cookie, referer, label) {
   var target = normalizeMcappUrl(url);
+  var ref = referer || defaultMcappReferer();
   return getWithRetry(
     {
       method: "GET",
       url: target,
-      headers: buildRanchHeaders(cookie, referer)
+      headers: buildRanchHeaders(cookie, ref)
     },
     label || "会话"
   ).then(function (resp) {
@@ -577,6 +578,12 @@ function buildMcappLink(base, link) {
   return base + "/nc/cgi-bin/" + clean;
 }
 
+function defaultMcappReferer() {
+  var sid = CONFIG.RANCH_SID || "c";
+  var gut = CONFIG.RANCH_G_UT || "1";
+  return CONFIG.FARM_WAP_BASE + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + gut;
+}
+
 function getHtmlFollow(url, cookie, referer, label, depth) {
   if (depth > 3) return Promise.resolve({ body: "", cookie: cookie, url: url });
   return getHtmlWithStatus(url, cookie, referer, label).then(function (resp) {
@@ -588,7 +595,7 @@ function getHtmlFollow(url, cookie, referer, label, depth) {
       var redirect = extractRedirectUrl(resp.body);
       if (redirect) next = resolveUrl(url, redirect);
       else if (isContinuePage(resp.body)) {
-        var link = extractMcappLink(resp.body) || extractFirstHref(resp.body);
+        var link = extractContinueLink(resp.body) || extractMcappLink(resp.body) || extractFirstHref(resp.body);
         if (link) next = resolveUrl(url, link);
       }
     }
@@ -1199,6 +1206,27 @@ function parseBagItems(html) {
     if (name.indexOf("第") === 0 || name.indexOf("回") === 0) continue;
     items.push({ name: name, count: cnt });
   }
+  if (items.length > 0) return items;
+  var text = stripTags(h).replace(/\s+/g, " ");
+  var seg = text;
+  var mark = "【我的背包】";
+  if (seg.indexOf(mark) >= 0) seg = seg.split(mark)[1];
+  var endMarks = ["下页", "回农场首页", "道具", "商店", "仓库", "背包", "扩建", "客服", "去我的牧场"];
+  var cut = seg.length;
+  for (var i = 0; i < endMarks.length; i++) {
+    var p = seg.indexOf(endMarks[i]);
+    if (p >= 0 && p < cut) cut = p;
+  }
+  seg = seg.substring(0, cut);
+  var re2 = /([^\s×x]+)\s*[×x]\s*([0-9]+)/g;
+  while ((m = re2.exec(seg))) {
+    var n = normalizeSpace(m[1]);
+    var c = parseInt(m[2], 10);
+    if (!n || isNaN(c)) continue;
+    if (/^第\d+\/\d+页/.test(n)) continue;
+    if (n.indexOf("页") >= 0 || n.indexOf("到") >= 0) continue;
+    items.push({ name: n, count: c });
+  }
   return items;
 }
 
@@ -1265,7 +1293,7 @@ function parseFarmStatus(html) {
         .trim();
     }
     if (!status) {
-      var sm = t.match(/(成熟[^\\s]*|枯萎|待收[^\\s]*|待收获|幼苗期|成长中|休眠中|未播种|空地|未种植|成熟期)/);
+      var sm = t.match(/(成熟[^\s]*|枯萎|待收[^\s]*|待收获|幼苗期|成长中|休眠中|未播种|空地|未种植|成熟期)/);
       status = sm ? sm[1] : "";
     }
     if (!name) {
@@ -1278,9 +1306,65 @@ function parseFarmStatus(html) {
   }
   if (list.length > 0) return list;
   var text = stripTags(html || "").replace(/（/g, "(").replace(/）/g, ")").replace(/\s+/g, " ");
-  var re2 = /土地\\d*\\s*([^\\s()]+)\\s*\\(([^)]+)\\)/g;
+  var re2 = /土地\d*\s*([^\s()]+)\s*\(([^)]+)\)/g;
   while ((m = re2.exec(text))) {
     list.push({ name: normalizeSpace(m[1]), status: normalizeSpace(m[2]) });
+  }
+  if (list.length > 0) {
+    var ok = false;
+    for (var li = 0; li < list.length; li++) {
+      if (/(成熟|枯萎|幼苗|成长|待收|休眠|未播种|空地)/.test(list[li].status || "")) {
+        ok = true;
+        break;
+      }
+    }
+    if (ok) return list;
+    list = [];
+  }
+  var seg = text;
+  var mark = "【我的土地】";
+  if (seg.indexOf(mark) >= 0) seg = seg.substring(seg.indexOf(mark) + mark.length);
+  var endMarks = ["商店", "仓库", "背包", "扩建", "客服", "去我的牧场", "个人中心"];
+  var cut = seg.length;
+  for (var i = 0; i < endMarks.length; i++) {
+    var p = seg.indexOf(endMarks[i]);
+    if (p >= 0 && p < cut) cut = p;
+  }
+  seg = seg.substring(0, cut);
+  var startRe = /\d+\.\s*(?:\([^)]+\)\s*)?土地\d+/g;
+  var starts = [];
+  while ((m = startRe.exec(seg))) starts.push(m.index);
+  for (var si = 0; si < starts.length; si++) {
+    var start = starts[si];
+    var end = si + 1 < starts.length ? starts[si + 1] : seg.length;
+    var line = seg.substring(start, end).trim();
+    line = line.replace(/\s*(收获|翻地|播种|除草|杀虫|浇水|施肥|铲除|清理|查看).*$/g, "").trim();
+    line = line.replace(/^\d+\.\s*/, "");
+    line = line.replace(/^\([^)]+\)\s*/, "");
+    line = line.replace(/^土地\d+\s*/, "");
+    var name = "";
+    var rest = line;
+    if (rest.indexOf(" ") >= 0) {
+      name = rest.split(" ")[0];
+      rest = rest.substring(name.length).trim();
+    } else {
+      name = rest;
+      rest = "";
+    }
+    rest = rest.replace(/^\([^)]*\)\s*/, "");
+    var status = "";
+    var sm = rest.match(/(成熟[^\s]*|已成熟|枯萎|幼苗[^\s]*|成长[^\s]*|待收[^\s]*|休眠[^\s]*|未播种|空地)/);
+    if (sm) {
+      status = rest.substring(rest.indexOf(sm[1]));
+    } else {
+      status = rest;
+    }
+    status = status.replace(/\s*(收获|翻地|播种|除草|杀虫|浇水|施肥|铲除|清理|查看).*$/g, "").trim();
+    if (!name && /空地|未播种/.test(rest)) {
+      name = "空地";
+      if (!status) status = "未播种";
+    }
+    if (name) list.push({ name: normalizeSpace(name), status: normalizeSpace(status) });
   }
   return list;
 }
@@ -1313,9 +1397,49 @@ function parseFishStatus(html) {
   }
   if (list.length > 0) return list;
   var text = stripTags(html || "").replace(/（/g, "(").replace(/）/g, ")").replace(/\s+/g, " ");
-  var re2 = /\\d+\\.\\s*([^\\s()]+)\\s*\\(([^)]+)\\)/g;
+  var re2 = /\d+\.\s*([^\s()]+)\s*\(([^)]+)\)/g;
   while ((m = re2.exec(text))) {
     list.push({ name: normalizeSpace(m[1]), status: normalizeSpace(m[2]) });
+  }
+  if (list.length > 0) return list;
+  var seg = text;
+  var mark = "我的池塘";
+  if (seg.indexOf(mark) >= 0) seg = seg.substring(seg.indexOf(mark) + mark.length);
+  var endMarks = ["商店", "仓库", "背包", "扩建", "客服", "去我的牧场", "个人中心"];
+  var cut = seg.length;
+  for (var i = 0; i < endMarks.length; i++) {
+    var p = seg.indexOf(endMarks[i]);
+    if (p >= 0 && p < cut) cut = p;
+  }
+  seg = seg.substring(0, cut);
+  var startRe = /\d+\.\s*[^\s]+/g;
+  var starts = [];
+  while ((m = startRe.exec(seg))) starts.push(m.index);
+  for (var si = 0; si < starts.length; si++) {
+    var start = starts[si];
+    var end = si + 1 < starts.length ? starts[si + 1] : seg.length;
+    var line = seg.substring(start, end).trim();
+    line = line.replace(/\s*(捞鱼|喂鱼食|出售|卖出|放养|查看).*$/g, "").trim();
+    line = line.replace(/^\d+\.\s*/, "");
+    var name = "";
+    var rest = line;
+    if (rest.indexOf(" ") >= 0) {
+      name = rest.split(" ")[0];
+      rest = rest.substring(name.length).trim();
+    } else {
+      name = rest;
+      rest = "";
+    }
+    rest = rest.replace(/^\([^)]*\)\s*/, "");
+    var status = "";
+    var sm = rest.match(/(已成熟|成熟[^\s]*|鱼苗期|幼鱼期|成鱼期|休眠[^\s]*|死亡)/);
+    if (sm) {
+      status = rest.substring(rest.indexOf(sm[1]));
+    } else {
+      status = rest;
+    }
+    status = status.replace(/\s*(捞鱼|喂鱼食|出售|卖出|放养|查看).*$/g, "").trim();
+    if (name) list.push({ name: normalizeSpace(name), status: normalizeSpace(status) });
   }
   return list;
 }
@@ -1323,15 +1447,28 @@ function parseFishStatus(html) {
 function parseRanchStatus(html) {
   var text = stripTags(html || "").replace(/（/g, "(").replace(/）/g, ")").replace(/\s+/g, " ");
   var list = [];
+  var seg = text;
+  var mark = "牧场动物及产品";
+  if (seg.indexOf(mark) >= 0) seg = seg.substring(seg.indexOf(mark) + mark.length);
+  var endMarks = ["商店", "仓库", "背包", "客服", "去我的农场", "去我的餐厅", "大乐斗", "个人中心"];
+  var cut = seg.length;
+  for (var i = 0; i < endMarks.length; i++) {
+    var p = seg.indexOf(endMarks[i]);
+    if (p >= 0 && p < cut) cut = p;
+  }
+  seg = seg.substring(0, cut);
   var re = /(\d+)\)\s*([^:：\s]+)[:：]\s*([\s\S]*?)(?=\s*\d+\)|$)/g;
   var m;
-  while ((m = re.exec(text))) {
+  while ((m = re.exec(seg))) {
     var name = normalizeSpace(m[2]);
     if (!name || name === "饲料") continue;
     var status = normalizeSpace(m[3])
       .replace(/\s*(喂罐头|喂草|收获|清理|出售|卖出|查看)\s*$/g, "")
       .replace(/\(\(([^)]+)\)\)/g, "($1)")
       .trim();
+    if (status.charAt(0) === "(" && status.charAt(status.length - 1) === ")") {
+      status = status.substring(1, status.length - 1).trim();
+    }
     if (!status) continue;
     list.push({ name: name, status: status });
   }
@@ -3460,13 +3597,9 @@ function execFishActions(base, cookie, ctx) {
  * ======================= */
 function ranchGet(url, cookie) {
   var target = normalizeMcappUrl(url);
-  return getWithRetry({
-    method: "GET",
-    url: target,
-    headers: buildRanchHeaders(cookie)
-  }, "牧场").then(function (resp) {
-    logDebug("牧场响应 " + resp.status + " 长度=" + (resp.body || "").length);
-    return resp.body || "";
+  return getHtmlFollow(target, cookie, null, "牧场", 0).then(function (resp) {
+    logDebug("牧场响应 " + (resp && resp.body ? resp.body.length : 0));
+    return (resp && resp.body) || "";
   });
 }
 
