@@ -1,9 +1,9 @@
 /*
-
 【抓包方式】
-1) 在 QX 添加重写：
-   https://dld.qzapp.z.qq.com/qpet/cgi-bin/phonepk?cmd=index&channel=0 ^GET url-and-header script-request-header qcdld_ck.js
-2) 打开大乐斗简版页面，触发请求即可写入。
+1) 在 QX 添加重写（建议同时覆盖 dld + mcapp）：
+   ^https?:\/\/(dld\.qzapp\.z\.qq\.com|mcapp\.z\.qq\.com)\/.* ^GET url-and-header script-request-header qcdld_ck.js
+2) 打开大乐斗简版页面 -> 点击“QQ农场牧场版” -> 继续访问触屏版。
+   当进入牧场主页后，再触发一次请求（例如刷新），即可写入完整字段。
 
 【MITM】
 在 QX 的 MITM 中添加：dld.qzapp.z.qq.com
@@ -44,13 +44,12 @@ const $ = new API("qcdld_Cookie");
     if (v) data[k] = v;
   }
 
-  if (!data.openid || !data.token) {
-    $.notify(
-      "qcdld_Cookie",
-      "字段不完整",
-      "缺少 openid/token，牧场可能进不去"
-    );
-    // 仍然尝试写入已有字段，方便排查
+  const old = $.read("#qcdld_Cookie") || "";
+  const oldMap = parseCookieMap(old);
+  // 如果本次缺字段，尝试用旧值补齐，避免覆盖成不完整 Cookie
+  for (let i = 0; i < KEYS.length; i++) {
+    const k = KEYS[i];
+    if (!data[k] && oldMap[k]) data[k] = oldMap[k];
   }
 
   const parts = [];
@@ -62,9 +61,16 @@ const $ = new API("qcdld_Cookie");
     $.notify("qcdld_Cookie", "未解析到字段", "请确认抓包命中大乐斗请求");
     return;
   }
+  if (!data.openid || !data.token) {
+    $.notify(
+      "qcdld_Cookie",
+      "字段不完整",
+      "缺少 openid/token，未覆盖旧 Cookie"
+    );
+    return;
+  }
   const value = parts.join("; ");
 
-  const old = $.read("#qcdld_Cookie");
   if (old !== value) {
     $.write(value, "#qcdld_Cookie");
     $.notify("qcdld_Cookie 更新成功", "", value);
@@ -83,6 +89,20 @@ function matchCookie(str, key) {
   const re = new RegExp("(?:^|;\\s*)" + key + "=([^;]+)", "i");
   const m = str.match(re);
   return m ? m[1] : "";
+}
+
+function parseCookieMap(cookie) {
+  const map = {};
+  if (!cookie) return map;
+  const parts = cookie.split(";");
+  for (let i = 0; i < parts.length; i++) {
+    const kv = parts[i].trim();
+    if (!kv || kv.indexOf("=") < 0) continue;
+    const k = kv.split("=")[0].trim();
+    const v = kv.slice(k.length + 1);
+    if (k) map[k] = v;
+  }
+  return map;
 }
 
 /* ===== API ===== */
