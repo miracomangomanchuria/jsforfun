@@ -103,6 +103,7 @@ var IS_LOON = $.isLoon;
 var IS_SURGE = $.isSurge;
 var IS_NODE = $.isNode;
 var ENV_NAME = $.envName;
+var COOKIE_SOURCE = "";
 
 function Env(name) {
   var isQuanX = typeof $task !== "undefined";
@@ -288,10 +289,24 @@ function tryJson(text) {
 }
 
 function buildCookie() {
-  if (CONFIG.INLINE_COOKIE) return CONFIG.INLINE_COOKIE;
-  if (IS_NODE && process.env.QQFARM_COOKIE) return process.env.QQFARM_COOKIE;
-  var stored = $.read("qcdld_Cookie") || $.read("qqfarm_cookie");
-  if (stored) return stored;
+  if (CONFIG.INLINE_COOKIE) {
+    COOKIE_SOURCE = "INLINE_COOKIE";
+    return CONFIG.INLINE_COOKIE;
+  }
+  if (IS_NODE && process.env.QQFARM_COOKIE) {
+    COOKIE_SOURCE = "ENV:QQFARM_COOKIE";
+    return process.env.QQFARM_COOKIE;
+  }
+  var stored = $.read("qcdld_Cookie");
+  if (stored) {
+    COOKIE_SOURCE = "qcdld_Cookie";
+    return stored;
+  }
+  stored = $.read("qqfarm_cookie");
+  if (stored) {
+    COOKIE_SOURCE = "qqfarm_cookie";
+    return stored;
+  }
   return "";
 }
 
@@ -3768,6 +3783,7 @@ function main() {
     bannerEnd();
     return Promise.resolve();
   }
+  log("🍪 Cookie来源: " + (COOKIE_SOURCE || "未知"));
   logCookieHealth(cookie);
 
   return ensureMcappAccess(cookie)

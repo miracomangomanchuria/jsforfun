@@ -1,4 +1,6 @@
 /*
+大乐斗 Cookie 获取脚本（六字段）
+
 【抓包方式】
 1) 在 QX 添加重写（建议同时覆盖 dld + mcapp）：
    ^https?:\/\/(dld\.qzapp\.z\.qq\.com|mcapp\.z\.qq\.com)\/.* ^GET url-and-header script-request-header qcdld_ck.js
@@ -17,6 +19,8 @@ ptcz、openId、accessToken、newuin、openid、token
 存储键：#qcdld_Cookie
 */
 
+const VERSION = "2026-02-08.v3";
+const DEBUG = false;
 const $ = new API("qcdld_Cookie");
 
 !(async () => {
@@ -46,6 +50,14 @@ const $ = new API("qcdld_Cookie");
 
   const old = $.read("#qcdld_Cookie") || "";
   const oldMap = parseCookieMap(old);
+  const capturedKeys = Object.keys(data)
+    .filter((k) => data[k])
+    .join(", ");
+  if (DEBUG) {
+    console.log("qcdld_ck version=" + VERSION);
+    console.log("old cookie=" + old);
+    console.log("captured keys=" + capturedKeys);
+  }
   // 如果本次缺字段，尝试用旧值补齐，避免覆盖成不完整 Cookie
   for (let i = 0; i < KEYS.length; i++) {
     const k = KEYS[i];
@@ -65,7 +77,11 @@ const $ = new API("qcdld_Cookie");
     $.notify(
       "qcdld_Cookie",
       "字段不完整",
-      "缺少 openid/token，未覆盖旧 Cookie"
+      "旧值: " +
+        (old || "无") +
+        "\n已捕获: " +
+        capturedKeys +
+        "（未覆盖旧 Cookie）"
     );
     return;
   }
@@ -75,7 +91,15 @@ const $ = new API("qcdld_Cookie");
     $.write(value, "#qcdld_Cookie");
     $.notify("qcdld_Cookie 更新成功", "", value);
   } else {
-    console.log("qcdld_Cookie 未变化");
+    if (DEBUG) {
+      $.notify(
+        "qcdld_Cookie 未变化",
+        "版本 " + VERSION,
+        "旧值: " + (old || "无") + "\n已捕获: " + capturedKeys
+      );
+    } else {
+      console.log("qcdld_Cookie 未变化");
+    }
   }
 })()
   .catch((e) => {
