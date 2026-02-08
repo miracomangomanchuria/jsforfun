@@ -1,24 +1,24 @@
 /*
-QQ Farm & Ranch Auto Helper (Node / Quantumult X / Surge / Loon)
+QQ 农牧场助手（Node / Quantumult X / Surge / Loon）
 
-How to use:
-1) Fill INLINE_COOKIE (preferred) or set env QQFARM_COOKIE.
-2) Enable/disable tasks in CONFIG.ENABLE.
+使用方式：
+1) 填写 INLINE_COOKIE（推荐）或设置环境变量 QQFARM_COOKIE。
+2) 在 CONFIG.ENABLE 中开关任务。
 
-Notes:
-- This is a skeleton that follows known legacy and historical endpoints.
-- It is designed to be easy to adapt once you capture live traffic.
+说明：
+- 以已知历史接口为基础的脚本骨架。
+- 方便后续结合抓包逐步完善与适配。
 */
 
 /* =======================
- *  CONFIG (EDIT HERE)
+ *  配置区（在此修改）
  * ======================= */
 var CONFIG = {
-  // Prefer full cookie string copied from web (ptcz/openId/accessToken/newuin/openid/token)
+  // 优先使用完整 Cookie（ptcz/openId/accessToken/newuin/openid/token/skey/uin）
   INLINE_COOKIE: "",
-  // WAP-only flow: uin/skey/g_tk are intentionally not used.
+  // 仅走 WAP：不使用 g_tk；skey/uin 仅作为 Cookie 字段参与请求。
 
-  // Ranch (牧场) host
+  // 牧场域名
   RANCH_BASE: "https://mcapp.z.qq.com",
   RANCH_SID: "c",
   RANCH_G_UT: "2",
@@ -26,11 +26,13 @@ var CONFIG = {
   RANCH_MAX_SERIAL: 6,
   RANCH_DIRECT_REFERER: "", // 直连牧场时的 Referer（空=使用农场首页）
 
-  // Farm WAP (for sale/signin)
+  // 农场 WAP（售卖/签到等）
   FARM_WAP_BASE: "https://mcapp.z.qq.com",
+  FARM_G_UT: "1", // 可手动指定，空则自动探测/沿用牧场 g_ut
 
-  // Fish pond (鱼塘)
+  // 鱼塘
   FISH_BASE: "https://mcapp.z.qq.com",
+  FISH_G_UT: "1", // 可手动指定，空则沿用农场 g_ut
   FISH_USE_ONEKEY_FEED: true,
   FISH_SELL_IDS: "",
   FISH_AUTO_BUY: false,
@@ -41,11 +43,11 @@ var CONFIG = {
   FISH_FALLBACK_INDEX: "",
   FISH_MAX_POND: 6,
 
-  // Crop to plant (legacy/modern if supported)
+  // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
   GRASS_THRESHOLD: 1000, // 牧草数量低于此值，优先种牧草
 
-  // Farm buy seed (for grass)
+  // 农场买种子（牧草）
   FARM_SEED_HOST: "https://farm.qzone.qq.com",
   FARM_APPID: "353",
   FARM_PLATFORM: "13",
@@ -57,10 +59,10 @@ var CONFIG = {
   FARM_BUY_GRASS_ON_EMPTY: true,
   FARM_TRY_ONEKEY_SOW: true,
   FARM_TRY_ONEKEY_DIG: true,
-  // WAP fallback passes (0 = no limit, default 2)
+  // WAP 兜底轮次（0=不限制，默认 2）
   FARM_WAP_MAX_PASS: 2,
 
-  // Rate control
+  // 频率控制
   WAIT_MS: 600,
   // 0 = 不限制，直到无空地/无种子/无入口
   MAX_REPEAT: 0,
@@ -68,7 +70,7 @@ var CONFIG = {
   RETRY_SHORT_BODY_LEN: 120,
   RETRY_WAIT_MS: 800,
 
-  // Toggle tasks
+  // 任务开关
   ENABLE: {
     harvest: true,
     scarify: true,
@@ -78,7 +80,7 @@ var CONFIG = {
     water: true,
     farm_sell_all: true,
     farm_signin: true,
-    // Ranch placeholders (need real endpoints)
+    // 牧场占位（需真实接口）
     ranch_harvest: true,
     ranch_feed: true,
     ranch_help: true,
@@ -90,7 +92,7 @@ var CONFIG = {
     fish_harvest: true
   },
 
-  // Debug
+  // 调试开关
   DEBUG: false
 };
 
@@ -104,6 +106,14 @@ var IS_SURGE = $.isSurge;
 var IS_NODE = $.isNode;
 var ENV_NAME = $.envName;
 var COOKIE_SOURCE = "";
+
+function getFarmGut() {
+  return CONFIG.FARM_G_UT || CONFIG.RANCH_G_UT || "1";
+}
+
+function getFishGut() {
+  return CONFIG.FISH_G_UT || CONFIG.FARM_G_UT || CONFIG.RANCH_G_UT || "1";
+}
 
 function Env(name) {
   var isQuanX = typeof $task !== "undefined";
@@ -277,7 +287,7 @@ function tryJson(text) {
   try {
     return JSON.parse(text);
   } catch (e) {
-    // try extract JSON object
+    // 尝试提取 JSON 子串
     var m = text.match(/\{[\s\S]*\}/);
     if (m) {
       try {
@@ -324,6 +334,9 @@ function logCookieHealth(cookie) {
   log("🍪 Cookie关键字段: " + (present.length ? present.join(", ") : "无"));
   if (!map.openid || !map.token) {
     log("⚠️ Cookie缺少 openid/token，6字段不完整，直连可能失败");
+  }
+  if (!map.skey || !map.uin) {
+    log("⚠️ Cookie缺少 skey/uin，农场/背包/鱼塘可能为空");
   }
 }
 
@@ -552,7 +565,7 @@ function resolveUrl(base, link) {
       return new URL(link, base).toString();
     }
   } catch (e) {}
-  // fallback
+  // 回退
   var m = base.match(/^(https?:\/\/[^/]+)/);
   if (link.charAt(0) === "/" && m) return m[1] + link;
   if (m) return m[1] + "/" + link;
@@ -580,7 +593,7 @@ function buildMcappLink(base, link) {
 
 function defaultMcappReferer() {
   var sid = CONFIG.RANCH_SID || "c";
-  var gut = CONFIG.RANCH_G_UT || "1";
+  var gut = getFarmGut();
   return CONFIG.FARM_WAP_BASE + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + gut;
 }
 
@@ -634,18 +647,24 @@ function ensureMcappAccess(cookie) {
       return getHtmlFollow(indexUrl, cookieVal, referer, label || "牧场", 0).then(function (resp) {
         var ctx = extractRanchContext(resp.body);
         setStartStats("ranch", parseCommonStats(resp.body));
-        if (ctx.sid && ctx.g_ut) {
+        if (ctx.sid && ctx.g_ut && isRanchHome(resp.body)) {
           CONFIG.RANCH_G_UT = ctx.g_ut || gut;
           LAST_RANCH_CONNECT = label || "直连";
           return { cookie: resp.cookie || cookieVal, ok: true, ranchCookie: resp.cookie || cookieVal };
         }
+        if (ctx.sid && ctx.g_ut && !isRanchHome(resp.body)) {
+          log("⚠️ 牧场直连返回非主页(" + (extractTitle(resp.body) || "无标题") + ")");
+        }
         return getHtmlFollow(altUrl, resp.cookie || cookieVal, referer, (label || "牧场") + "-兼容", 0).then(function (alt) {
           var ctx2 = extractRanchContext(alt.body);
-          if (ctx2.sid && ctx2.g_ut) {
+          if (ctx2.sid && ctx2.g_ut && isRanchHome(alt.body)) {
             CONFIG.RANCH_G_UT = ctx2.g_ut || gut;
             LAST_RANCH_CONNECT = (label || "直连") + "-兼容";
             setStartStats("ranch", parseCommonStats(alt.body));
             return { cookie: alt.cookie || resp.cookie || cookieVal, ok: true, ranchCookie: alt.cookie || resp.cookie || cookieVal };
+          }
+          if (ctx2.sid && ctx2.g_ut && !isRanchHome(alt.body)) {
+            log("⚠️ 牧场兼容入口非主页(" + (extractTitle(alt.body) || "无标题") + ")");
           }
           return step(idx + 1);
         });
@@ -680,6 +699,51 @@ function ensureMcappAccess(cookie) {
       log("⚠️ 牧场直连异常，尝试大乐斗跳转");
       return fetchFromDld(cookie);
     });
+}
+
+function ensureFarmAccess(cookie) {
+  var base = CONFIG.FARM_WAP_BASE;
+  var sid = CONFIG.RANCH_SID;
+  var list = [];
+  function push(v) {
+    if (!v) return;
+    var s = String(v);
+    if (list.indexOf(s) < 0) list.push(s);
+  }
+  push(CONFIG.FARM_G_UT);
+  push(CONFIG.RANCH_G_UT);
+  push("2");
+  push("1");
+  push("3");
+
+  function step(idx, curCookie) {
+    if (idx >= list.length) {
+      log("⚠️ 农场入口未确认");
+      return Promise.resolve({ ok: false, cookie: curCookie });
+    }
+    var gut = list[idx];
+    var url = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + gut;
+    return getHtmlFollow(url, curCookie, null, "农场探测", 0)
+      .then(function (ret) {
+        var html = ret.body || "";
+        if (isFarmHome(html)) {
+          CONFIG.FARM_G_UT = gut;
+          if (!CONFIG.FISH_G_UT) CONFIG.FISH_G_UT = gut;
+          LAST_FARM_HOME_HTML = html;
+          var fishEntry = extractFishEntryLink(html);
+          if (fishEntry) LAST_FISH_ENTRY_URL = fishEntry;
+          log("✅ 农场入口确认: g_ut=" + gut);
+          return { ok: true, cookie: ret.cookie || curCookie, html: html };
+        }
+        logDebug("农场入口非主页(" + (extractTitle(html) || "无标题") + ") g_ut=" + gut);
+        return step(idx + 1, ret.cookie || curCookie);
+      })
+      .catch(function () {
+        return step(idx + 1, curCookie);
+      });
+  }
+
+  return step(0, cookie);
 }
 
 function fetchFromDld(cookie) {
@@ -820,8 +884,10 @@ var STATUS_START = { farm: [], fish: [], ranch: [] };
 var STATUS_END = { farm: [], fish: [], ranch: [] };
 
 var LAST_FARM = null;
+var LAST_FARM_HOME_HTML = "";
 var FARM_CTX = { uinY: "", uIdx: "" };
 var LAST_RANCH = null;
+var LAST_RANCH_HOME_HTML = "";
 var LAST_MODE = "";
 var LAST_BASE = "";
 var LAST_GRASS_COUNT = null;
@@ -884,6 +950,7 @@ function buildRanchHeaders(cookie, referer) {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "identity",
     "Accept-Language": "zh-CN,zh;q=0.9",
     Cookie: cookie,
     Referer: referer || "https://mcapp.z.qq.com/"
@@ -895,6 +962,7 @@ function buildDldHeaders(cookie) {
     "User-Agent":
       "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
     Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Encoding": "identity",
     "Accept-Language": "zh-CN,zh;q=0.9",
     Cookie: cookie,
     Referer: "https://dld.qzapp.z.qq.com/"
@@ -980,6 +1048,13 @@ function cleanActionMsg(msg) {
   return msg;
 }
 
+function hasSignInEntry(html) {
+  if (!html) return false;
+  if (/signin=1/i.test(html)) return true;
+  var text = stripTags(html || "");
+  return /签到/.test(text);
+}
+
 function recordPlant(cid, count) {
   if (!count || count <= 0) return;
   PLANT_STATS.total += count;
@@ -1024,7 +1099,7 @@ function extractRanchContext(html) {
   ctx.lv = firstMatch(h, /lv=([0-9]+)/);
   ctx.money = firstMatch(h, /money=([0-9]+)/);
 
-  // food list
+  // 饲料列表
   var foodIds = {};
   var foodRe = /food=([0-9]+)/g;
   var fm;
@@ -1033,7 +1108,7 @@ function extractRanchContext(html) {
   }
   ctx.foods = Object.keys(foodIds);
 
-  // serial list
+  // 序列号列表
   var serials = {};
   var sRe = /serial=([0-9]+)/g;
   while ((fm = sRe.exec(h))) {
@@ -1175,12 +1250,33 @@ function extractFishEntryLink(html) {
 
 function isContinuePage(html) {
   var text = stripTags(html || "");
-  return /继续访问|立即进入|跳转|redirect/i.test(text);
+  return /继续访问触屏版|继续访问|立即进入|跳转|redirect/i.test(text);
 }
 
 function isFishPage(html) {
   var text = stripTags(html || "");
   return /鱼塘|鱼池|池塘|鱼苗|鱼食/.test(text);
+}
+
+function isFarmHome(html) {
+  var text = stripTags(html || "");
+  return text.indexOf("我的土地") >= 0 || text.indexOf("【我的土地】") >= 0;
+}
+
+function isRanchHome(html) {
+  var text = stripTags(html || "");
+  return text.indexOf("我的牧场") >= 0 || text.indexOf("牧场动物及产品") >= 0;
+}
+
+function isFishHome(html) {
+  var text = stripTags(html || "");
+  return /我的池塘|我的鱼塘|鱼塘|鱼池/.test(text);
+}
+
+function extractTitle(html) {
+  if (!html) return "";
+  var m = html.match(/<title>([^<]+)<\/title>/i);
+  return m ? m[1] : "";
 }
 
 function extractFishSeedIds(html) {
@@ -1555,9 +1651,10 @@ function buildBagTag(items, limit) {
 function refreshFinalStats(cookie) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
-  var farmUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
-  var ranchUrl = CONFIG.RANCH_BASE + "/mc/cgi-bin/wap_pasture_index?sid=" + sid + "&g_ut=" + g_ut;
+  var farmGut = getFarmGut();
+  var ranchGut = CONFIG.RANCH_G_UT;
+  var farmUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + farmGut;
+  var ranchUrl = CONFIG.RANCH_BASE + "/mc/cgi-bin/wap_pasture_index?sid=" + sid + "&g_ut=" + ranchGut;
   return getHtmlFollow(farmUrl, cookie, null, "农场统计", 0)
     .then(function (ret) {
       var stats = parseCommonStats(ret.body || "");
@@ -1579,7 +1676,7 @@ function captureFarmStartStats(cookie) {
   if (STATS_START.farm) return Promise.resolve();
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var farmUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
   return getHtmlFollow(farmUrl, cookie, null, "农场统计", 0)
     .then(function (ret) {
@@ -1608,7 +1705,7 @@ function captureStartRanchStatus(cookie) {
 
 function captureStartFishStatus(cookie) {
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFishGut();
   var fishUrl = CONFIG.FISH_BASE + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
   return getHtmlFollow(fishUrl, cookie, null, "鱼塘统计", 0)
     .then(function (ret) {
@@ -1621,7 +1718,7 @@ function captureStartFishStatus(cookie) {
 
 function refreshEndFishStatus(cookie) {
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFishGut();
   var fishUrl = CONFIG.FISH_BASE + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
   return getHtmlFollow(fishUrl, cookie, null, "鱼塘统计", 0)
     .then(function (ret) {
@@ -1652,7 +1749,7 @@ function mergeBagItems(map, items) {
 function fetchBagItems(cookie, type) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var baseUrl = base + "/nc/cgi-bin/wap_farm_user_bag?sid=" + sid + "&g_ut=" + g_ut;
   if (type) baseUrl += "&type=" + type;
   var curCookie = cookie;
@@ -1759,7 +1856,7 @@ function parseFarmSeedBag(html) {
     list.push({ id: id, count: count });
   }
   if (list.length > 0) return list;
-  // fallback: only cId list (no counts)
+  // 回退：仅 cId 列表（无数量）
   var re2 = /cId=([0-9]+)/g;
   while ((m = re2.exec(text))) {
     var cid = m[1];
@@ -1771,17 +1868,17 @@ function parseFarmSeedBag(html) {
 }
 
 function legacyFarmKey(farmTime) {
-  // Legacy flash-era farmKey (historical)
+  // 旧版 Flash 时代 farmKey（历史逻辑）
   var seed = "sdoit78sdopig7w34057";
   var start = (farmTime % 10) + 1;
   var sub = seed.substr(start, 20);
   return md5(String(farmTime) + sub);
 }
 
-// Minimal MD5 (ASCII only) for legacy farmKey; replace if needed.
+// 旧版 farmKey 的最小 MD5（仅 ASCII），需要时可替换。
 function md5(input) {
   if (!IS_NODE) {
-    // In proxy environments, skip MD5 and return empty.
+    // 代理环境下不计算 MD5，直接返回空
     return "";
   }
   var crypto = require("crypto");
@@ -1803,7 +1900,7 @@ function buildModernBody(params) {
 
 function pickMode(cookie) {
   if (CONFIG.MODE === "modern" || CONFIG.MODE === "legacy") return CONFIG.MODE;
-  // Auto: try modern, then legacy
+  // 自动：先尝试现代接口，再尝试旧接口
   return "auto";
 }
 
@@ -2470,7 +2567,7 @@ function parseSeedBuyForm(html) {
 function buyGrassSeedWap(cookie) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var lv = LAST_RANCH && LAST_RANCH.lv ? LAST_RANCH.lv : "";
   var listUrl =
     base +
@@ -2562,7 +2659,7 @@ function buyGrassSeedWap(cookie) {
 function buyFirstSeedWap(cookie, num) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var lv = LAST_RANCH && LAST_RANCH.lv ? LAST_RANCH.lv : "";
   var listUrl =
     base +
@@ -2647,7 +2744,7 @@ function farmSellAll(cookie) {
   if (!CONFIG.ENABLE.farm_sell_all) return Promise.resolve();
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var step1 = base + "/nc/cgi-bin/wap_farm_sale_all?step=1&sid=" + sid + "&g_ut=" + g_ut;
   return ranchGet(step1, cookie).then(function (html) {
     var link = firstMatch(html.replace(/&amp;/g, "&"), /(wap_farm_sale_all\\?[^\"\\s>]*step=2[^\"\\s>]*)/);
@@ -2667,9 +2764,13 @@ function farmSellAll(cookie) {
 
 function farmSignIn(cookie) {
   if (!CONFIG.ENABLE.farm_signin) return Promise.resolve();
+  if (LAST_FARM_HOME_HTML && !hasSignInEntry(LAST_FARM_HOME_HTML)) {
+    log("📅 农场签到: 页面无入口(疑似已签到)");
+    return Promise.resolve();
+  }
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var signUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut + "&signin=1";
   return ranchGet(signUrl, cookie).then(function (html) {
     var msg = extractWapHint(html) || extractMessage(html);
@@ -2699,7 +2800,7 @@ function farmOneKeyDig(cookie, deadPlaces) {
   if (!deadPlaces || deadPlaces.length === 0) return Promise.resolve(false);
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var url =
     base +
     "/nc/cgi-bin/wap_farm_dig?sid=" +
@@ -2725,7 +2826,7 @@ function farmOneKeySow(cookie, seedCid) {
   if (!CONFIG.FARM_TRY_ONEKEY_SOW) return Promise.resolve(false);
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var listUrl = base + "/nc/cgi-bin/wap_farm_seed_plant_list?sid=" + sid + "&g_ut=" + g_ut;
   var maxRepeat = CONFIG.MAX_REPEAT || 0;
   var didAny = false;
@@ -2939,7 +3040,7 @@ function buildFarmOptFallback(html) {
   var time = params.time || "-2147483648";
   var placeStr = params.places.join(",");
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   return {
     clearWeed: [
       "wap_farm_opt?sid=" +
@@ -3003,7 +3104,7 @@ function runFarmWap(cookie) {
   log("🧩 模式: WAP @ " + CONFIG.FARM_WAP_BASE);
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var statusUrl = base + "/nc/cgi-bin/wap_farm_status_list?sid=" + sid + "&g_ut=" + g_ut + "&page=0";
   var indexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
 
@@ -3014,10 +3115,14 @@ function runFarmWap(cookie) {
         return ranchGet(indexUrl, cookie)
           .then(function (html2) {
             setStartStats("farm", parseCommonStats(html2));
+            LAST_FARM_HOME_HTML = html2 || "";
             var fishEntry = extractFishEntryLink(html2);
             if (fishEntry) {
               LAST_FISH_ENTRY_URL = fishEntry;
               logDebug("鱼塘入口(农场页): " + fishEntry);
+            }
+            if (!isFarmHome(html2)) {
+              log("⚠️ 农场页面异常(" + (extractTitle(html2) || "无标题") + ")");
             }
             var links2 = extractFarmWapLinks(html2);
             var merged = mergeFarmLinks(links1, links2);
@@ -3034,6 +3139,7 @@ function runFarmWap(cookie) {
       .catch(function () {
         return ranchGet(indexUrl, cookie).then(function (html2) {
           setStartStats("farm", parseCommonStats(html2));
+          LAST_FARM_HOME_HTML = html2 || "";
           var fishEntry = extractFishEntryLink(html2);
           if (fishEntry) {
             LAST_FISH_ENTRY_URL = fishEntry;
@@ -3133,7 +3239,7 @@ function runFarmWap(cookie) {
 function fetchFarmSeedBag(cookie) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFarmGut();
   var urls = [
     base + "/nc/cgi-bin/wap_farm_user_bag?sid=" + sid + "&g_ut=" + g_ut,
     base + "/nc/cgi-bin/wap_farm_rep_list?sid=" + sid + "&g_ut=" + g_ut
@@ -3183,20 +3289,17 @@ function decidePlantSeed(cookie, grassCount) {
  * ======================= */
 function fishGet(url, cookie, referer) {
   var target = normalizeMcappUrl(url);
-  return getWithRetry({
-    method: "GET",
-    url: target,
-    headers: buildRanchHeaders(cookie, referer)
-  }, "鱼塘").then(function (resp) {
-    logDebug("鱼塘响应 " + resp.status + " 长度=" + (resp.body || "").length);
-    return resp.body || "";
+  return getHtmlFollow(target, cookie, referer || defaultMcappReferer(), "鱼塘", 0).then(function (resp) {
+    var body = resp && resp.body ? resp.body : "";
+    logDebug("鱼塘响应 " + (body ? body.length : 0));
+    return body || "";
   });
 }
 
 function runFish(base, cookie) {
   log("🐟 鱼塘模块: 启动");
   var sid = CONFIG.RANCH_SID;
-  var g_ut = CONFIG.RANCH_G_UT;
+  var g_ut = getFishGut();
   var indexUrl = base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
   var entryUrl = LAST_FISH_ENTRY_URL ? buildMcappLink(base, LAST_FISH_ENTRY_URL) : "";
   var farmIndexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
@@ -3343,7 +3446,7 @@ function execFishActions(base, cookie, ctx) {
       var indexParam = extractFishHarvestIndex(ctx.indexHtml || "");
       var links = ctx.harvestLinks || [];
       if (!indexParam && links.length === 0) {
-        // retry index once as fallback
+        // 兜底再拉一次首页
         return fishGet(base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + ctx.sid + "&g_ut=" + ctx.g_ut, cookie)
           .then(function (htmlRetry) {
             ctx.indexHtml = htmlRetry;
@@ -3625,6 +3728,10 @@ function probeRanchGrass(cookie) {
 
 function ranchSignIn(base, cookie, ctx) {
   if (!CONFIG.ENABLE.ranch_signin) return Promise.resolve();
+  if (LAST_RANCH_HOME_HTML && !hasSignInEntry(LAST_RANCH_HOME_HTML)) {
+    log("📅 牧场签到: 页面无入口(疑似已签到)");
+    return Promise.resolve();
+  }
   var url =
     base +
     "/mc/cgi-bin/wap_pasture_index?sid=" +
@@ -3671,6 +3778,10 @@ function runRanch(base, cookie) {
   var indexUrl = base + "/mc/cgi-bin/wap_pasture_index?sid=" + sid + "&g_ut=" + g_ut;
   return ranchGet(indexUrl, cookie)
     .then(function (html) {
+      LAST_RANCH_HOME_HTML = html || "";
+      if (!isRanchHome(html)) {
+        log("⚠️ 牧场页面异常(" + (extractTitle(html) || "无标题") + ")");
+      }
       var ctx = extractRanchContext(html);
       ctx.sid = ctx.sid || sid;
       ctx.g_ut = ctx.g_ut || g_ut;
@@ -3931,7 +4042,10 @@ function main() {
       }
       cookie = res.cookie || cookie;
       ranchCookie = res.ranchCookie || cookie;
-      return probeRanchGrass(ranchCookie);
+      return ensureFarmAccess(cookie).then(function (farmRes) {
+        if (farmRes && farmRes.cookie) cookie = farmRes.cookie;
+        return probeRanchGrass(ranchCookie);
+      });
     })
     .then(function (grassCount) {
       return refreshBagStats(cookie).then(function () {

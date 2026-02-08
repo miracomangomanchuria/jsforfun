@@ -1,5 +1,5 @@
 /*
-大乐斗 Cookie 获取脚本（六字段）
+大乐斗 Cookie 获取脚本（八字段）
 
 【抓包方式】
 1) 在 QX 添加重写：
@@ -10,10 +10,11 @@
 在 QX 的 MITM 中添加：dld.qzapp.z.qq.com
 
 【保存字段】
-ptcz、openId、accessToken、newuin、openid、token
+ptcz、openId、accessToken、newuin、openid、token、skey、uin
 
 说明：
 - 牧场直连更依赖 openid + token
+- 农场/鱼塘/背包更依赖 skey + uin
 
 存储键：qcdld_Cookie
 */
@@ -39,7 +40,7 @@ const $ = new API("qcdld_Cookie");
     return;
   }
 
-  const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "token"];
+  const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "token", "skey", "uin"];
   const data = {};
   for (let i = 0; i < KEYS.length; i++) {
     const k = KEYS[i];
@@ -88,17 +89,15 @@ const $ = new API("qcdld_Cookie");
 
   if (old !== value) {
     $.write(value, "qcdld_Cookie");
+    console.log("qcdld_Cookie 更新成功");
+    console.log("旧值: " + (old || "无"));
+    console.log("新值: " + value);
+    console.log("已捕获字段: " + capturedKeys);
     $.notify("qcdld_Cookie 更新成功", "", value);
   } else {
-    if (DEBUG) {
-      $.notify(
-        "qcdld_Cookie 未变化",
-        "版本 " + VERSION,
-        "旧值: " + (old || "无") + "\n已捕获: " + capturedKeys
-      );
-    } else {
-      console.log("qcdld_Cookie 未变化");
-    }
+    console.log("qcdld_Cookie 未变化");
+    console.log("旧值: " + (old || "无"));
+    console.log("已捕获字段: " + capturedKeys);
   }
 })()
   .catch((e) => {
