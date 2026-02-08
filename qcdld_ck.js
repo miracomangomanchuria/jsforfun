@@ -2,10 +2,9 @@
 大乐斗 Cookie 获取脚本（六字段）
 
 【抓包方式】
-1) 在 QX 添加重写（建议同时覆盖 dld + mcapp）：
-   ^https?:\/\/(dld\.qzapp\.z\.qq\.com|mcapp\.z\.qq\.com)\/.* ^GET url-and-header script-request-header qcdld_ck.js
-2) 打开大乐斗简版页面 -> 点击“QQ农场牧场版” -> 继续访问触屏版。
-   当进入牧场主页后，再触发一次请求（例如刷新），即可写入完整字段。
+1) 在 QX 添加重写：
+   https://dld.qzapp.z.qq.com/qpet/cgi-bin/phonepk?cmd=index&channel=0 ^GET url-and-header script-request-header qcdld_ck.js
+2) 打开大乐斗简版页面，触发请求即可写入。
 
 【MITM】
 在 QX 的 MITM 中添加：dld.qzapp.z.qq.com
@@ -16,7 +15,7 @@ ptcz、openId、accessToken、newuin、openid、token
 说明：
 - 牧场直连更依赖 openid + token
 
-存储键：#qcdld_Cookie
+存储键：qcdld_Cookie
 */
 
 const VERSION = "2026-02-08.v3";
@@ -48,7 +47,7 @@ const $ = new API("qcdld_Cookie");
     if (v) data[k] = v;
   }
 
-  const old = $.read("#qcdld_Cookie") || "";
+  const old = $.read("qcdld_Cookie") || "";
   const oldMap = parseCookieMap(old);
   const capturedKeys = Object.keys(data)
     .filter((k) => data[k])
@@ -88,7 +87,7 @@ const $ = new API("qcdld_Cookie");
   const value = parts.join("; ");
 
   if (old !== value) {
-    $.write(value, "#qcdld_Cookie");
+    $.write(value, "qcdld_Cookie");
     $.notify("qcdld_Cookie 更新成功", "", value);
   } else {
     if (DEBUG) {
