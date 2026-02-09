@@ -401,9 +401,6 @@ function logCookieHealth(cookie) {
   if (!map.openid || !map.token) {
     log("⚠️ Cookie缺少 openid/token，6字段不完整，直连可能失败");
   }
-  if (!map.skey || !map.uin) {
-    log("⚠️ Cookie缺少 skey/uin，农场/背包/鱼塘可能为空");
-  }
   if (map.openid && map.openId && map.openid === map.openId) {
     log("⚠️ Cookie openid 与 openId 值相同，疑似抓包混淆（会导致请求参数错误）");
   }
@@ -1158,7 +1155,8 @@ function parseMoneyFromMsg(msg) {
 
 function isSuccessMsg(msg) {
   if (!msg) return false;
-  return msg.indexOf("成功") >= 0 || msg.indexOf("收获") >= 0 || msg.indexOf("获得") >= 0;
+  if (/(没什么好收获|不需要收获|无需收获|不需要|无需)/.test(msg)) return false;
+  return /(成功|获得|完成|已收获|已浇水|已除草|已除虫)/.test(msg);
 }
 
 function buildFishFallbackIndex() {
@@ -1272,10 +1270,10 @@ function extractFishFertilizeIndices(html) {
 function extractFishHarvestLinks(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var links = [];
-  var re = /wap_farm_fish_harvest[^\"\\s>]+/g;
+  var re = /wap_farm_fish_harvest[^\"'>]*/g;
   var m;
   while ((m = re.exec(h))) {
-    links.push(m[0]);
+    links.push(m[0].replace(/\\s+/g, ""));
   }
   return links;
 }
@@ -1288,15 +1286,15 @@ function extractFishHarvestIndex(html) {
 
 function extractFishPlantLink(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/wap_fish_plant\\?[^\"\\s>]+/);
-  return m ? m[0] : "";
+  var m = h.match(/wap_fish_plant\\?[^\"'>]*/);
+  return m ? m[0].replace(/\\s+/g, "") : "";
 }
 
 function extractFishBuyFids(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var ids = [];
   var seen = {};
-  var re = /wap_fish_buy_pre_new\\?[^\"\\s>]*fid=([0-9]+)/g;
+  var re = /wap_fish_buy_(?:pre_)?new\\?[^\"'>]*fid=([0-9]+)/g;
   var m;
   while ((m = re.exec(h))) {
     if (!seen[m[1]]) {
@@ -1311,7 +1309,7 @@ function extractFishBuyOptions(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var list = [];
   var seen = {};
-  var re = /<p>\\s*\\d+\\.\\s*([^<(]+?)\\s*\\([^)]*\\)[\\s\\S]{0,120}?wap_fish_buy_pre_new\\?[^\"'>]*fid=([0-9]+)/g;
+  var re = /<p>\\s*\\d+\\.\\s*([^<(]+?)\\s*\\([^)]*\\)[\\s\\S]{0,200}?wap_fish_buy_(?:pre_)?new\\?[^\"'>]*fid=([0-9]+)/g;
   var m;
   while ((m = re.exec(h))) {
     var name = (m[1] || "").replace(/\\s+/g, " ").trim();
@@ -1341,10 +1339,10 @@ function extractFishEmptyPonds(html) {
 
 function extractFishEntryLink(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/wap_(?:farm_)?fish_index\\?[^\"\\s>]+/);
-  if (m) return m[0];
-  m = h.match(/fish_index\\?[^\"\\s>]+/);
-  return m ? m[0] : "";
+  var m = h.match(/wap_(?:farm_)?fish_index\\?[^\"'>]*/);
+  if (m) return m[0].replace(/\\s+/g, "");
+  m = h.match(/fish_index\\?[^\"'>]*/);
+  return m ? m[0].replace(/\\s+/g, "") : "";
 }
 
 function isContinuePage(html) {
@@ -3099,6 +3097,9 @@ function extractFarmWapLinks(html) {
     }
   }
   links.harvest = uniqLinks(links.harvest);
+  links.harvest = links.harvest.filter(function (link) {
+    return /place=/.test(link) || /landid=/.test(link);
+  });
   links.clearWeed = uniqLinks(links.clearWeed);
   links.spraying = uniqLinks(links.spraying);
   links.water = uniqLinks(links.water);
@@ -3316,12 +3317,13 @@ function runFarmWap(cookie) {
             msg = extractWapHint(html) || msg;
           }
           msg = cleanActionMsg(msg);
-          if (isSuccessMsg(msg)) did = true;
+          var ok = isSuccessMsg(msg);
+          if (ok) did = true;
           if (msg) log(label + ": " + msg);
           else if (label.indexOf("除草") >= 0 || label.indexOf("除虫") >= 0 || label.indexOf("浇水") >= 0) {
             log(label + ": 已尝试");
           }
-          if (statKey && ACTION_STATS[statKey] !== undefined) ACTION_STATS[statKey] += 1;
+          if (ok && statKey && ACTION_STATS[statKey] !== undefined) ACTION_STATS[statKey] += 1;
         })
         .then(function () {
           return sleep(CONFIG.WAIT_MS);
@@ -3453,7 +3455,10 @@ function runFish(base, cookie) {
   var sid = CONFIG.RANCH_SID;
   var g_ut = getFishGut();
   var indexUrl = base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
-  var entryUrl = LAST_FISH_ENTRY_URL ? buildMcappLink(base, LAST_FISH_ENTRY_URL) : "";
+  var entryUrl =
+    LAST_FISH_ENTRY_URL && /sid=/.test(LAST_FISH_ENTRY_URL) && /g_ut=/.test(LAST_FISH_ENTRY_URL)
+      ? buildMcappLink(base, LAST_FISH_ENTRY_URL)
+      : "";
   var farmIndexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
 
   function buildCtx(html) {
@@ -3503,7 +3508,7 @@ function runFish(base, cookie) {
     return ranchGet(farmIndexUrl, cookie)
       .then(function (html) {
         var link = extractFishEntryLink(html);
-        if (link) {
+        if (link && /sid=/.test(link) && /g_ut=/.test(link)) {
           LAST_FISH_ENTRY_URL = link;
           return buildMcappLink(base, link);
         }
@@ -3566,22 +3571,39 @@ function autoPlantFishFromBag(base, cookie, ctx) {
           "&pnum=" +
           empty +
           "&flag=1&time=-2147483648";
-        return fishGet(seedUrl, cookie).then(function (html2) {
-          var link = extractFishPlantLink(html2);
-          if (!link) {
-            log("🪣 放养: 未发现可放养入口");
-            return;
+      return fishGet(seedUrl, cookie).then(function (html2) {
+        var link = extractFishPlantLink(html2);
+        var needNum = Math.min(empty, total);
+        if (!link) {
+          var fid = firstMatch(html2, /fid=([0-9]+)/);
+          if (fid) {
+            link =
+              "wap_fish_plant?sid=" +
+              sid +
+              "&g_ut=" +
+              g_ut +
+              "&fid=" +
+              fid +
+              "&flag=1&step=2&num=" +
+              needNum;
           }
-          var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
-          return fishGet(url, cookie).then(function (html3) {
-            var msg = extractMessage(html3);
-            if (msg) log("🪣 放养: " + msg);
-            else log("🪣 放养: 已提交");
+        }
+        if (!link) {
+          log("🪣 放养: 未发现可放养入口");
+          return;
+        }
+        var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
+        return fishGet(url, cookie).then(function (html3) {
+          var msg = extractMessage(html3);
+          if (msg) log("🪣 放养: " + msg);
+          else log("🪣 放养: 已提交");
+          if (!/(对不起|没有足够|无法|不足|失败|未满足)/.test(msg || "")) {
             FISH_STATS.buy += 1;
-          });
+          }
         });
       });
-    })
+    });
+  })
     .catch(function (e) {
       log("🪣 放养失败: " + e);
     });
