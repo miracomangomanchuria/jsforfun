@@ -939,6 +939,7 @@ var FISH_STATS = {
   harvest: 0,
   sell: 0,
   buy: 0,
+  plant: 0,
   errors: 0
 };
 
@@ -950,7 +951,10 @@ var PLANT_STATS = {
 var MONEY_STATS = {
   farmSell: 0,
   ranchSell: 0,
-  fishSell: 0
+  fishSell: 0,
+  farmBuy: 0,
+  grassBuy: 0,
+  fishBuy: 0
 };
 
 var BAG_STATS = {
@@ -975,6 +979,7 @@ var LAST_GRASS_COUNT = null;
 var PLANT_SEED_LOCKED = false;
 var LAST_RANCH_CONNECT = "";
 var LAST_FISH_ENTRY_URL = "";
+var PURCHASE_LOGS = [];
 
 function bannerStart() {
   log(LINE);
@@ -1068,8 +1073,11 @@ function stripTags(html) {
 
 function extractMessage(html) {
   var text = stripTags(html);
+  if (/没什么好收获/.test(text)) return "这块地没什么好收获的";
   var m = text.match(/(成功|失败|获得|收获|无法|不能)[^。！!]{0,40}/);
-  return m ? m[0] : "";
+  if (!m) return "";
+  if (m[0] === "收获的" && /没什么好收获/.test(text)) return "这块地没什么好收获的";
+  return m[0];
 }
 
 function extractWapHint(html) {
@@ -1153,6 +1161,15 @@ function parseMoneyFromMsg(msg) {
   return 0;
 }
 
+function parseSpendFromMsg(msg) {
+  if (!msg) return 0;
+  var m = msg.match(/花费\\s*([0-9]+)\\s*个?金币/);
+  if (m) return Number(m[1] || 0);
+  m = msg.match(/共花费\\s*([0-9]+)\\s*个?金币/);
+  if (m) return Number(m[1] || 0);
+  return 0;
+}
+
 function isSuccessMsg(msg) {
   if (!msg) return false;
   if (/(没什么好收获|不需要收获|无需收获|不需要|无需)/.test(msg)) return false;
@@ -1203,9 +1220,10 @@ function extractRanchContext(html) {
 
 function extractHelpParams(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var pos = firstMatch(h, /pos=([0-9]+)/);
-  var num = firstMatch(h, /num=([0-9]+)/);
-  var type = firstMatch(h, /type=([0-9]+)/);
+  var hh = h.replace(/\s+/g, "");
+  var pos = firstMatch(hh, /pos=([0-9]+)/);
+  var num = firstMatch(hh, /num=([0-9]+)/);
+  var type = firstMatch(hh, /type=([0-9]+)/);
   if (pos && num && type) {
     return { pos: pos, num: num, type: type };
   }
@@ -1214,10 +1232,10 @@ function extractHelpParams(html) {
 
 function extractHelpLinks(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var re = /wap_pasture_help\?[^\"\\s>]+/g;
+  var re = /wap_pasture_help\\?[^\"'>]*/g;
   var list = [];
   var m;
-  while ((m = re.exec(h))) list.push(m[0]);
+  while ((m = re.exec(h))) list.push(m[0].replace(/\\s+/g, ""));
   return uniqLinks(list);
 }
 
@@ -1319,6 +1337,12 @@ function extractFishBuyOptions(html) {
     list.push({ fid: fid, name: name });
   }
   return list;
+}
+
+function extractFishNameFromPre(html) {
+  var text = stripTags(html || "");
+  var m = text.match(/([^\s]+)鱼苗/);
+  return m ? m[1] : "";
 }
 
 function extractFishMaxBuy(html) {
@@ -1469,6 +1493,11 @@ function groupStatusItems(list) {
     out.push(k + "×" + map[k]);
   }
   return out;
+}
+
+function countStatusItems(list) {
+  if (!list || !list.length) return 0;
+  return list.length;
 }
 
 function parseFarmStatus(html) {
@@ -1733,6 +1762,51 @@ function formatStatsLine(label, start, end) {
     moneyDelta +
     ")"
   );
+}
+
+function summarizePurchases() {
+  if (!PURCHASE_LOGS || PURCHASE_LOGS.length === 0) return "";
+  var map = {};
+  for (var i = 0; i < PURCHASE_LOGS.length; i++) {
+    var it = PURCHASE_LOGS[i];
+    var key = it.name || "未知";
+    if (!map[key]) map[key] = { count: 0, cost: 0 };
+    map[key].count += it.count || 0;
+    map[key].cost += it.cost || 0;
+  }
+  var parts = [];
+  for (var k in map) {
+    if (!map.hasOwnProperty(k)) continue;
+    var item = map[k];
+    var seg = k;
+    if (item.count) seg += "×" + item.count;
+    if (item.cost) seg += "(" + item.cost + ")";
+    parts.push(seg);
+  }
+  return parts.join("；");
+}
+
+function hasMatureStatus(list) {
+  if (!list || list.length === 0) return false;
+  for (var i = 0; i < list.length; i++) {
+    var st = list[i].status || "";
+    if (/(成熟|可收获|待收)/.test(st)) return true;
+  }
+  return false;
+}
+
+function buildNoActionHint() {
+  var hints = [];
+  if (ACTION_STATS.harvest === 0 && !hasMatureStatus(STATUS_START.farm)) {
+    hints.push("农场未成熟");
+  }
+  if (RANCH_STATS.harvest === 0 && RANCH_STATS.product === 0 && !hasMatureStatus(STATUS_START.ranch)) {
+    hints.push("牧场未成熟");
+  }
+  if (FISH_STATS.harvest === 0 && !hasMatureStatus(STATUS_START.fish)) {
+    hints.push("鱼塘未成熟");
+  }
+  return hints.length ? hints.join("；") : "";
 }
 
 function sortBagItems(items) {
@@ -2089,6 +2163,8 @@ function fishSummaryLine() {
     FISH_STATS.feed +
     " 收获=" +
     FISH_STATS.harvest +
+    " 放养=" +
+    FISH_STATS.plant +
     " 售卖=" +
     FISH_STATS.sell +
     " 购买=" +
@@ -2140,6 +2216,8 @@ function summaryLines() {
     FISH_STATS.feed +
     " 收" +
     FISH_STATS.harvest +
+    " 下" +
+    FISH_STATS.plant +
     " 卖" +
     FISH_STATS.sell +
     " 买" +
@@ -2179,10 +2257,12 @@ function buildNotifyBody() {
     RANCH_STATS.sell +
     " | 🐟收" +
     FISH_STATS.harvest +
-    " 售" +
-    FISH_STATS.sell +
+    " 下" +
+    FISH_STATS.plant +
     " 买" +
     FISH_STATS.buy +
+    " 售" +
+    FISH_STATS.sell +
     " · ⚠️" +
     totalErr +
     tag;
@@ -2197,13 +2277,28 @@ function buildNotifyBody() {
   var bagSeedTag = buildBagTag(BAG_STATS.seed.items, 3);
   var bagFishTag = buildBagTag(BAG_STATS.fish.items, 3);
 
+  var spendParts = [];
+  var spendSum = MONEY_STATS.farmBuy + MONEY_STATS.grassBuy + MONEY_STATS.fishBuy;
+  if (MONEY_STATS.farmBuy > 0) spendParts.push("种子" + MONEY_STATS.farmBuy);
+  if (MONEY_STATS.grassBuy > 0) spendParts.push("牧草" + MONEY_STATS.grassBuy);
+  if (MONEY_STATS.fishBuy > 0) spendParts.push("鱼苗" + MONEY_STATS.fishBuy);
   var moneyLine =
     "卖出：农场" +
     MONEY_STATS.farmSell +
     " 牧场" +
     MONEY_STATS.ranchSell +
     " 鱼塘" +
-    MONEY_STATS.fishSell;
+    MONEY_STATS.fishSell +
+    (spendParts.length ? " | 花费：" + spendParts.join(" ") : "");
+  var purchaseLine = summarizePurchases();
+  if (!purchaseLine) {
+    var d =
+      STATS_START.farm && STATS_END.farm && STATS_START.farm.money != null && STATS_END.farm.money != null
+        ? STATS_END.farm.money - STATS_START.farm.money
+        : 0;
+    if (d < 0 && spendSum === 0) purchaseLine = "金币减少，原因未记录(可能购买/系统扣费)";
+  }
+  var noActionHint = buildNoActionHint();
 
   var farmLine =
     "农场：收" +
@@ -2233,6 +2328,8 @@ function buildNotifyBody() {
     " 收" +
     FISH_STATS.harvest +
     " 下" +
+    FISH_STATS.plant +
+    " 买" +
     FISH_STATS.buy +
     " 卖" +
     FISH_STATS.sell;
@@ -2253,6 +2350,8 @@ function buildNotifyBody() {
     "🎒 背包 | 种子[" + bagSeedTag + "] 鱼苗[" + bagFishTag + "]",
     "🌱 种植 | " + seedLine,
     "💰 资金 | " + moneyLine,
+    purchaseLine ? "🧾 购买 | " + purchaseLine : "",
+    noActionHint ? "⏳ 提示 | " + noActionHint : "",
     "🧩 动作 | " + farmLine + " / " + ranchLine + " / " + fishLine,
     "⏱ 用时 | " + (costSec ? costSec + "s" : "未知")
   ].join("\n");
@@ -2728,6 +2827,11 @@ function buyGrassSeedWap(cookie) {
             var msg = extractWapHint(resp.body) || extractMessage(resp.body);
             if (msg && msg.indexOf("成功") >= 0) {
               log("🌾 买牧草: " + msg);
+              var spend = parseSpendFromMsg(msg);
+              if (spend > 0) {
+                MONEY_STATS.grassBuy += spend;
+                PURCHASE_LOGS.push({ name: "牧草", count: CONFIG.FARM_GRASS_BUY_NUM, cost: spend });
+              }
               return true;
             }
             if (msg) log("🌾 买牧草: " + msg);
@@ -2800,6 +2904,11 @@ function buyFirstSeedWap(cookie, num) {
           .then(function (resp) {
             var msg = extractWapHint(resp.body) || extractMessage(resp.body);
             if (msg) log("🧺 买种子: " + msg);
+            var spend = parseSpendFromMsg(msg);
+            if (spend > 0) {
+              MONEY_STATS.farmBuy += spend;
+              PURCHASE_LOGS.push({ name: "种子", count: num, cost: spend });
+            }
             return cid;
           })
           .catch(function (e) {
@@ -2852,7 +2961,11 @@ function farmSellAll(cookie) {
   var g_ut = getFarmGut();
   var step1 = base + "/nc/cgi-bin/wap_farm_sale_all?step=1&sid=" + sid + "&g_ut=" + g_ut;
   return ranchGet(step1, cookie).then(function (html) {
-    var link = firstMatch(html.replace(/&amp;/g, "&"), /(wap_farm_sale_all\\?[^\"\\s>]*step=2[^\"\\s>]*)/);
+    var h = html.replace(/&amp;/g, "&");
+    var link = firstMatch(h, /(wap_farm_sale_all\\?[^\"\\s>]*step=2[^\"\\s>]*)/);
+    if (link && (!/sid=/.test(link) || !/g_ut=/.test(link))) {
+      link = "";
+    }
     if (!link) {
       link = "wap_farm_sale_all?step=2&sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
     }
@@ -3461,14 +3574,17 @@ function runFish(base, cookie) {
       : "";
   var farmIndexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
 
-  function buildCtx(html) {
+function buildCtx(html) {
     return {
       sid: sid,
       g_ut: g_ut,
       lv: extractFishLevel(html) || "",
       indices: extractFishFertilizeIndices(html),
       harvestLinks: extractFishHarvestLinks(html),
-      indexHtml: html
+      indexHtml: html,
+      hasFeedEntry:
+        (html || "").indexOf("fish_fertilize") >= 0 ||
+        (html || "").indexOf("喂鱼食") >= 0
     };
   }
 
@@ -3489,7 +3605,8 @@ function runFish(base, cookie) {
       var ctx = buildCtx(html);
       var noEntry =
         (!ctx.indices || ctx.indices.length === 0) &&
-        (!ctx.harvestLinks || ctx.harvestLinks.length === 0);
+        (!ctx.harvestLinks || ctx.harvestLinks.length === 0) &&
+        !ctx.hasFeedEntry;
       if (noEntry && depth < 2) {
         var next = extractMcappLink(html) || extractFishEntryLink(html);
         if (next) {
@@ -3551,12 +3668,18 @@ function autoPlantFishFromBag(base, cookie, ctx) {
   return fishGet(indexUrl, cookie)
     .then(function (html) {
       ctx.indexHtml = html || ctx.indexHtml;
+      var maxPond = CONFIG.FISH_MAX_POND || 6;
+      var curCount = countStatusItems(STATUS_START.fish);
+      if (FISH_STATS.harvest === 0 && curCount >= maxPond) {
+        log("🪣 放养: 空池塘=0");
+        return;
+      }
       var empty = extractFishEmptyPonds(html || "");
       if (empty === 0) {
         log("🪣 放养: 空池塘=0");
         return;
       }
-      if (empty === null || empty === undefined) empty = CONFIG.FISH_MAX_POND || 6;
+      if (empty === null || empty === undefined) empty = maxPond;
       return ensureFishSeedTotal(cookie).then(function (total) {
         if (!total || total <= 0) {
           log("🪣 放养: 背包无鱼苗");
@@ -3571,39 +3694,39 @@ function autoPlantFishFromBag(base, cookie, ctx) {
           "&pnum=" +
           empty +
           "&flag=1&time=-2147483648";
-      return fishGet(seedUrl, cookie).then(function (html2) {
-        var link = extractFishPlantLink(html2);
-        var needNum = Math.min(empty, total);
-        if (!link) {
-          var fid = firstMatch(html2, /fid=([0-9]+)/);
-          if (fid) {
-            link =
-              "wap_fish_plant?sid=" +
-              sid +
-              "&g_ut=" +
-              g_ut +
-              "&fid=" +
-              fid +
-              "&flag=1&step=2&num=" +
-              needNum;
+        return fishGet(seedUrl, cookie).then(function (html2) {
+          var link = extractFishPlantLink(html2);
+          var needNum = Math.min(empty, total);
+          if (!link) {
+            var fid = firstMatch(html2, /fid=([0-9]+)/);
+            if (fid) {
+              link =
+                "wap_fish_plant?sid=" +
+                sid +
+                "&g_ut=" +
+                g_ut +
+                "&fid=" +
+                fid +
+                "&flag=1&step=2&num=" +
+                needNum;
+            }
           }
-        }
-        if (!link) {
-          log("🪣 放养: 未发现可放养入口");
-          return;
-        }
-        var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
-        return fishGet(url, cookie).then(function (html3) {
-          var msg = extractMessage(html3);
-          if (msg) log("🪣 放养: " + msg);
-          else log("🪣 放养: 已提交");
-          if (!/(对不起|没有足够|无法|不足|失败|未满足)/.test(msg || "")) {
-            FISH_STATS.buy += 1;
+          if (!link) {
+            log("🪣 放养: 未发现可放养入口");
+            return;
           }
+          var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
+          return fishGet(url, cookie).then(function (html3) {
+            var msg = extractMessage(html3);
+            if (msg) log("🪣 放养: " + msg);
+            else log("🪣 放养: 已提交");
+            if (!/(对不起|没有足够|无法|不足|失败|未满足|输入有误|系统繁忙|稍候)/.test(msg || "")) {
+              FISH_STATS.plant += 1;
+            }
+          });
         });
       });
-    });
-  })
+    })
     .catch(function (e) {
       log("🪣 放养失败: " + e);
     });
@@ -3615,6 +3738,7 @@ function execFishActions(base, cookie, ctx) {
       if (!CONFIG.ENABLE.fish_feed) return;
       var hasFeedEntry =
         (ctx.indices && ctx.indices.length > 0) ||
+        ctx.hasFeedEntry ||
         (ctx.indexHtml && ctx.indexHtml.indexOf("fish_fertilize") >= 0) ||
         (ctx.indexHtml && ctx.indexHtml.indexOf("喂鱼食") >= 0);
       if (!hasFeedEntry) {
@@ -3880,6 +4004,7 @@ function execFishActions(base, cookie, ctx) {
           return fishGet(preUrl, cookie).then(function (html) {
             var maxBuy = extractFishMaxBuy(html);
             var empty = extractFishEmptyPonds(html);
+            var fishName = extractFishNameFromPre(html);
             var target = CONFIG.FISH_MIN_SEED || 0;
             var buyNum = needNum || CONFIG.FISH_BUY_NUM || 0;
             if (target > 0 && buyNum <= 0) {
@@ -3903,8 +4028,17 @@ function execFishActions(base, cookie, ctx) {
               var msg = extractMessage(html2);
               if (msg) log("🧾 买鱼: " + msg + (target > 0 ? " (补足至 " + target + ")" : ""));
               else log("🧾 买鱼: 已提交 " + buyNum + " 条");
-              if (!/(对不起|没有足够|无法|不足|失败|未满足|输入有误)/.test(msg || "")) {
+              if (!/(对不起|没有足够|无法|不足|失败|未满足|输入有误|系统繁忙|稍候)/.test(msg || "")) {
                 FISH_STATS.buy += 1;
+                var spend = parseSpendFromMsg(msg);
+                if (spend > 0) {
+                  MONEY_STATS.fishBuy += spend;
+                  PURCHASE_LOGS.push({
+                    name: fishName || ("鱼苗#" + fid),
+                    count: buyNum,
+                    cost: spend
+                  });
+                }
               }
             });
           });
