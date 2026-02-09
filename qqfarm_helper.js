@@ -3265,7 +3265,7 @@ function runFarmWap(cookie) {
             setStartStats("farm", parseCommonStats(html2));
             LAST_FARM_HOME_HTML = html2 || "";
             var fishEntry = extractFishEntryLink(html2);
-            if (fishEntry) {
+            if (fishEntry && /sid=/.test(fishEntry) && /g_ut=/.test(fishEntry)) {
               LAST_FISH_ENTRY_URL = fishEntry;
               logDebug("鱼塘入口(农场页): " + fishEntry);
             }
@@ -3291,7 +3291,7 @@ function runFarmWap(cookie) {
           setStartStats("farm", parseCommonStats(html2));
           LAST_FARM_HOME_HTML = html2 || "";
           var fishEntry = extractFishEntryLink(html2);
-          if (fishEntry) {
+          if (fishEntry && /sid=/.test(fishEntry) && /g_ut=/.test(fishEntry)) {
             LAST_FISH_ENTRY_URL = fishEntry;
             logDebug("鱼塘入口(农场页): " + fishEntry);
           }
@@ -3817,8 +3817,8 @@ function execFishActions(base, cookie, ctx) {
       if (!CONFIG.FISH_AUTO_BUY) return;
       var sid = ctx.sid;
       var g_ut = ctx.g_ut;
-      var listUrl = base + "/nc/cgi-bin/wap_fish_buy_new?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
-      var listUrl2 = base + "/nc/cgi-bin/wap_fish_list_new?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
+      var listUrl = base + "/nc/cgi-bin/wap_fish_list_new?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
+      var listUrl2 = listUrl;
       var needNum = 0;
 
       function pickTopChoice(html) {
@@ -3894,21 +3894,18 @@ function execFishActions(base, cookie, ctx) {
             if (empty === 0) {
               log("🧾 买鱼: 空池塘=0，尝试补足鱼苗至 " + target);
             }
-            var url =
-              base +
-              "/nc/cgi-bin/wap_fish_plant?sid=" +
-              sid +
-              "&g_ut=" +
-              g_ut +
-              "&fid=" +
-              fid +
-              "&flag=1&step=2&num=" +
-              buyNum;
-            return fishGet(url, cookie).then(function (html2) {
+            var url = base + "/nc/cgi-bin/wap_fish_buy_new?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
+            var body = "num=" + buyNum + "&fid=" + fid + "&sb=" + encodeURIComponent("确定");
+            var headers = buildRanchHeaders(cookie, preUrl);
+            headers["Content-Type"] = "application/x-www-form-urlencoded";
+            return httpRequest({ method: "POST", url: url, headers: headers, body: body }).then(function (resp2) {
+              var html2 = resp2.body || "";
               var msg = extractMessage(html2);
               if (msg) log("🧾 买鱼: " + msg + (target > 0 ? " (补足至 " + target + ")" : ""));
               else log("🧾 买鱼: 已提交 " + buyNum + " 条");
-              FISH_STATS.buy += 1;
+              if (!/(对不起|没有足够|无法|不足|失败|未满足|输入有误)/.test(msg || "")) {
+                FISH_STATS.buy += 1;
+              }
             });
           });
         })
