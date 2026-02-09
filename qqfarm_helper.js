@@ -48,7 +48,7 @@ var CONFIG = {
 
   // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
-  GRASS_THRESHOLD: 1000, // 牧草数量低于此值，优先种牧草
+  GRASS_THRESHOLD: 2000, // 牧草数量低于此值，优先种牧草
 
   // 农场买种子（牧草）
   FARM_SEED_HOST: "https://farm.qzone.qq.com",
@@ -981,6 +981,7 @@ var LAST_RANCH_HOME_HTML = "";
 var LAST_MODE = "";
 var LAST_BASE = "";
 var LAST_GRASS_COUNT = null;
+var GRASS_LOW_SEEN = false;
 var PLANT_SEED_LOCKED = false;
 var LAST_RANCH_CONNECT = "";
 var LAST_FISH_ENTRY_URL = "";
@@ -1240,9 +1241,18 @@ function parseActionCountFromMsg(msg, type) {
 function parseSeedUnitPrice(html) {
   var text = stripTags(html || "");
   if (!text) return 0;
-  if (text.indexOf("点券") >= 0) return 0;
-  var m = text.match(/单价[:：]?\\s*([0-9]+)/);
-  if (m) return Number(m[1] || 0);
+  text = text.replace(/\\s+/g, " ");
+  var re = /单价[:：]?\\s*([0-9]+)/g;
+  var m;
+  while ((m = re.exec(text))) {
+    var price = Number(m[1] || 0);
+    if (!price) continue;
+    var start = Math.max(0, m.index - 12);
+    var end = Math.min(text.length, m.index + m[0].length + 12);
+    var seg = text.substring(start, end);
+    if (seg.indexOf("点券") >= 0) continue;
+    return price;
+  }
   return 0;
 }
 
@@ -1936,6 +1946,29 @@ function buildBagTag(items, limit) {
   });
   if (items.length > limit) list.push("…");
   return list.join("、");
+}
+
+function getBagItemCount(name) {
+  if (!name || !BAG_STATS.seed || !BAG_STATS.seed.items) return 0;
+  for (var i = 0; i < BAG_STATS.seed.items.length; i++) {
+    var it = BAG_STATS.seed.items[i];
+    if (it && it.name === name) return it.count || 0;
+  }
+  return 0;
+}
+
+function markGrassLow(grassCount, stage) {
+  var threshold = CONFIG.GRASS_THRESHOLD;
+  if (grassCount === null || grassCount === undefined) return false;
+  if (grassCount >= threshold) return false;
+  var prefix = stage ? stage + "后" : "";
+  if (!GRASS_LOW_SEEN || stage) {
+    log("🌱 种植策略: " + prefix + "牧草不足(" + grassCount + "<" + threshold + ")，优先种牧草");
+  }
+  GRASS_LOW_SEEN = true;
+  PLANT_SEED_LOCKED = true;
+  CONFIG.PLANT_CID = CONFIG.FARM_GRASS_SEED_ID;
+  return true;
 }
 
 function refreshFinalStats(cookie) {
@@ -3665,15 +3698,14 @@ function fetchFarmSeedBag(cookie) {
 }
 
 function decidePlantSeed(cookie, grassCount) {
-  if (PLANT_SEED_LOCKED) {
-    return Promise.resolve(CONFIG.PLANT_CID);
-  }
-  var threshold = CONFIG.GRASS_THRESHOLD;
-  if (grassCount !== null && grassCount < threshold) {
-    log("🌱 种植策略: 牧草不足(" + grassCount + "<" + threshold + ")，优先种牧草");
+  if (GRASS_LOW_SEEN) {
     PLANT_SEED_LOCKED = true;
     return Promise.resolve(CONFIG.FARM_GRASS_SEED_ID);
   }
+  if (PLANT_SEED_LOCKED) {
+    return Promise.resolve(CONFIG.PLANT_CID);
+  }
+  if (markGrassLow(grassCount, "")) return Promise.resolve(CONFIG.FARM_GRASS_SEED_ID);
   var seedTotal = BAG_STATS.seed ? BAG_STATS.seed.total : 0;
   if (seedTotal >= CONFIG.FARM_SEED_MIN_TOTAL) {
     log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，一键播种按背包顺序");
@@ -4260,6 +4292,13 @@ function probeRanchGrass(cookie) {
     });
 }
 
+function recheckGrassAfterFeed(cookie) {
+  return probeRanchGrass(cookie).then(function (count) {
+    markGrassLow(count, "喂草");
+    return count;
+  });
+}
+
 function ranchSignIn(base, cookie, ctx) {
   if (!CONFIG.ENABLE.ranch_signin) return Promise.resolve();
   if (LAST_RANCH_HOME_HTML && !hasSignInEntry(LAST_RANCH_HOME_HTML)) {
@@ -4375,6 +4414,11 @@ function runRanch(base, cookie) {
               ctx.grassCount !== null &&
               ctx.grassCount <= 0
             ) {
+              var grassSeedCount = getBagItemCount("牧草");
+              if (grassSeedCount > 0) {
+                log("🌿 牧草为 0，但背包已有牧草种子×" + grassSeedCount + "，跳过购买");
+                return plantGrassFromFarm(cookie);
+              }
               log("🌿 牧草为 0，准备购买并种植");
               return buyGrassSeed(cookie).then(function () {
                 return plantGrassFromFarm(cookie);
@@ -4645,7 +4689,9 @@ function main() {
     })
     .then(function () {
       if (!ranchEnabled()) return;
-      return runRanch(CONFIG.RANCH_BASE, ranchCookie);
+      return runRanch(CONFIG.RANCH_BASE, ranchCookie).then(function () {
+        return recheckGrassAfterFeed(ranchCookie);
+      });
     })
     .then(function () {
       return runFarmWap(cookie).then(function () {
