@@ -93,7 +93,9 @@ var CONFIG = {
   },
 
   // 调试开关
-  DEBUG: false
+  DEBUG: true,
+  // 诊断模式：输出请求/响应摘要（用于定位空页/跳转）
+  DIAG: true
 };
 
 /* =======================
@@ -324,6 +326,69 @@ function logDebug(msg) {
   if (CONFIG.DEBUG) log("🔎 调试: " + msg);
 }
 
+function simpleHash(str) {
+  if (!str) return "0";
+  var h = 5381;
+  for (var i = 0; i < str.length; i++) {
+    h = ((h << 5) + h) + str.charCodeAt(i);
+    h = h & 0xffffffff;
+  }
+  if (h < 0) h = 0xffffffff + h + 1;
+  return h.toString(16);
+}
+
+function cookieKeyList(cookie) {
+  var map = parseCookieMap(cookie || "");
+  var keys = [];
+  for (var k in map) {
+    if (!map.hasOwnProperty(k)) continue;
+    keys.push(k);
+  }
+  keys.sort();
+  return keys.join(",");
+}
+
+function shouldDiag(label, url) {
+  if (!CONFIG.DIAG) return false;
+  var key = (label || "") + " " + (url || "");
+  return /农场|牧场|鱼塘|背包|大乐斗|会话/.test(key) ||
+    /wap_farm_index|wap_farm_user_bag|wap_farm_fish_index|wap_pasture_index|phonepk/.test(key);
+}
+
+function summarizeHtml(html) {
+  var text = stripTags(html || "");
+  var flags = [];
+  if (isFarmHome(html)) flags.push("土地");
+  if (isRanchHome(html)) flags.push("牧场");
+  if (isFishHome(html)) flags.push("鱼塘");
+  if (text.indexOf("我的背包") >= 0 || /我\s*的\s*背\s*包/.test(text)) flags.push("背包");
+  if (isContinuePage(html)) flags.push("继续访问页");
+  return {
+    title: extractTitle(html) || "",
+    len: (html || "").length,
+    flags: flags.join("|")
+  };
+}
+
+function logDiagRequest(label, url, referer, cookie) {
+  if (!shouldDiag(label, url)) return;
+  var keys = cookieKeyList(cookie);
+  var hash = simpleHash(cookie || "");
+  log("🛰️ REQ[" + (label || "请求") + "] " + (url || ""));
+  log("🧾 CookieKeys: " + (keys || "无") + " | Hash: " + hash);
+  if (referer) log("↪️ Referer: " + referer);
+}
+
+function logDiagResponse(label, url, html, status) {
+  if (!shouldDiag(label, url)) return;
+  var sum = summarizeHtml(html || "");
+  log("🛰️ RES[" + (label || "响应") + "] status=" + (status || "-") + " len=" + sum.len + " title=" + (sum.title || "无") + " flags=" + (sum.flags || "无"));
+  if (CONFIG.DIAG && html) {
+    var snippet = stripTags(html).slice(0, 120);
+    if (snippet) log("🔎 片段: " + snippet);
+  }
+}
+
 function logCookieHealth(cookie) {
   var map = parseCookieMap(cookie || "");
   var keys = ["ptcz", "openId", "accessToken", "newuin", "openid", "token", "skey", "uin"];
@@ -508,6 +573,7 @@ function getHeader(headers, key) {
 function getHtmlWithStatus(url, cookie, referer, label) {
   var target = normalizeMcappUrl(url);
   var ref = referer || defaultMcappReferer();
+  logDiagRequest(label || "会话", target, ref, cookie);
   return getWithRetry(
     {
       method: "GET",
@@ -516,6 +582,7 @@ function getHtmlWithStatus(url, cookie, referer, label) {
     },
     label || "会话"
   ).then(function (resp) {
+    logDiagResponse(label || "会话", target, resp.body || "", resp.status);
     return {
       status: resp.status,
       headers: resp.headers || {},
@@ -554,6 +621,12 @@ function extractContinueLink(html) {
   var m = h.match(/href=['"]([^'"]+)['"][^>]*>([^<]*(继续访问|触屏版)[^<]*)<\/a>/i);
   if (m) return m[1];
   return "";
+}
+
+function extractAnyMcappPath(html) {
+  var h = (html || "").replace(/&amp;/g, "&");
+  var m = h.match(/(\/(?:nc|mc)\/cgi-bin\/wap_[^"'\\s>]+)/i);
+  return m ? m[1] : "";
 }
 
 function resolveUrl(base, link) {
@@ -608,7 +681,11 @@ function getHtmlFollow(url, cookie, referer, label, depth) {
       var redirect = extractRedirectUrl(resp.body);
       if (redirect) next = resolveUrl(url, redirect);
       else if (isContinuePage(resp.body)) {
-        var link = extractContinueLink(resp.body) || extractMcappLink(resp.body) || extractFirstHref(resp.body);
+        var link =
+          extractContinueLink(resp.body) ||
+          extractMcappLink(resp.body) ||
+          extractAnyMcappPath(resp.body) ||
+          extractFirstHref(resp.body);
         if (link) next = resolveUrl(url, link);
       }
     }
@@ -719,6 +796,9 @@ function ensureFarmAccess(cookie) {
   function step(idx, curCookie) {
     if (idx >= list.length) {
       log("⚠️ 农场入口未确认");
+      if (CONFIG.DEBUG && LAST_FARM_HOME_HTML) {
+        log("🔎 农场页内容片段: " + stripTags(LAST_FARM_HOME_HTML).slice(0, 120));
+      }
       return Promise.resolve({ ok: false, cookie: curCookie });
     }
     var gut = list[idx];
@@ -1260,17 +1340,25 @@ function isFishPage(html) {
 
 function isFarmHome(html) {
   var text = stripTags(html || "");
-  return text.indexOf("我的土地") >= 0 || text.indexOf("【我的土地】") >= 0;
+  return (
+    text.indexOf("我的土地") >= 0 ||
+    text.indexOf("【我的土地】") >= 0 ||
+    /我\s*的\s*土\s*地/.test(text)
+  );
 }
 
 function isRanchHome(html) {
   var text = stripTags(html || "");
-  return text.indexOf("我的牧场") >= 0 || text.indexOf("牧场动物及产品") >= 0;
+  return (
+    text.indexOf("我的牧场") >= 0 ||
+    text.indexOf("牧场动物及产品") >= 0 ||
+    /我\s*的\s*牧\s*场/.test(text)
+  );
 }
 
 function isFishHome(html) {
   var text = stripTags(html || "");
-  return /我的池塘|我的鱼塘|鱼塘|鱼池/.test(text);
+  return /我的池塘|我的鱼塘|鱼塘|鱼池|我\s*的\s*池\s*塘|我\s*的\s*鱼\s*塘/.test(text);
 }
 
 function extractTitle(html) {

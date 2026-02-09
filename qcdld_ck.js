@@ -36,22 +36,26 @@ const $ = new API("qcdld_Cookie");
   const headers = $request.headers || {};
   const cookie = headers["Cookie"] || headers["cookie"] || "";
   if (!cookie) {
-    $.notify("qcdld_Cookie", "未捕获到 Cookie", "请确认已开启抓包");
+    console.log("qcdld_Cookie 未捕获到 Cookie，请确认已开启抓包");
     return;
   }
 
   const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "token", "skey", "uin"];
   const data = {};
+  const source = {};
   for (let i = 0; i < KEYS.length; i++) {
     const k = KEYS[i];
     const v = matchCookie(cookie, k);
-    if (v) data[k] = v;
+    if (v) {
+      data[k] = v;
+      source[k] = "new";
+    }
   }
 
   const old = $.read("qcdld_Cookie") || "";
   const oldMap = parseCookieMap(old);
   const capturedKeys = Object.keys(data)
-    .filter((k) => data[k])
+    .filter((k) => data[k] && source[k] === "new")
     .join(", ");
   if (DEBUG) {
     console.log("qcdld_ck version=" + VERSION);
@@ -61,7 +65,10 @@ const $ = new API("qcdld_Cookie");
   // 如果本次缺字段，尝试用旧值补齐，避免覆盖成不完整 Cookie
   for (let i = 0; i < KEYS.length; i++) {
     const k = KEYS[i];
-    if (!data[k] && oldMap[k]) data[k] = oldMap[k];
+    if (!data[k] && oldMap[k]) {
+      data[k] = oldMap[k];
+      source[k] = "old";
+    }
   }
 
   const parts = [];
@@ -70,19 +77,17 @@ const $ = new API("qcdld_Cookie");
     if (data[k]) parts.push(k + "=" + data[k]);
   }
   if (!parts.length) {
-    $.notify("qcdld_Cookie", "未解析到字段", "请确认抓包命中大乐斗请求");
+    console.log("qcdld_Cookie 未解析到字段，请确认抓包命中大乐斗请求");
     return;
   }
+  const missing = KEYS.filter((k) => !data[k]);
+  const filled = KEYS.filter((k) => source[k] === "old");
+  if (capturedKeys) console.log("已捕获字段: " + capturedKeys);
+  if (filled.length) console.log("沿用旧值: " + filled.join(", "));
+  if (missing.length) console.log("缺失字段: " + missing.join(", "));
   if (!data.openid || !data.token) {
-    $.notify(
-      "qcdld_Cookie",
-      "字段不完整",
-      "旧值: " +
-        (old || "无") +
-        "\n已捕获: " +
-        capturedKeys +
-        "（未覆盖旧 Cookie）"
-    );
+    console.log("字段不完整(openid/token缺失)，未覆盖旧 Cookie");
+    console.log("旧值: " + (old || "无"));
     return;
   }
   const value = parts.join("; ");
@@ -92,12 +97,9 @@ const $ = new API("qcdld_Cookie");
     console.log("qcdld_Cookie 更新成功");
     console.log("旧值: " + (old || "无"));
     console.log("新值: " + value);
-    console.log("已捕获字段: " + capturedKeys);
-    $.notify("qcdld_Cookie 更新成功", "", value);
   } else {
     console.log("qcdld_Cookie 未变化");
     console.log("旧值: " + (old || "无"));
-    console.log("已捕获字段: " + capturedKeys);
   }
 })()
   .catch((e) => {
