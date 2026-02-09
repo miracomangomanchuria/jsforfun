@@ -21,6 +21,7 @@ ptcz、openId、accessToken、newuin、openid、token
 
 const VERSION = "2026-02-09.v3";
 const DEBUG = false;
+const NOTIFY = true;
 const $ = new API("qcdld_Cookie");
 
 !(async () => {
@@ -97,6 +98,7 @@ const $ = new API("qcdld_Cookie");
     console.log("qcdld_Cookie 更新成功");
     console.log("旧值: " + (old || "无"));
     console.log("新值: " + value);
+    if (NOTIFY) $.notify("qcdld_Cookie 更新成功", "", value);
   } else {
     console.log("qcdld_Cookie 未变化");
     console.log("旧值: " + (old || "无"));

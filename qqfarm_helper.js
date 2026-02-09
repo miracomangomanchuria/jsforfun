@@ -28,14 +28,15 @@ var CONFIG = {
 
   // 农场 WAP（售卖/签到等）
   FARM_WAP_BASE: "https://mcapp.z.qq.com",
-  FARM_G_UT: "1", // 可手动指定，空则自动探测/沿用牧场 g_ut
+  FARM_G_UT: "", // 可手动指定；空则自动探测/沿用牧场 g_ut
 
   // 鱼塘
   FISH_BASE: "https://mcapp.z.qq.com",
-  FISH_G_UT: "1", // 可手动指定，空则沿用农场 g_ut
+  FISH_G_UT: "", // 可手动指定；空则沿用农场/牧场 g_ut
   FISH_USE_ONEKEY_FEED: true,
   FISH_SELL_IDS: "",
-  FISH_AUTO_BUY: false,
+  FISH_AUTO_PLANT: true,
+  FISH_AUTO_BUY: true,
   FISH_BUY_FID: "35",
   FISH_MIN_SEED: 50, // 背包/仓库鱼苗目标数
   FISH_BUY_NUM: 50, // 单次购买量(默认与目标数一致)
@@ -1213,6 +1214,15 @@ function extractHelpParams(html) {
   return null;
 }
 
+function extractHelpLinks(html) {
+  var h = (html || "").replace(/&amp;/g, "&");
+  var re = /wap_pasture_help\?[^\"\\s>]+/g;
+  var list = [];
+  var m;
+  while ((m = re.exec(h))) list.push(m[0]);
+  return uniqLinks(list);
+}
+
 function extractProductionSerials(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var serials = {};
@@ -1274,6 +1284,12 @@ function extractFishHarvestIndex(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var m = h.match(/wap_farm_fish_harvest\\?[^\"\\s>]*index=([0-9,]+)/);
   return m ? m[1] : "";
+}
+
+function extractFishPlantLink(html) {
+  var h = (html || "").replace(/&amp;/g, "&");
+  var m = h.match(/wap_fish_plant\\?[^\"\\s>]+/);
+  return m ? m[0] : "";
 }
 
 function extractFishBuyFids(html) {
@@ -3178,6 +3194,46 @@ function buildFarmOptFallback(html) {
   };
 }
 
+function getFarmLandCount() {
+  if (STATUS_START.farm && STATUS_START.farm.length) return STATUS_START.farm.length;
+  if (STATUS_END.farm && STATUS_END.farm.length) return STATUS_END.farm.length;
+  return 0;
+}
+
+function buildFarmHarvestFallback(html) {
+  var params = extractFarmOptParams(html);
+  if (!params) return {};
+  var B_UID = params.B_UID;
+  if ((!B_UID || B_UID === "0") && LAST_RANCH && LAST_RANCH.B_UID) {
+    B_UID = LAST_RANCH.B_UID;
+  }
+  if (!B_UID) return {};
+  var places = (params.places || []).slice(0);
+  if (places.length === 0) {
+    var cnt = getFarmLandCount();
+    if (cnt <= 0) cnt = 24;
+    for (var i = 0; i < cnt; i++) places.push(String(i));
+  }
+  if (!places.length) return {};
+  var sid = CONFIG.RANCH_SID;
+  var g_ut = getFarmGut();
+  var time = params.time || "-2147483648";
+  return {
+    harvest: [
+      "wap_farm_harvest?sid=" +
+        sid +
+        "&B_UID=" +
+        B_UID +
+        "&place=" +
+        places.join(",") +
+        "&g_ut=" +
+        g_ut +
+        "&time=" +
+        time
+    ]
+  };
+}
+
 function mergeFarmLinks(a, b) {
   if (!a && !b) return { harvest: [], clearWeed: [], spraying: [], water: [], dig: [] };
   if (!a) return b;
@@ -3221,6 +3277,8 @@ function runFarmWap(cookie) {
             if (!merged.clearWeed.length && fallback.clearWeed) merged.clearWeed = fallback.clearWeed;
             if (!merged.spraying.length && fallback.spraying) merged.spraying = fallback.spraying;
             if (!merged.water.length && fallback.water) merged.water = fallback.water;
+            var hFallback = buildFarmHarvestFallback(html2) || {};
+            if (!merged.harvest.length && hFallback.harvest) merged.harvest = hFallback.harvest;
             return merged;
           })
           .catch(function () {
@@ -3236,7 +3294,10 @@ function runFarmWap(cookie) {
             LAST_FISH_ENTRY_URL = fishEntry;
             logDebug("鱼塘入口(农场页): " + fishEntry);
           }
-          return extractFarmWapLinks(html2);
+          var links2 = extractFarmWapLinks(html2);
+          var hFallback = buildFarmHarvestFallback(html2) || {};
+          if (!links2.harvest.length && hFallback.harvest) links2.harvest = hFallback.harvest;
+          return links2;
         });
       });
   }
@@ -3477,6 +3538,55 @@ function runFish(base, cookie) {
     });
 }
 
+function autoPlantFishFromBag(base, cookie, ctx) {
+  if (!CONFIG.FISH_AUTO_PLANT) return Promise.resolve();
+  var sid = ctx.sid;
+  var g_ut = ctx.g_ut;
+  var indexUrl = base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
+  return fishGet(indexUrl, cookie)
+    .then(function (html) {
+      ctx.indexHtml = html || ctx.indexHtml;
+      var empty = extractFishEmptyPonds(html || "");
+      if (empty === 0) {
+        log("🪣 放养: 空池塘=0");
+        return;
+      }
+      if (empty === null || empty === undefined) empty = CONFIG.FISH_MAX_POND || 6;
+      return ensureFishSeedTotal(cookie).then(function (total) {
+        if (!total || total <= 0) {
+          log("🪣 放养: 背包无鱼苗");
+          return;
+        }
+        var seedUrl =
+          base +
+          "/nc/cgi-bin/wap_fish_seed_list?sid=" +
+          sid +
+          "&g_ut=" +
+          g_ut +
+          "&pnum=" +
+          empty +
+          "&flag=1&time=-2147483648";
+        return fishGet(seedUrl, cookie).then(function (html2) {
+          var link = extractFishPlantLink(html2);
+          if (!link) {
+            log("🪣 放养: 未发现可放养入口");
+            return;
+          }
+          var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
+          return fishGet(url, cookie).then(function (html3) {
+            var msg = extractMessage(html3);
+            if (msg) log("🪣 放养: " + msg);
+            else log("🪣 放养: 已提交");
+            FISH_STATS.buy += 1;
+          });
+        });
+      });
+    })
+    .catch(function (e) {
+      log("🪣 放养失败: " + e);
+    });
+}
+
 function execFishActions(base, cookie, ctx) {
   return Promise.resolve()
     .then(function () {
@@ -3624,6 +3734,10 @@ function execFishActions(base, cookie, ctx) {
           .then(next);
       }
       return next();
+    })
+    .then(function () {
+      if (!CONFIG.FISH_AUTO_PLANT) return;
+      return autoPlantFishFromBag(base, cookie, ctx);
     })
     .then(function () {
       if (!CONFIG.ENABLE.fish_sell_all) return;
@@ -3874,6 +3988,7 @@ function runRanch(base, cookie) {
         log("⚠️ 牧场页面异常(" + (extractTitle(html) || "无标题") + ")");
       }
       var ctx = extractRanchContext(html);
+      ctx.helpLinks = extractHelpLinks(html);
       ctx.sid = ctx.sid || sid;
       ctx.g_ut = ctx.g_ut || g_ut;
       ctx.food = CONFIG.RANCH_FOOD || extractFoodId(html) || "";
@@ -4025,6 +4140,8 @@ function execRanchActions(base, cookie, ctx) {
                 if (msg2) log("🐮 收获: " + msg2);
                 RANCH_STATS.harvest += 1;
                 ctx._help = extractHelpParams(html2) || ctx._help;
+                var hlinks = extractHelpLinks(html2);
+                if (hlinks.length) ctx.helpLinks = hlinks;
               });
             });
           }
@@ -4052,11 +4169,33 @@ function execRanchActions(base, cookie, ctx) {
       if (msg) log("🐮 收获: " + msg);
       RANCH_STATS.harvest += 1;
       ctx._help = extractHelpParams(html);
+      var hlinks = extractHelpLinks(html);
+      if (hlinks.length) ctx.helpLinks = hlinks;
     });
   }
 
   function doHelp() {
     if (!CONFIG.ENABLE.ranch_help) return Promise.resolve();
+    var links = ctx.helpLinks || [];
+    if (links.length > 0) {
+      var i = 0;
+      function next() {
+        if (i >= links.length) return Promise.resolve();
+        var link = links[i++];
+        var url = link.indexOf("http") === 0 ? link : base + "/mc/cgi-bin/" + link.replace(/^\\.?\//, "");
+        return ranchGet(url, cookie)
+          .then(function (html) {
+            var msg = extractMessage(html);
+            if (msg) log("🧹 清理: " + msg);
+            RANCH_STATS.help += 1;
+          })
+          .then(function () {
+            return sleep(CONFIG.WAIT_MS);
+          })
+          .then(next);
+      }
+      return next();
+    }
     if (!ctx._help || !ctx.B_UID) {
       log("🧹 清理: 未发现可清理参数，跳过");
       return Promise.resolve();
