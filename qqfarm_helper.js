@@ -1214,6 +1214,38 @@ function parseRanchHelpCount(textOrHtml) {
   return 0;
 }
 
+function parseActionCountFromMsg(msg, type) {
+  if (!msg) return 0;
+  var text = String(msg);
+  var m;
+  if (type === "spraying") {
+    m = text.match(/消灭([0-9]+)条/);
+    if (m) return Number(m[1] || 0);
+    m = text.match(/消灭([0-9]+)只/);
+    if (m) return Number(m[1] || 0);
+  }
+  if (type === "clearWeed") {
+    m = text.match(/清除([0-9]+)棵/);
+    if (m) return Number(m[1] || 0);
+    m = text.match(/除草[^0-9]{0,6}([0-9]+)棵/);
+    if (m) return Number(m[1] || 0);
+  }
+  if (type === "water") {
+    m = text.match(/浇水[^0-9]{0,6}([0-9]+)块/);
+    if (m) return Number(m[1] || 0);
+  }
+  return 0;
+}
+
+function parseSeedUnitPrice(html) {
+  var text = stripTags(html || "");
+  if (!text) return 0;
+  if (text.indexOf("点券") >= 0) return 0;
+  var m = text.match(/单价[:：]?\\s*([0-9]+)/);
+  if (m) return Number(m[1] || 0);
+  return 0;
+}
+
 function parseFishFeedUsage(textOrHtml) {
   var text = stripTags(textOrHtml || "");
   if (!text) return null;
@@ -2894,6 +2926,7 @@ function buyGrassSeedWap(cookie) {
     var fullInfo = infoUrl.indexOf("http") === 0 ? infoUrl : base + "/nc/cgi-bin/" + infoUrl.replace(/^\.?\//, "");
     return ranchGet(fullInfo, cookie)
       .then(function (html) {
+        var unitPrice = parseSeedUnitPrice(html);
         var form = parseSeedBuyForm(html);
         if (!form.action) {
           log("🌾 买牧草: 未找到购买表单");
@@ -2917,6 +2950,9 @@ function buyGrassSeedWap(cookie) {
             if (msg && msg.indexOf("成功") >= 0) {
               log("🌾 买牧草: " + msg);
               var spend = parseSpendFromMsg(msg);
+              if (!spend && unitPrice > 0) {
+                spend = unitPrice * CONFIG.FARM_GRASS_BUY_NUM;
+              }
               if (spend > 0) {
                 MONEY_STATS.grassBuy += spend;
                 PURCHASE_LOGS.push({ name: "牧草", count: CONFIG.FARM_GRASS_BUY_NUM, cost: spend });
@@ -2972,6 +3008,7 @@ function buyFirstSeedWap(cookie, num) {
     var fullInfo = infoUrl.indexOf("http") === 0 ? infoUrl : base + "/nc/cgi-bin/" + infoUrl.replace(/^\.?\//, "");
     return ranchGet(fullInfo, cookie)
       .then(function (html) {
+        var unitPrice = parseSeedUnitPrice(html);
         var form = parseSeedBuyForm(html);
         if (!form.action) {
           log("🧺 买种子: 未找到购买表单");
@@ -2994,6 +3031,9 @@ function buyFirstSeedWap(cookie, num) {
             var msg = extractWapHint(resp.body) || extractMessage(resp.body);
             if (msg) log("🧺 买种子: " + msg);
             var spend = parseSpendFromMsg(msg);
+            if (!spend && unitPrice > 0 && msg && msg.indexOf("成功") >= 0) {
+              spend = unitPrice * num;
+            }
             if (spend > 0) {
               MONEY_STATS.farmBuy += spend;
               PURCHASE_LOGS.push({ name: "种子", count: num, cost: spend });
@@ -3527,6 +3567,7 @@ function runFarmWap(cookie) {
           }
           if (ok && statKey && ACTION_STATS[statKey] !== undefined) {
             var inc =
+              parseActionCountFromMsg(msg, statKey) ||
               countParamList(link, "place") ||
               countParamList(link, "landid") ||
               1;
