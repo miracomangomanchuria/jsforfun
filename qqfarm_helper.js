@@ -403,6 +403,9 @@ function logCookieHealth(cookie) {
   if (!map.skey || !map.uin) {
     log("⚠️ Cookie缺少 skey/uin，农场/背包/鱼塘可能为空");
   }
+  if (map.openid && map.openId && map.openid === map.openId) {
+    log("⚠️ Cookie openid 与 openId 值相同，疑似抓包混淆（会导致请求参数错误）");
+  }
 }
 
 /* =======================
