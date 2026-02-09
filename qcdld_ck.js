@@ -1,5 +1,5 @@
 /*
-大乐斗 Cookie 获取脚本（九字段）
+大乐斗 Cookie 获取脚本（六字段）
 
 【抓包方式】
 1) 在 QX 添加重写：
@@ -10,17 +10,16 @@
 在 QX 的 MITM 中添加：dld.qzapp.z.qq.com
 
 【保存字段】
-ptcz、openId、accessToken、newuin、openid、fopenid、token、skey、uin
+ptcz、openId、accessToken、newuin、openid、token
 
 说明：
 - 牧场直连更依赖 openid + token
-- 农场/鱼塘/背包更依赖 skey + uin
 - openId 与 openid 必须区分（大小写不同，值可能不同）
 
 存储键：qcdld_Cookie
 */
 
-const VERSION = "2026-02-09.v1";
+const VERSION = "2026-02-09.v3";
 const DEBUG = false;
 const $ = new API("qcdld_Cookie");
 
@@ -41,7 +40,7 @@ const $ = new API("qcdld_Cookie");
     return;
   }
 
-  const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "fopenid", "token", "skey", "uin"];
+  const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "token"];
   const data = {};
   const source = {};
   for (let i = 0; i < KEYS.length; i++) {
