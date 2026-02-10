@@ -3242,6 +3242,61 @@ function farmOneKeySow(cookie, seedCid) {
     return link.replace(/^\.?\//, "");
   }
 
+  function extractParam(link, key) {
+    var re = new RegExp("[?&]" + key + "=([^&]+)");
+    var m = re.exec(link || "");
+    return m ? m[1] : "";
+  }
+
+  function normalizePlantLink(link) {
+    if (!link) return "";
+    var out = link.replace(/^\.?\//, "");
+    if (out.indexOf("?") < 0) out += "?";
+    if (!/sid=/.test(out)) out += (out.slice(-1) === "?" ? "" : "&") + "sid=" + sid;
+    if (!/g_ut=/.test(out)) out += "&g_ut=" + g_ut;
+    return out;
+  }
+
+  function isUselessPlantLink(link) {
+    if (!link) return true;
+    if (link === "wap_farm_plant?" || link === "wap_farm_plant") return true;
+    return !/cid=/.test(link) && !/landid=/.test(link);
+  }
+
+  function extractEmptyLandSeeds(html) {
+    if (!html) return [];
+    var h = html.replace(/&amp;/g, "&");
+    var re = /wap_farm_seed_plant_list\?[^"'\\s>]+/g;
+    var list = [];
+    var m;
+    var seen = {};
+    while ((m = re.exec(h))) {
+      var link = m[0];
+      var landid = extractParam(link, "landid");
+      if (!landid) continue;
+      if (seen[landid]) continue;
+      seen[landid] = true;
+      list.push({
+        landid: landid,
+        land_bitmap: extractParam(link, "land_bitmap") || ""
+      });
+    }
+    return list;
+  }
+
+  function buildPlantLink(seed, land) {
+    var link =
+      "wap_farm_plant?sid=" +
+      sid +
+      "&g_ut=" +
+      g_ut +
+      "&v=0&cid=" +
+      seed;
+    if (land && land.landid) link += "&landid=" + land.landid;
+    if (land && land.land_bitmap) link += "&land_bitmap=" + land.land_bitmap;
+    return link;
+  }
+
   function parseCid(link) {
     var m = /cid=([0-9]+)/.exec(link);
     return m ? m[1] : "";
@@ -3275,9 +3330,7 @@ function farmOneKeySow(cookie, seedCid) {
     return ordered;
   }
 
-  function tryCandidates(candidates, idx) {
-    if (idx >= candidates.length) return Promise.resolve({ did: false, cont: false });
-    var link = candidates[idx];
+  function requestPlant(link) {
     var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + cleanLink(link);
     return ranchGet(url, cookie)
       .then(function (html2) {
@@ -3307,65 +3360,95 @@ function farmOneKeySow(cookie, seedCid) {
           text.indexOf("土地不符") >= 0 ||
           text.indexOf("只能种在") >= 0;
         var success = text.indexOf("成功") >= 0 || text.indexOf("已播种") >= 0;
-        if (noLand) return { did: success, cont: false };
-        if (seedLack || landLimit) return tryCandidates(candidates, idx + 1);
-        if (success) return { did: true, cont: true };
-        return { did: success, cont: false };
+        return { success: success, noLand: noLand, seedLack: seedLack, landLimit: landLimit };
       })
       .catch(function (e) {
         log("🌱 一键播种失败: " + e);
-        return { did: false, cont: false };
+        return { success: false, noLand: false, seedLack: false, landLimit: false };
       });
   }
 
-  function doOnce() {
-    return ranchGet(listUrl, cookie)
-      .then(function (html) {
-        var h = (html || "").replace(/&amp;/g, "&");
-        var links = [];
-        var re = /wap_farm_plant\\?[^\"\\s>]+/g;
-        var m;
-        while ((m = re.exec(h))) links.push(m[0]);
-        var candidates = reorderCandidates(links);
-        if (candidates.length === 0 && seedCid) {
-          candidates.push(
-            "wap_farm_plant?sid=" +
-              sid +
-              "&g_ut=" +
-              g_ut +
-              "&v=0&cid=" +
-              seedCid +
-              "&landid=-1"
-          );
-        }
-        if (candidates.length === 0) {
-          var indexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
-          return ranchGet(indexUrl, cookie).then(function (html2) {
-            var h2 = html2.replace(/&amp;/g, "&");
-            var re2 = /<a[^>]+href="([^"]+)"[^>]*>[^<]*(播种|一键)[^<]*<\/a>/i;
-            var m2 = re2.exec(h2);
-            if (m2) candidates.push(m2[1]);
-            if (candidates.length === 0) {
-              log("🌱 一键播种: 未发现入口");
-              return { did: false, cont: false };
-            }
-            return tryCandidates(reorderCandidates(candidates), 0);
-          });
-        }
-        return tryCandidates(candidates, 0);
-      })
-      .catch(function (e) {
-        log("🌱 一键播种失败: " + e);
-        return { did: false, cont: false };
+  function tryCandidates(candidates, idx) {
+    if (idx >= candidates.length) return Promise.resolve({ did: false, cont: false, count: 0 });
+    var link = candidates[idx];
+    return requestPlant(link).then(function (res) {
+      if (res.noLand) return { did: res.success, cont: false, count: res.success ? 1 : 0 };
+      if (res.seedLack || res.landLimit) return tryCandidates(candidates, idx + 1);
+      if (res.success) return { did: true, cont: true, count: 1 };
+      return { did: res.success, cont: false, count: 0 };
+    });
+  }
+
+  function tryPlantOnEmptyLand() {
+    if (!seedCid || !LAST_FARM_HOME_HTML) return Promise.resolve({ did: false, cont: false, count: 0 });
+    var lands = extractEmptyLandSeeds(LAST_FARM_HOME_HTML);
+    if (!lands.length) return Promise.resolve({ did: false, cont: false, count: 0 });
+    var idx = 0;
+    var planted = 0;
+    function next() {
+      if (idx >= lands.length) return Promise.resolve({ did: planted > 0, cont: false, count: planted });
+      var link = buildPlantLink(seedCid, lands[idx++]);
+      return requestPlant(link).then(function (res) {
+        if (res.success) planted += 1;
+        return next();
       });
+    }
+    return next();
+  }
+
+  function doOnce() {
+    var directFirst = seedCid ? tryPlantOnEmptyLand() : Promise.resolve({ did: false, cont: false, count: 0 });
+    return directFirst.then(function (directRes) {
+      if (directRes && directRes.did) return directRes;
+      return ranchGet(listUrl, cookie)
+        .then(function (html) {
+          var h = (html || "").replace(/&amp;/g, "&");
+          var links = [];
+          var re = /wap_farm_plant\\?[^\"\\s>]+/g;
+          var m;
+          while ((m = re.exec(h))) links.push(m[0]);
+          var normalized = links
+            .map(normalizePlantLink)
+            .filter(function (it) {
+              return !isUselessPlantLink(it);
+            });
+          var candidates = reorderCandidates(normalized);
+          if (candidates.length === 0 && seedCid) {
+            candidates.push(buildPlantLink(seedCid, { landid: "-1", land_bitmap: "" }));
+          }
+          if (candidates.length === 0) {
+            var indexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
+            return ranchGet(indexUrl, cookie).then(function (html2) {
+              var h2 = html2.replace(/&amp;/g, "&");
+              var re2 = /<a[^>]+href="([^"]+)"[^>]*>[^<]*(播种|一键)[^<]*<\/a>/i;
+              var m2 = re2.exec(h2);
+              if (m2) candidates.push(normalizePlantLink(m2[1]));
+              candidates = reorderCandidates(candidates.filter(function (it) {
+                return !isUselessPlantLink(it);
+              }));
+              if (candidates.length === 0) {
+                log("🌱 一键播种: 未发现入口");
+                return { did: false, cont: false, count: 0 };
+              }
+              return tryCandidates(candidates, 0);
+            });
+          }
+          return tryCandidates(candidates, 0);
+        })
+        .catch(function (e) {
+          log("🌱 一键播种失败: " + e);
+          return { did: false, cont: false, count: 0 };
+        });
+    });
   }
 
   function loop(round) {
     if (maxRepeat > 0 && round >= maxRepeat) return Promise.resolve(didAny);
     return doOnce().then(function (res) {
-      if (res.did) {
+      var inc = res && res.count ? res.count : res && res.did ? 1 : 0;
+      if (inc > 0) {
         didAny = true;
-        recordPlant(seedCid, 1);
+        recordPlant(seedCid, inc);
       }
       if (res.cont) return loop(round + 1);
       return didAny;
