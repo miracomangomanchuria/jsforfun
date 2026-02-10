@@ -2295,7 +2295,7 @@ function actionSummaryLine() {
     " 翻地=" +
     ACTION_STATS.scarify +
     " 种植=" +
-    ACTION_STATS.plant +
+    PLANT_STATS.total +
     " 除草=" +
     ACTION_STATS.clearWeed +
     " 除虫=" +
@@ -2350,7 +2350,7 @@ function summaryLines() {
     " 翻" +
     ACTION_STATS.scarify +
     " 种" +
-    ACTION_STATS.plant +
+    PLANT_STATS.total +
     " 除" +
     ACTION_STATS.clearWeed +
     " 虫" +
