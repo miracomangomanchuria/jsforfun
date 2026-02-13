@@ -24,6 +24,7 @@ var CONFIG = {
   RANCH_G_UT: "2",
   RANCH_FOOD: "", // 空则从页面链接里取第一个 food
   RANCH_MAX_SERIAL: 6,
+  RANCH_TRY_ONEKEY_PRODUCT: true,
   RANCH_DIRECT_REFERER: "", // 直连牧场时的 Referer（空=使用农场首页）
 
   // 农场 WAP（售卖/签到等）
@@ -38,6 +39,8 @@ var CONFIG = {
   FARM_JSON_USE_SWF_PARAMS: true,
   FARM_JSON_EMPTY_UIDX: true,
   FARM_JSON_LOCK_HEURISTIC: true,
+  FARM_JSON_LOCK_GUARD: true,
+  FARM_JSON_LOCK_GUARD_MIN_TOTAL: 18,
   FARM_JSON_SEED_ENABLE: true,
   FARM_JSON_CROP_ENABLE: true,
   FARM_JSON_SALE_ENABLE: true,
@@ -332,6 +335,28 @@ function mapToCookie(map) {
     parts.push(k + "=" + map[k]);
   }
   return parts.join("; ");
+}
+
+function cookieKeyCount(cookie) {
+  var map = parseCookieMap(cookie || "");
+  var n = 0;
+  for (var k in map) {
+    if (map.hasOwnProperty(k)) n += 1;
+  }
+  return n;
+}
+
+function preferRicherCookie(primary, fallback) {
+  var a = primary || "";
+  var b = fallback || "";
+  if (!a && !b) return "";
+  if (!a) return b;
+  if (!b) return a;
+  var na = cookieKeyCount(a);
+  var nb = cookieKeyCount(b);
+  if (nb > na) return b;
+  if (na > nb) return a;
+  return b.length > a.length ? b : a;
 }
 
 function mergeSetCookie(cookie, setCookie) {
@@ -1047,6 +1072,7 @@ var FARM_EXTRA = {
 
 var RANCH_STATS = {
   harvest: 0,
+  harvestUnknown: 0,
   feed: 0,
   help: 0,
   product: 0,
@@ -1097,7 +1123,7 @@ var FARM_STATUS_JSON_END = null;
 
 var LAST_FARM = null;
 var LAST_FARM_HOME_HTML = "";
-var FARM_CTX = { uinY: "", uIdx: "", timeDelta: 0 };
+var FARM_CTX = { uinY: "", uIdx: "", timeDelta: 0, lockHeuristicOff: false };
 var LAST_RANCH = null;
 var LAST_RANCH_HOME_HTML = "";
 var LAST_RANCH_COOKIE = "";
@@ -1113,6 +1139,7 @@ var LAST_FISH_EMPTY = null;
 var LAST_FISH_HAS_EMPTY = false;
 var NO_MONEY = { farmSeed: false, grassSeed: false, fishSeed: false };
 var FISH_FEED_EMPTY_SEEN = false;
+var FISH_FEED_NOOP_SEEN = false;
 
 function bannerStart() {
   log(LINE);
@@ -1122,6 +1149,8 @@ function bannerStart() {
   log(meta);
   log(LINE);
   RUN_START = Date.now();
+  FARM_CTX.lockHeuristicOff = false;
+  FISH_FEED_NOOP_SEEN = false;
 }
 
 function bannerEnd() {
@@ -1328,6 +1357,12 @@ function isSellSuccess(msg, html) {
   return parseMoneyFromMsg(text) > 0;
 }
 
+function isTransientFailText(text) {
+  var t = normalizeSpace(text || "");
+  if (!t) return false;
+  return /系统繁忙|网络繁忙|网络异常|网络错误|错误代码|请求失败|超时|返回重试|请稍[后候]再试/.test(t);
+}
+
 function isMoneyShortText(text) {
   var t = normalizeSpace(text || "");
   if (!t) return false;
@@ -1352,6 +1387,19 @@ function isFeedSuccess(msg, html) {
   if (/系统繁忙|网络|错误|稍候|返回/.test(text)) return false;
   if (/喂食成功|成功添加|成功喂/.test(text)) return true;
   return isSuccessMsg(text);
+}
+
+function isFishFeedNoopText(msg, html) {
+  var text = normalizeSpace(msg || stripTags(html || ""));
+  if (!text) return false;
+  if (/喂鱼食失败/.test(text) && /(是否有鱼可以喂|点券鱼苗不能喂食|没有鱼可以喂|无鱼可喂|无可喂鱼)/.test(text)) {
+    return true;
+  }
+  if (/(是否有鱼可以喂|点券鱼苗不能喂食)/.test(text) && /(失败|不能喂|无鱼|无可喂)/.test(text)) {
+    return true;
+  }
+  if (/(没有鱼可以喂|暂无可喂|无鱼可喂|无可喂鱼)/.test(text)) return true;
+  return false;
 }
 
 function parseSpendFromMsg(msg) {
@@ -1604,6 +1652,10 @@ function parseActionResult(res, type) {
     var hv = Number(res.harvest || 0);
     if (!isNaN(hv) && hv > 0) count = hv;
   }
+  if (!success && count > 0) {
+    var msgText = normalizeSpace(msg || text || "");
+    if (!isNoActionMsg(msgText, type)) success = true;
+  }
   if (success && count <= 0 && type !== "harvest") count = 1;
   return { success: success, count: count, msg: msg };
 }
@@ -1697,6 +1749,37 @@ function parseRanchHarvestCountFromMsg(msg) {
     if (n2) sum += n2;
   }
   return sum;
+}
+
+function isRanchBlankHarvestMsg(msg, html) {
+  var text = normalizeSpace(msg || stripTags(html || ""));
+  if (!text) return false;
+  if (/成功收获了\\s*获得经验/.test(text)) return true;
+  if (/成功收获/.test(text) && /获得经验/.test(text) && !/[0-9]/.test(text) && !/[×xX]/.test(text)) {
+    return true;
+  }
+  return false;
+}
+
+function parseRanchProductCountFromMsg(msg) {
+  if (!msg) return 0;
+  var text = stripTags(String(msg || "")).replace(/\\s+/g, " ").trim();
+  if (!text) return 0;
+  var m = text.match(/成功将\\s*([0-9]+)\\s*只/);
+  if (m) return Number(m[1] || 0);
+  m = text.match(/赶去生产[^0-9]{0,8}([0-9]+)\\s*只/);
+  if (m) return Number(m[1] || 0);
+  return 0;
+}
+
+function formatRanchProductMsg(msg, animal) {
+  var text = normalizeSpace(msg || "");
+  if (!animal) return text;
+  if (!text) return "成功将" + animal + "赶去生产";
+  if (/成功将\s*赶去生产/.test(text)) {
+    return text.replace(/成功将\s*赶去生产/, "成功将" + animal + "赶去生产");
+  }
+  return text;
 }
 
 function trackFishFeedUsage(html) {
@@ -1818,14 +1901,62 @@ function extractHelpLinks(html) {
 }
 
 function extractProductionSerials(html) {
+  var meta = extractProductionMeta(html);
+  return meta.serials || [];
+}
+
+function extractProductionMeta(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var serials = {};
-  var re = /生产期[\s\S]{0,120}?wap_pasture_product[^\"'>]*serial=([0-9]+)/g;
+  var oneKeyLink = "";
+  var serialSet = {};
+  var bySerial = {};
   var m;
-  while ((m = re.exec(h))) {
-    serials[m[1]] = true;
+
+  var pRe = /<p[^>]*class=["']tabs-1["'][^>]*>([\s\S]*?)<\/p>/gi;
+  while ((m = pRe.exec(h))) {
+    var block = m[1] || "";
+    if (block.indexOf("wap_pasture_product") < 0) continue;
+    var text = normalizeSpace(stripTags(block));
+    var name = "";
+    var nm = text.match(/^\s*\d+\)\s*([^:：\s]+)\s*[:：]/);
+    if (nm) name = normalizeSpace(nm[1] || "");
+    var linkRe = /wap_pasture_product\?[^\"'\s>]+/gi;
+    var lm;
+    while ((lm = linkRe.exec(block))) {
+      var link = String(lm[0] || "").replace(/\s+/g, "");
+      if (!link) continue;
+      var sm = link.match(/serial=([0-9]+)/);
+      if (sm) {
+        var serial = sm[1];
+        if (!serialSet[serial]) {
+          serialSet[serial] = true;
+        }
+        if (name && !bySerial[serial]) bySerial[serial] = name;
+      } else if (!/serial=/.test(link) && !oneKeyLink) {
+        oneKeyLink = link;
+      }
+    }
   }
-  return Object.keys(serials);
+
+  var re = /生产期[\s\S]{0,120}?wap_pasture_product[^\"'>]*serial=([0-9]+)/g;
+  while ((m = re.exec(h))) {
+    serialSet[m[1]] = true;
+  }
+  if (!oneKeyLink) {
+    var om =
+      h.match(/wap_pasture_product\?[^\"'>]*B_UID=[^\"'>]*/i) ||
+      h.match(/wap_pasture_product\?[^\"'>]*/i);
+    if (om && om[0] && !/serial=/.test(om[0])) oneKeyLink = String(om[0]).replace(/\s+/g, "");
+  }
+  var out = [];
+  for (var k in serialSet) {
+    if (!serialSet.hasOwnProperty(k)) continue;
+    out.push(k);
+  }
+  out.sort(function (a, b) {
+    return Number(a) - Number(b);
+  });
+  return { serials: out, bySerial: bySerial, oneKeyLink: oneKeyLink };
 }
 
 function extractFoodId(html) {
@@ -1982,6 +2113,13 @@ function extractFishEmptyPonds(html) {
   var clean = text.replace(/\s+/g, "");
   var m = clean.match(/你有([0-9]+)块空池塘/);
   if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空池塘/);
+  if (!m) m = clean.match(/你有([0-9]+)块空鱼塘/);
+  if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空鱼塘/);
+  if (!m) m = clean.match(/你有([0-9]+)块空鱼池/);
+  if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空鱼池/);
+  if (!m) m = clean.match(/空池塘[:：]?([0-9]+)/);
+  if (!m) m = clean.match(/空鱼塘[:：]?([0-9]+)/);
+  if (!m) m = clean.match(/空鱼池[:：]?([0-9]+)/);
   if (!m) return null;
   var v = parseInt(m[1], 10);
   return isNaN(v) ? null : v;
@@ -2378,10 +2516,11 @@ function formatFarmMaintainSum() {
 
 function formatRanchOpsSum() {
   var total = RANCH_STATS.harvest + RANCH_STATS.product + RANCH_STATS.feed + RANCH_STATS.help;
-  if (!total) return "";
-  return (
+  var hasUnknown = RANCH_STATS.harvestUnknown > 0;
+  if (!total && !hasUnknown) return "";
+  var line =
     "收" +
-    RANCH_STATS.harvest +
+    formatCountWithUnknown(RANCH_STATS.harvest, RANCH_STATS.harvestUnknown) +
     " 产" +
     RANCH_STATS.product +
     " 喂" +
@@ -2389,8 +2528,8 @@ function formatRanchOpsSum() {
     " 清" +
     RANCH_STATS.help +
     " 合计" +
-    total
-  );
+    total;
+  return line;
 }
 
 function formatFishOpsSum() {
@@ -2423,9 +2562,14 @@ function recordPlantFail(kind, n) {
 
 function buildPlantFailLine() {
   var parts = [];
-  if (PLANT_FAIL.noLand) parts.push("无空地" + PLANT_FAIL.noLand);
   if (PLANT_FAIL.seedLack) parts.push("种子不足" + PLANT_FAIL.seedLack);
   if (PLANT_FAIL.landLimit) parts.push("土地限制" + PLANT_FAIL.landLimit);
+  return parts.length ? parts.join(" ") : "";
+}
+
+function buildPlantSkipLine() {
+  var parts = [];
+  if (PLANT_FAIL.noLand) parts.push("无空地" + PLANT_FAIL.noLand);
   return parts.length ? parts.join(" ") : "";
 }
 
@@ -2630,6 +2774,9 @@ function parseFarmStatus(html) {
     var start = starts[si];
     var end = si + 1 < starts.length ? starts[si + 1] : seg.length;
     var line = seg.substring(start, end).trim();
+    var idx3 = null;
+    var idx3m = line.match(/土地\s*([0-9]+)/);
+    if (idx3m) idx3 = parseInt(idx3m[1], 10);
     line = line.replace(/\s*(收获|翻地|播种|除草|杀虫|浇水|施肥|铲除|清理|查看).*$/g, "").trim();
     line = line.replace(/^\d+\.\s*/, "");
     line = line.replace(/^\([^)]+\)\s*/, "");
@@ -2656,7 +2803,7 @@ function parseFarmStatus(html) {
       name = "空地";
       if (!status) status = "未播种";
     }
-    if (name) list.push({ name: normalizeSpace(name), status: normalizeSpace(status) });
+    if (name) list.push({ name: normalizeSpace(name), status: normalizeSpace(status), idx: idx3 });
   }
   return list;
 }
@@ -2762,9 +2909,72 @@ function parseRanchStatus(html) {
       status = status.substring(1, status.length - 1).trim();
     }
     if (!status) continue;
-    list.push({ name: name, status: status });
+    list.push({ name: name, status: status, idx: parseInt(m[1], 10) || 0 });
   }
   return list;
+}
+
+function isRanchHarvestableStatus(status) {
+  var st = normalizeSpace(status || "");
+  if (!st) return false;
+  if (/待产|休眠|成长|幼崽|幼苗/.test(st)) return false;
+  return /(待收|可收获|成熟)/.test(st);
+}
+
+function summarizeRanchHarvestable(list) {
+  var out = { total: 0, byName: {} };
+  if (!list || list.length === 0) return out;
+  for (var i = 0; i < list.length; i++) {
+    var it = list[i] || {};
+    if (!isRanchHarvestableStatus(it.status)) continue;
+    var name = normalizeSpace(it.name || "动物");
+    out.total += 1;
+    if (!out.byName[name]) out.byName[name] = 0;
+    out.byName[name] += 1;
+  }
+  return out;
+}
+
+function formatRanchHarvestInferDetail(map, limit) {
+  var arr = [];
+  for (var k in map) {
+    if (!map.hasOwnProperty(k)) continue;
+    if (map[k] > 0) arr.push({ name: k, count: map[k] });
+  }
+  if (arr.length === 0) return "";
+  arr.sort(function (a, b) {
+    if (b.count !== a.count) return b.count - a.count;
+    return a.name > b.name ? 1 : -1;
+  });
+  var max = limit || 4;
+  var show = arr.slice(0, max);
+  var parts = [];
+  for (var i = 0; i < show.length; i++) {
+    parts.push(show[i].name + "×" + show[i].count);
+  }
+  if (arr.length > max) parts.push("…");
+  return parts.join("，");
+}
+
+function inferRanchHarvestFromStatus(beforeList, afterList) {
+  if (!beforeList || !afterList) return { count: 0, detail: "" };
+  if (beforeList.length === 0 || afterList.length === 0) return { count: 0, detail: "" };
+  var b = summarizeRanchHarvestable(beforeList);
+  var a = summarizeRanchHarvestable(afterList);
+  var delta = b.total - a.total;
+  if (delta <= 0) return { count: 0, detail: "" };
+  var diff = {};
+  for (var name in b.byName) {
+    if (!b.byName.hasOwnProperty(name)) continue;
+    var d = b.byName[name] - (a.byName[name] || 0);
+    if (d > 0) diff[name] = d;
+  }
+  return {
+    count: delta,
+    detail: formatRanchHarvestInferDetail(diff, 4),
+    before: b.total,
+    after: a.total
+  };
 }
 
 function farmStatusTextFromB(b) {
@@ -2788,13 +2998,18 @@ function isZeroVal(v) {
   return v === 0 || v === "0" || v === "" || v === null || v === undefined;
 }
 
-function landLockReason(land) {
+function explicitLandLockReason(land) {
   if (!land || typeof land !== "object") return "null";
   if (land.locked != null && Number(land.locked) === 1) return "locked=1";
   if (land.isLocked != null && Number(land.isLocked) === 1) return "isLocked=1";
   if (land.isLock != null && Number(land.isLock) === 1) return "isLock=1";
   if (land.open != null && Number(land.open) === 0) return "open=0";
   if (land.isOpen != null && Number(land.isOpen) === 0) return "isOpen=0";
+  return "";
+}
+
+function isZeroLockCandidate(land) {
+  if (!land || typeof land !== "object") return false;
   var a0 = isZeroVal(land.a) && isZeroVal(land.c);
   var b0 = isZeroVal(land.b);
   var hasSignal =
@@ -2803,7 +3018,17 @@ function landLockReason(land) {
     numVal(land.s) > 0 ||
     numVal(land.bitmap) > 0 ||
     numVal(land.bitmap2) > 0;
-  if (CONFIG.FARM_JSON_LOCK_HEURISTIC && a0 && b0 && !hasSignal) return "zero-fields";
+  return a0 && b0 && !hasSignal;
+}
+
+function useFarmLockHeuristic() {
+  return !!CONFIG.FARM_JSON_LOCK_HEURISTIC && !FARM_CTX.lockHeuristicOff;
+}
+
+function landLockReason(land) {
+  var explicit = explicitLandLockReason(land);
+  if (explicit) return explicit;
+  if (useFarmLockHeuristic() && isZeroLockCandidate(land)) return "zero-fields";
   return "";
 }
 
@@ -2872,6 +3097,57 @@ function summarizeFarmJsonStatus(farm) {
     counts[b] += 1;
   }
   return { total: total, counts: counts, locked: locked };
+}
+
+function applyFarmLockHeuristicGuard(farm, tag) {
+  if (!CONFIG.FARM_JSON_LOCK_HEURISTIC || !CONFIG.FARM_JSON_LOCK_GUARD) return;
+  if (FARM_CTX.lockHeuristicOff) return;
+  var list = ensureArray(farm && farm.farmlandStatus);
+  if (!list.length) return;
+  var total = 0;
+  var explicitLocked = 0;
+  var zeroLocked = 0;
+  for (var i = 0; i < list.length; i++) {
+    var land = list[i];
+    if (!land || typeof land !== "object") continue;
+    total += 1;
+    if (explicitLandLockReason(land)) {
+      explicitLocked += 1;
+      continue;
+    }
+    if (isZeroLockCandidate(land)) zeroLocked += 1;
+  }
+  if (!total) return;
+  var minTotal = Number(CONFIG.FARM_JSON_LOCK_GUARD_MIN_TOTAL || 18);
+  if (!minTotal || isNaN(minTotal) || minTotal < 1) minTotal = 18;
+  var lv = Number(
+    (farm && farm.user && (farm.user.level || farm.user.lv || farm.user.userLevel)) || 0
+  );
+  var allZeroLocked = explicitLocked === 0 && zeroLocked === total && total >= minTotal;
+  var nearAllZeroLocked =
+    explicitLocked === 0 &&
+    zeroLocked >= total - 1 &&
+    total >= minTotal &&
+    lv >= 30;
+  if (!allZeroLocked && !nearAllZeroLocked) return;
+  FARM_CTX.lockHeuristicOff = true;
+  log(
+    "⚠️ 锁地识别保护(" +
+      (tag || "unknown") +
+      "): 疑似误判，已自动关闭 zero-fields 锁地判定"
+  );
+  if (CONFIG.DEBUG) {
+    logDebug(
+      "🔒 保护详情: total=" +
+        total +
+        " explicit=" +
+        explicitLocked +
+        " zero=" +
+        zeroLocked +
+        " lv=" +
+        lv
+    );
+  }
 }
 
 function logFarmJsonStatus(tag, farm) {
@@ -3709,6 +3985,13 @@ function formatActionTriplet(label, success, tried, noop) {
   return out;
 }
 
+function formatCountWithUnknown(known, unknown) {
+  var base = Number(known || 0);
+  var extra = Number(unknown || 0);
+  if (!extra) return String(base);
+  return base + "(+未知" + extra + ")";
+}
+
 function farmActionDetailLine() {
   var line1 = [
     formatActionTriplet("收获果实", ACTION_STATS.harvest, ACTION_TRY.harvest, ACTION_NOOP.harvest),
@@ -3726,7 +4009,7 @@ function farmActionDetailLine() {
 function ranchSummaryLine() {
   return (
     "收获=" +
-    RANCH_STATS.harvest +
+    formatCountWithUnknown(RANCH_STATS.harvest, RANCH_STATS.harvestUnknown) +
     " 喂草=" +
     RANCH_STATS.feed +
     " 清理=" +
@@ -3782,7 +4065,7 @@ function summaryLines() {
 
   var ranchLine =
     "【牧场】收" +
-    RANCH_STATS.harvest +
+    formatCountWithUnknown(RANCH_STATS.harvest, RANCH_STATS.harvestUnknown) +
     " 喂" +
     RANCH_STATS.feed +
     " 清" +
@@ -3823,6 +4106,7 @@ function summaryLines() {
   }
   var harvestTypeLine = !harvestDetailLine && harvestTypeCount ? "【收获种类】" + harvestTypeCount : "";
   var plantFailLine = buildPlantFailLine();
+  var plantSkipLine = buildPlantSkipLine();
   var witheredRecon = formatWitheredRecon(STATUS_START.farm, STATUS_END.farm);
   var emptyRecon = formatEmptyPlantRecon(STATUS_START.farm, STATUS_END.farm);
   var maintainSum = formatFarmMaintainSum();
@@ -3840,6 +4124,7 @@ function summaryLines() {
     maintainSum ? "【🧹 维护合计】" + maintainSum : "",
     harvestDetailLine ? "【🌾 收获明细】" + harvestDetailLine : "",
     harvestTypeLine,
+    plantSkipLine ? "【ℹ️ 播种未执行】" + plantSkipLine : "",
     plantFailLine ? "【⚠️ 播种失败】" + plantFailLine : "",
     ranchSum ? "【🐮 牧场合计】" + ranchSum : "",
     fishSum ? "【🐟 鱼塘合计】" + fishSum : "",
@@ -3873,7 +4158,7 @@ function buildNotifyBody() {
     " 签" +
     FARM_EXTRA.signin +
     " | 🐮收" +
-    RANCH_STATS.harvest +
+    formatCountWithUnknown(RANCH_STATS.harvest, RANCH_STATS.harvestUnknown) +
     " 产" +
     RANCH_STATS.product +
     " 售" +
@@ -3950,7 +4235,7 @@ function buildNotifyBody() {
 
   var ranchLine =
     "牧场：收" +
-    RANCH_STATS.harvest +
+    formatCountWithUnknown(RANCH_STATS.harvest, RANCH_STATS.harvestUnknown) +
     " 产" +
     RANCH_STATS.product +
     " 喂" +
@@ -3982,6 +4267,7 @@ function buildNotifyBody() {
   }
   var harvestTypeLine = !harvestDetailLine && harvestTypeCount ? "🌾 收获种类 | " + harvestTypeCount : "";
   var plantFailLine = buildPlantFailLine();
+  var plantSkipLine = buildPlantSkipLine();
   var witheredRecon = formatWitheredRecon(STATUS_START.farm, STATUS_END.farm);
   var emptyRecon = formatEmptyPlantRecon(STATUS_START.farm, STATUS_END.farm);
   var maintainSum = formatFarmMaintainSum();
@@ -4007,6 +4293,7 @@ function buildNotifyBody() {
     maintainSum ? "🧹 维护合计 | " + maintainSum : "",
     harvestDetailLine ? "🌾 收获明细 | " + harvestDetailLine : "",
     harvestTypeLine,
+    plantSkipLine ? "ℹ️ 播种未执行 | " + plantSkipLine : "",
     plantFailLine ? "⚠️ 播种失败 | " + plantFailLine : "",
     ranchSum ? "🐮 牧场合计 | " + ranchSum : "",
     fishSum ? "🐟 鱼塘合计 | " + fishSum : "",
@@ -4445,6 +4732,7 @@ function runFarmJson(cookie) {
   var uin = getFarmUin(cookie);
   return fetchFarmJson(base, cookie, uin).then(function (farm) {
     if (!isFarmJson(farm)) return { ok: false, reason: "farm json missing" };
+    applyFarmLockHeuristicGuard(farm, "json-start");
     logFarmJsonStatus("开始", farm);
     setFarmStatusFromJson(farm, true);
     LAST_MODE = "json";
@@ -4456,6 +4744,7 @@ function runFarmJson(cookie) {
         return fetchFarmJson(base, cookie, uin)
           .then(function (farm2) {
             if (isFarmJson(farm2)) {
+              applyFarmLockHeuristicGuard(farm2, "json-end");
               logFarmJsonStatus("结束", farm2);
               setFarmStatusFromJson(farm2, false);
             }
@@ -4543,6 +4832,7 @@ function runModern(base, cookie, gtk, uin) {
   log("🚀 模式: 现代 @ " + base);
   return fetchFarmModern(base, cookie, gtk, uin).then(function (farm) {
     if (!isFarmJson(farm)) return { ok: false, reason: "farm json missing" };
+    applyFarmLockHeuristicGuard(farm, "modern");
     LAST_MODE = "modern";
     LAST_BASE = base;
     var actions = planModernActions(farm);
@@ -4709,6 +4999,7 @@ function runLegacy(base, cookie, uin) {
   log("🧩 模式: 旧版 @ " + base);
   return fetchFarmLegacy(base, cookie, uin).then(function (farm) {
     if (!isFarmJson(farm)) return { ok: false, reason: "farm json missing" };
+    applyFarmLockHeuristicGuard(farm, "legacy");
     LAST_MODE = "legacy";
     LAST_BASE = base;
     var actions = planLegacyActions(farm);
@@ -5213,10 +5504,15 @@ function farmSellAllWap(cookie) {
     var step2 = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
     return ranchGet(step2, cookie).then(function (html2) {
       var msg = extractMessage(html2);
+      var text = normalizeSpace(msg || stripTags(html2 || ""));
       var money = parseMoneyFromMsg(msg || stripTags(html2));
       if (money > 0) MONEY_STATS.farmSell += money;
       if (msg) log("🧺 农场售卖: " + msg);
       if (isSellSuccess(msg, html2)) FARM_EXTRA.sell += 1;
+      else if (isTransientFailText(text)) {
+        ACTION_STATS.errors += 1;
+        log("⚠️ 农场售卖未完成: " + (msg || "系统繁忙，请稍后重试"));
+      }
     });
   });
 }
@@ -5933,14 +6229,11 @@ function runFarmWap(cookie, opts) {
       var empty = html ? countEmptyFarmLand(parseFarmStatus(html)) : 0;
       var witheredPlaces = html ? collectFarmPlacesFromHtml(html, /枯萎/) : [];
       var maturePlaces = html ? collectFarmPlacesFromHtml(html, /(成熟|可收获|待收)/) : [];
-      var hasLinks =
+      var coreLinkCount =
         (allowHarvest ? (links.harvest || []).length : 0) +
-          (allowClearWeed ? (links.clearWeed || []).length : 0) +
-          (allowSpraying ? (links.spraying || []).length : 0) +
-          (allowWater ? (links.water || []).length : 0) +
-          (allowScarify ? (links.dig || []).length : 0) >
-        0;
-      var shouldRecheck = hasLinks || (allowPlant && empty > 0);
+        (allowScarify ? (links.dig || []).length : 0);
+      // 仅在“可改变地块状态”的入口出现时强制复查，避免纯维护无动作时重复记尝试次数。
+      var shouldRecheck = coreLinkCount > 0 || (allowPlant && empty > 0);
       var didAny = false;
       function harvestByPlaces(places) {
         if (!places || places.length === 0) return Promise.resolve(false);
@@ -6181,7 +6474,9 @@ function feedRanchFromWarehouse(base, farmCookie, ranchCookie) {
  * ======================= */
 function fishGet(url, cookie, referer) {
   var target = normalizeMcappUrl(url);
-  return getHtmlFollow(target, cookie, referer || defaultMcappReferer(), "鱼塘", 0).then(function (resp) {
+  var activeCookie = preferRicherCookie(cookie, LAST_RANCH_COOKIE);
+  return getHtmlFollow(target, activeCookie, referer || defaultMcappReferer(), "鱼塘", 0).then(function (resp) {
+    if (resp && resp.cookie) LAST_RANCH_COOKIE = preferRicherCookie(resp.cookie, LAST_RANCH_COOKIE);
     var body = resp && resp.body ? resp.body : "";
     logDebug("鱼塘响应 " + (body ? body.length : 0));
     return body || "";
@@ -6372,25 +6667,50 @@ function autoPlantFishFromBag(base, cookie, ctx) {
     });
   }
 
+  function fillByEmpty(empty, round) {
+    var r = round || 0;
+    if (empty === null || empty === undefined) return Promise.resolve();
+    if (empty <= 0) {
+      if (r === 0) log("🪣 放养: 空池塘=0");
+      return Promise.resolve();
+    }
+    if (r > 0) {
+      log("🪣 放养复查: 空池塘=" + empty + "，继续补投放");
+    }
+    return doPlant(empty).then(function () {
+      return fetchEmptyFromBuyPre().then(function (remain) {
+        if (remain === null || remain === undefined) return;
+        if (remain <= 0) return;
+        if (r >= 2) {
+          log("🪣 放养复查: 剩余空池塘=" + remain + "，达到补投放上限");
+          return;
+        }
+        return fillByEmpty(remain, r + 1);
+      });
+    });
+  }
+
   return fishGet(indexUrl, cookie)
     .then(function (html) {
       ctx.indexHtml = html || ctx.indexHtml;
       var maxPond = CONFIG.FISH_MAX_POND || 6;
       var empty = extractFishEmptyPonds(html || "");
-      if (empty === 0) return doPlant(0);
+      if (empty === 0) return fillByEmpty(0, 0);
       if (empty === null || empty === undefined) {
-        if ((html || "").indexOf("一键养殖") >= 0 || (html || "").indexOf("空池塘") >= 0) {
-          return doPlant(maxPond);
-        }
         return fetchEmptyFromBuyPre().then(function (fallback) {
-          if (fallback === null || fallback === undefined) {
-            log("🪣 放养: 空池塘未知，跳过");
-            return;
+          if (fallback !== null && fallback !== undefined) return fillByEmpty(fallback, 0);
+          if (
+            (html || "").indexOf("一键养殖") >= 0 ||
+            (html || "").indexOf("空池塘") >= 0 ||
+            (html || "").indexOf("空鱼塘") >= 0 ||
+            (html || "").indexOf("空鱼池") >= 0
+          ) {
+            return fillByEmpty(maxPond, 0);
           }
-          return doPlant(fallback);
+          log("🪣 放养: 空池塘未知，跳过");
         });
       }
-      return doPlant(empty);
+      return fillByEmpty(empty, 0);
     })
     .then(function () {
       return didPlant;
@@ -6511,7 +6831,11 @@ function execFishActions(base, cookie, ctx, opts) {
             if (isFeedSuccess(msg, html)) {
               FISH_STATS.feed += feedCount;
               didFeed = true;
+              FISH_FEED_NOOP_SEEN = false;
               if (BAG_STATS.fishFeed) BAG_STATS.fishFeed.loaded = false;
+            } else if (isFishFeedNoopText(msg, html)) {
+              FISH_FEED_NOOP_SEEN = true;
+              logDebug("🐟 喂鱼: 当前无可喂鱼，后续复查将跳过喂鱼");
             }
             var spend = parseSpendFromMsg(stripTags(html || ""));
             if (spend > 0 && !CONFIG.FISH_FEED_ALLOW_SPEND) {
@@ -6541,11 +6865,15 @@ function execFishActions(base, cookie, ctx, opts) {
               var msg = extractMessage(html);
               if (msg) log("🐟 喂鱼: " + msg);
               trackFishFeedUsage(html);
-            if (isFeedSuccess(msg, html)) {
-              FISH_STATS.feed += 1;
-              didFeed = true;
-              if (BAG_STATS.fishFeed) BAG_STATS.fishFeed.loaded = false;
-            }
+              if (isFeedSuccess(msg, html)) {
+                FISH_STATS.feed += 1;
+                didFeed = true;
+                FISH_FEED_NOOP_SEEN = false;
+                if (BAG_STATS.fishFeed) BAG_STATS.fishFeed.loaded = false;
+              } else if (isFishFeedNoopText(msg, html)) {
+                FISH_FEED_NOOP_SEEN = true;
+                logDebug("🐟 喂鱼: 当前无可喂鱼，后续复查将跳过喂鱼");
+              }
               var spend = parseSpendFromMsg(stripTags(html || ""));
               if (spend > 0 && !CONFIG.FISH_FEED_ALLOW_SPEND) {
                 log("⚠️ 喂鱼触发花费(" + spend + "金币)，已记录为异常");
@@ -6782,9 +7110,22 @@ function execFishActions(base, cookie, ctx, opts) {
                 needForEmpty = Math.max(empty - seedTotal, 0);
                 if (needForEmpty > 0) log("🧾 买鱼: 空池塘=" + empty + "，需补鱼苗 " + needForEmpty);
               }
-              var buyNum = Math.max(needNum || 0, needForEmpty || 0);
-              if (target > 0 && buyNum <= 0 && needForEmpty <= 0) {
-                log("🧾 买鱼: 已达到目标 " + target);
+              var buyNum = 0;
+              if (empty !== null && empty !== undefined) {
+                // 空位已知时优先“按空位差额补苗”，避免只因库存目标触发大额购买。
+                buyNum = needForEmpty;
+                if (empty === 0 && target > 0 && needNum > 0) buyNum = needNum;
+              } else {
+                buyNum = needNum || 0;
+              }
+              if (buyNum <= 0) {
+                if (empty !== null && empty !== undefined && empty > 0) {
+                  log("🧾 买鱼: 空池塘=" + empty + "，背包鱼苗已覆盖，无需购买");
+                } else if (target > 0) {
+                  log("🧾 买鱼: 已达到目标 " + target);
+                } else {
+                  log("🧾 买鱼: 无需购买");
+                }
                 return;
               }
               if (maxBuy && buyNum > maxBuy) buyNum = maxBuy;
@@ -6793,7 +7134,7 @@ function execFishActions(base, cookie, ctx, opts) {
                 return;
               }
               if (empty === 0) {
-                log("🧾 买鱼: 空池塘=0" + (target > 0 ? "，尝试补足鱼苗至 " + target : ""));
+                log("🧾 买鱼: 空池塘=0" + (target > 0 ? "，按库存目标补至 " + target : ""));
               }
               var url = base + "/nc/cgi-bin/wap_fish_buy_new?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
               var body = "num=" + buyNum + "&fid=" + fid + "&sb=" + encodeURIComponent("确定");
@@ -6873,7 +7214,10 @@ function execFishActions(base, cookie, ctx, opts) {
         if (!hasEmpty && html.indexOf("空池塘") >= 0) hasEmpty = true;
 
         var feedPossible =
-          hasFeed && CONFIG.ENABLE.fish_feed && (CONFIG.FISH_FEED_ALLOW_SPEND || !FISH_FEED_EMPTY_SEEN);
+          hasFeed &&
+          CONFIG.ENABLE.fish_feed &&
+          !FISH_FEED_NOOP_SEEN &&
+          (CONFIG.FISH_FEED_ALLOW_SPEND || !FISH_FEED_EMPTY_SEEN);
         var fishSeedTotal = BAG_STATS.fish ? BAG_STATS.fish.total || 0 : 0;
         var emptyPossible =
           hasEmpty &&
@@ -6928,10 +7272,24 @@ function execFishActions(base, cookie, ctx, opts) {
 /* =======================
  *  RANCH MODE (牧场)
  * ======================= */
-function ranchGet(url, cookie) {
+function inferSceneLabel(url) {
+  var u = String(url || "").toLowerCase();
+  if (u.indexOf("/nc/cgi-bin/wap_fish_") >= 0) return "鱼塘";
+  if (u.indexOf("/nc/cgi-bin/wap_farm_fish_") >= 0) return "鱼塘";
+  if (u.indexOf("/mc/cgi-bin/wap_pasture_") >= 0) return "牧场";
+  if (u.indexOf("/nc/cgi-bin/wap_farm_") >= 0) return "农场";
+  if (u.indexOf("/mc/cgi-bin/") >= 0) return "牧场";
+  if (u.indexOf("/nc/cgi-bin/") >= 0) return "农场";
+  return "请求";
+}
+
+function ranchGet(url, cookie, label) {
   var target = normalizeMcappUrl(url);
-  return getHtmlFollow(target, cookie, null, "牧场", 0).then(function (resp) {
-    logDebug("牧场响应 " + (resp && resp.body ? resp.body.length : 0));
+  var scene = label || inferSceneLabel(target);
+  var activeCookie = preferRicherCookie(cookie, LAST_RANCH_COOKIE);
+  return getHtmlFollow(target, activeCookie, null, scene, 0).then(function (resp) {
+    if (resp && resp.cookie) LAST_RANCH_COOKIE = preferRicherCookie(resp.cookie, LAST_RANCH_COOKIE);
+    logDebug(scene + "响应 " + (resp && resp.body ? resp.body.length : 0));
     return (resp && resp.body) || "";
   });
 }
@@ -7067,25 +7425,70 @@ function ranchSignIn(base, cookie, ctx) {
 
 function ranchSellAll(base, cookie, ctx) {
   if (!CONFIG.ENABLE.ranch_sell_all) return Promise.resolve();
+  var maxRetry = Math.max(0, Number(CONFIG.RETRY_502 || 0));
   var step1 =
     base +
     "/mc/cgi-bin/wap_pasture_rep_sale?&saleAll=1&step=1&sid=" +
     ctx.sid +
     "&g_ut=" +
     ctx.g_ut;
-  return ranchGet(step1, cookie).then(function (html) {
+
+  function loadStep1(attempt) {
+    return ranchGet(step1, cookie).then(function (html) {
+      var text = normalizeSpace(extractMessage(html) || stripTags(html || ""));
+      var transient = isTransientFailText(text);
+      if (transient && attempt < maxRetry) {
+        log("⚠️ 牧场售卖(step1): 系统繁忙，第" + (attempt + 1) + "次重试");
+        return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+          return loadStep1(attempt + 1);
+        });
+      }
+      return { html: html, transient: transient, retries: attempt };
+    });
+  }
+
+  function loadStep2(url, attempt) {
+    return ranchGet(url, cookie).then(function (html2) {
+      var msg2 = extractMessage(html2);
+      var text2 = normalizeSpace(msg2 || stripTags(html2 || ""));
+      var transient2 = isTransientFailText(text2);
+      if (transient2 && attempt < maxRetry) {
+        log("⚠️ 牧场售卖(step2): 系统繁忙，第" + (attempt + 1) + "次重试");
+        return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+          return loadStep2(url, attempt + 1);
+        });
+      }
+      return { html: html2, msg: msg2, text: text2, transient: transient2, retries: attempt };
+    });
+  }
+
+  return loadStep1(0).then(function (ret1) {
+    var html = (ret1 && ret1.html) || "";
+    var step1Transient = ret1 && ret1.transient;
+    if (step1Transient) {
+      log("⚠️ 牧场售卖(step1): 系统繁忙，继续尝试 step2");
+    }
     var h = html.replace(/&amp;/g, "&");
     var link = firstMatch(h, /(wap_pasture_rep_sale[^\"\\s>]*step=2[^\"\\s>]*)/);
     if (!link) {
       link = "wap_pasture_rep_sale?saleAll=1&step=2&sid=" + ctx.sid + "&g_ut=" + ctx.g_ut;
     }
     var url = link.indexOf("http") === 0 ? link : base + "/mc/cgi-bin/" + link.replace(/^\.?\//, "");
-    return ranchGet(url, cookie).then(function (html2) {
-      var msg = extractMessage(html2);
+    return loadStep2(url, 0).then(function (ret2) {
+      var html2 = (ret2 && ret2.html) || "";
+      var msg = (ret2 && ret2.msg) || "";
+      var text = (ret2 && ret2.text) || normalizeSpace(stripTags(html2 || ""));
       var money = parseMoneyFromMsg(msg || stripTags(html2));
       if (money > 0) MONEY_STATS.ranchSell += money;
       if (msg) log("🧺 牧场售卖: " + msg);
-      if (isSellSuccess(msg, html2)) RANCH_STATS.sell += 1;
+      if (isSellSuccess(msg, html2)) {
+        RANCH_STATS.sell += 1;
+        return;
+      }
+      if (ret2 && ret2.transient) {
+        RANCH_STATS.errors += 1;
+        log("⚠️ 牧场售卖未完成: " + (msg || "系统繁忙，请稍后重试"));
+      }
     });
   });
 }
@@ -7094,10 +7497,14 @@ function refreshRanchContext(base, cookie, ctx) {
   if (!ctx || !ctx.sid || !ctx.g_ut) return Promise.resolve();
   var url = base + "/mc/cgi-bin/wap_pasture_index?sid=" + ctx.sid + "&g_ut=" + ctx.g_ut;
   return ranchGet(url, cookie).then(function (html) {
+    ctx.statusList = parseRanchStatus(html);
     ctx.helpLinks = extractHelpLinks(html);
     var food = extractFoodId(html);
     if (food) ctx.food = food;
-    ctx.productSerials = extractProductionSerials(html);
+    var pmeta = extractProductionMeta(html);
+    ctx.productSerials = pmeta.serials || [];
+    ctx.productBySerial = pmeta.bySerial || {};
+    ctx.productOneKeyLink = pmeta.oneKeyLink || "";
     ctx._help = extractHelpParams(html) || ctx._help;
     return html;
   });
@@ -7115,11 +7522,15 @@ function runRanch(base, cookie) {
         log("⚠️ 牧场页面异常(" + (extractTitle(html) || "无标题") + ")");
       }
       var ctx = extractRanchContext(html);
+      ctx.statusList = parseRanchStatus(html);
       ctx.helpLinks = extractHelpLinks(html);
       ctx.sid = ctx.sid || sid;
       ctx.g_ut = ctx.g_ut || g_ut;
       ctx.food = CONFIG.RANCH_FOOD || extractFoodId(html) || "";
-      ctx.productSerials = extractProductionSerials(html);
+      var pmeta = extractProductionMeta(html);
+      ctx.productSerials = pmeta.serials || [];
+      ctx.productBySerial = pmeta.bySerial || {};
+      ctx.productOneKeyLink = pmeta.oneKeyLink || "";
       if (!ctx.sid || !ctx.g_ut) {
         log("⚠️ 牧场参数缺失，可能未登录或 Cookie 失效");
         return { ok: false };
@@ -7370,63 +7781,130 @@ function execRanchActions(base, cookie, ctx, opts) {
   function doProductList() {
     if (!CONFIG.ENABLE.ranch_product) return Promise.resolve();
     var list = ctx.productSerials && ctx.productSerials.length > 0 ? ctx.productSerials : [];
-    if (list.length === 0) {
+    var bySerial = ctx.productBySerial || {};
+    var oneKeyLink = ctx.productOneKeyLink || "";
+    if (!oneKeyLink && list.length === 0) {
       log("🥚 生产: 未发现可生产动物");
       return Promise.resolve();
     }
-    var max = Math.min(CONFIG.RANCH_MAX_SERIAL || 6, list.length);
-    var i = 0;
-    function next() {
-      if (i >= max) return Promise.resolve();
-      var serial = list[i++];
-      var url =
-        base +
-        "/mc/cgi-bin/wap_pasture_product?sid=" +
-        ctx.sid +
-        "&g_ut=" +
-        ctx.g_ut +
-        "&serial=" +
-        serial +
-        "&B_UID=" +
-        (ctx.B_UID || "");
+    var max = Math.min(CONFIG.RANCH_MAX_SERIAL || 6, list.length || 0);
+    var produced = 0;
+    var producedAny = false;
+
+    function harvestAllAfterProduct() {
+      if (!producedAny) return Promise.resolve();
+      return sleep(16000).then(function () {
+        var hurl =
+          base +
+          "/mc/cgi-bin/wap_pasture_harvest?sid=" +
+          ctx.sid +
+          "&g_ut=" +
+          ctx.g_ut +
+          "&serial=-1&htype=3";
+        return ranchGet(hurl, cookie).then(function (html2) {
+          var beforeHarvest = ctx.statusList || [];
+          var afterHarvest = parseRanchStatus(html2);
+          if (afterHarvest.length > 0) ctx.statusList = afterHarvest;
+          var msg2 = extractMessage(html2);
+          if (msg2) log("🐮 收获: " + msg2);
+          if (isSuccessMsg(msg2)) {
+            var hc2 = parseRanchHarvestCountFromMsg(msg2 || html2);
+            if (hc2 > 0) RANCH_STATS.harvest += hc2;
+            else {
+              var infer2 = inferRanchHarvestFromStatus(beforeHarvest, afterHarvest);
+              if (infer2.count > 0) {
+                RANCH_STATS.harvest += infer2.count;
+                log(
+                  "🐮 收获(列表兜底): 推断" +
+                    infer2.count +
+                    "只" +
+                    (infer2.detail ? " | " + infer2.detail : "")
+                );
+              } else if (isRanchBlankHarvestMsg(msg2, html2)) {
+                log("🐮 收获: 接口空结果，按无动作处理");
+              } else {
+                RANCH_STATS.harvestUnknown += 1;
+                log("🐮 收获: 成功，但本次数量未返回");
+              }
+            }
+            didHarvestAfterProduct = true;
+          }
+          ctx._help = extractHelpParams(html2) || ctx._help;
+          var hlinks = extractHelpLinks(html2);
+          if (hlinks.length) ctx.helpLinks = hlinks;
+        });
+      });
+    }
+
+    function runSerialBatch() {
+      if (max <= 0) return Promise.resolve();
+      var i = 0;
+      function next() {
+        if (i >= max) return Promise.resolve();
+        var serial = list[i++];
+        var url =
+          base +
+          "/mc/cgi-bin/wap_pasture_product?sid=" +
+          ctx.sid +
+          "&g_ut=" +
+          ctx.g_ut +
+          "&serial=" +
+          serial +
+          "&B_UID=" +
+          (ctx.B_UID || "");
+        return ranchGet(url, cookie)
+          .then(function (html) {
+            var rawMsg = extractMessage(html);
+            var animal = bySerial[serial] || "";
+            var msg = formatRanchProductMsg(rawMsg, animal);
+            if (msg) {
+              log("🥚 生产" + (animal ? "[" + animal + "#" + serial + "]" : "[#" + serial + "]") + ": " + msg);
+            }
+            var ok = isSuccessMsg(rawMsg || msg);
+            if (ok) {
+              producedAny = true;
+              produced += 1;
+              RANCH_STATS.product += 1;
+            }
+          })
+          .then(function () {
+            return sleep(CONFIG.WAIT_MS);
+          })
+          .then(next);
+      }
+      return next();
+    }
+
+    function tryOneKey() {
+      if (!CONFIG.RANCH_TRY_ONEKEY_PRODUCT || !oneKeyLink) return Promise.resolve(false);
+      var url = oneKeyLink.indexOf("http") === 0 ? oneKeyLink : base + "/mc/cgi-bin/" + oneKeyLink.replace(/^\.?\//, "");
       return ranchGet(url, cookie)
         .then(function (html) {
           var msg = extractMessage(html);
-          if (msg) log("🥚 生产: " + msg);
+          if (msg) log("🥚 一键生产: " + msg);
           var ok = isSuccessMsg(msg);
-          if (ok) RANCH_STATS.product += 1;
-          if (ok) {
-            didHarvestAfterProduct = true;
-            return sleep(16000).then(function () {
-              var hurl =
-                base +
-                "/mc/cgi-bin/wap_pasture_harvest?sid=" +
-                ctx.sid +
-                "&g_ut=" +
-                ctx.g_ut +
-                "&serial=" +
-                serial +
-                "&htype=3";
-              return ranchGet(hurl, cookie).then(function (html2) {
-                var msg2 = extractMessage(html2);
-                if (msg2) log("🐮 收获: " + msg2);
-                if (isSuccessMsg(msg2)) {
-                  var hc2 = parseRanchHarvestCountFromMsg(msg2) || 1;
-                  RANCH_STATS.harvest += hc2;
-                }
-                ctx._help = extractHelpParams(html2) || ctx._help;
-                var hlinks = extractHelpLinks(html2);
-                if (hlinks.length) ctx.helpLinks = hlinks;
-              });
-            });
-          }
+          if (!ok) return false;
+          var cnt = parseRanchProductCountFromMsg(msg);
+          if (cnt <= 0 && max > 0) cnt = max;
+          if (cnt < 0) cnt = 0;
+          producedAny = true;
+          produced += cnt;
+          if (cnt > 0) RANCH_STATS.product += cnt;
+          else if (CONFIG.DEBUG) logDebug("🥚 一键生产: 成功但未解析到数量");
+          return true;
         })
-        .then(function () {
-          return sleep(CONFIG.WAIT_MS);
-        })
-        .then(next);
+        .catch(function (e) {
+          log("🥚 一键生产失败: " + e);
+          return false;
+        });
     }
-    return next();
+
+    return tryOneKey()
+      .then(function (ok) {
+        if (ok) return;
+        return runSerialBatch();
+      })
+      .then(harvestAllAfterProduct);
   }
 
   function doHarvestAllIfNeeded() {
@@ -7440,11 +7918,31 @@ function execRanchActions(base, cookie, ctx, opts) {
       ctx.g_ut +
       "&serial=-1&htype=3";
     return ranchGet(url, cookie).then(function (html) {
+      var beforeHarvest = ctx.statusList || [];
+      var afterHarvest = parseRanchStatus(html);
+      if (afterHarvest.length > 0) ctx.statusList = afterHarvest;
       var msg = extractMessage(html);
       if (msg) log("🐮 收获: " + msg);
       if (isSuccessMsg(msg)) {
-        var hc = parseRanchHarvestCountFromMsg(msg) || 1;
-        RANCH_STATS.harvest += hc;
+        var hc = parseRanchHarvestCountFromMsg(msg || html);
+        if (hc > 0) RANCH_STATS.harvest += hc;
+        else {
+          var infer = inferRanchHarvestFromStatus(beforeHarvest, afterHarvest);
+          if (infer.count > 0) {
+            RANCH_STATS.harvest += infer.count;
+            log(
+              "🐮 收获(列表兜底): 推断" +
+                infer.count +
+                "只" +
+                (infer.detail ? " | " + infer.detail : "")
+            );
+          } else if (isRanchBlankHarvestMsg(msg, html)) {
+            log("🐮 收获: 接口空结果，按无动作处理");
+          } else {
+            RANCH_STATS.harvestUnknown += 1;
+            log("🐮 收获: 成功，但本次数量未返回");
+          }
+        }
       }
       ctx._help = extractHelpParams(html);
       var hlinks = extractHelpLinks(html);
