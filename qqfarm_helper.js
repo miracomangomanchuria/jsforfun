@@ -2009,6 +2009,9 @@ function parseFeedPreInfo(html) {
     var t2 = parseInt(m[1], 10);
     if (!isNaN(t2)) info.total = t2;
   }
+  if (/仓库里已经没有牧草|仓库没有牧草|已没有牧草/.test(text)) {
+    info.total = 0;
+  }
   m = text.match(/最多可(?:喂|放|添加)\\s*([0-9]+)/);
   if (m) {
     var c2 = parseInt(m[1], 10);
@@ -4306,8 +4309,8 @@ function buildNotifyBody() {
     purchaseLine ? "🧾 购买 | " + purchaseLine : "",
     consumeLine ? "🧾 消耗 | " + consumeLine : "",
     noActionHint ? "⏳ 提示 | " + noActionHint : "",
-    "🧮 动作详 | " + actionDetails[0],
-    "🧮 动作详 | " + actionDetails[1],
+    "🧮 动作详情 | " + actionDetails[0],
+    "🧮 动作详情 | " + actionDetails[1],
     "🧩 动作 | " + farmLine + " / " + ranchLine + " / " + fishLine,
     "⏱ 用时 | " + (costSec ? costSec + "s" : "未知")
   ];
@@ -6825,7 +6828,9 @@ function execFishActions(base, cookie, ctx, opts) {
             "&index=-1";
           return fishGet(url, cookie).then(function (html) {
             var msg = extractMessage(html);
-            if (msg) log("🐟 喂鱼: " + msg);
+            var noop = isFishFeedNoopText(msg, html);
+            if (noop) log("🐟 喂鱼: 当前阶段不可喂，跳过(点券鱼苗/无可喂鱼)");
+            else if (msg) log("🐟 喂鱼: " + msg);
             trackFishFeedUsage(html);
             var feedCount = parseFishFeedPondCount(msg || html) || 1;
             if (isFeedSuccess(msg, html)) {
@@ -6833,7 +6838,7 @@ function execFishActions(base, cookie, ctx, opts) {
               didFeed = true;
               FISH_FEED_NOOP_SEEN = false;
               if (BAG_STATS.fishFeed) BAG_STATS.fishFeed.loaded = false;
-            } else if (isFishFeedNoopText(msg, html)) {
+            } else if (noop) {
               FISH_FEED_NOOP_SEEN = true;
               logDebug("🐟 喂鱼: 当前无可喂鱼，后续复查将跳过喂鱼");
             }
@@ -6863,14 +6868,16 @@ function execFishActions(base, cookie, ctx, opts) {
           return fishGet(url, cookie)
             .then(function (html) {
               var msg = extractMessage(html);
-              if (msg) log("🐟 喂鱼: " + msg);
+              var noop = isFishFeedNoopText(msg, html);
+              if (noop) log("🐟 喂鱼: 当前阶段不可喂，跳过(点券鱼苗/无可喂鱼)");
+              else if (msg) log("🐟 喂鱼: " + msg);
               trackFishFeedUsage(html);
               if (isFeedSuccess(msg, html)) {
                 FISH_STATS.feed += 1;
                 didFeed = true;
                 FISH_FEED_NOOP_SEEN = false;
                 if (BAG_STATS.fishFeed) BAG_STATS.fishFeed.loaded = false;
-              } else if (isFishFeedNoopText(msg, html)) {
+              } else if (noop) {
                 FISH_FEED_NOOP_SEEN = true;
                 logDebug("🐟 喂鱼: 当前无可喂鱼，后续复查将跳过喂鱼");
               }
@@ -7736,6 +7743,19 @@ function ranchFeedOnce(base, cookie, ctx, force) {
         if (isFeedSuccess(msg, html2)) {
           var fc = parseRanchFeedCountFromMsg(msg || html2) || num || 1;
           RANCH_STATS.feed += fc;
+          if (info && info.n !== null && !isNaN(info.n)) {
+            var nextN = info.n + fc;
+            if (info.cap && !isNaN(info.cap) && nextN > info.cap) nextN = info.cap;
+            if (nextN < 0) nextN = 0;
+            info.n = nextN;
+            ctx.food = String(nextN);
+          }
+          if (info && info.total !== null && !isNaN(info.total)) {
+            var left = info.total - fc;
+            if (left < 0) left = 0;
+            info.total = left;
+          }
+          ctx._feedInfo = { total: info.total, n: info.n, cap: info.cap };
           return { ok: true, info: info };
         }
         return { ok: false, info: info };
@@ -7881,6 +7901,9 @@ function execRanchActions(base, cookie, ctx, opts) {
       return ranchGet(url, cookie)
         .then(function (html) {
           var msg = extractMessage(html);
+          if (msg && /成功将\\s*赶去生产/.test(msg)) {
+            msg = msg.replace(/成功将\\s*赶去生产/, "成功将可生产动物赶去生产");
+          }
           if (msg) log("🥚 一键生产: " + msg);
           var ok = isSuccessMsg(msg);
           if (!ok) return false;
