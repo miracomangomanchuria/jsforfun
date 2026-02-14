@@ -49,6 +49,7 @@ var CONFIG = {
   FARM_JSON_LOCK_HEURISTIC: true,
   FARM_JSON_LOCK_GUARD: true,
   FARM_JSON_LOCK_GUARD_MIN_TOTAL: 18,
+  FARM_JSON_GET_OUTPUT_ON_FAIL: true,
   FARM_JSON_SEED_ENABLE: true,
   FARM_JSON_CROP_ENABLE: true,
   FARM_JSON_SALE_ENABLE: true,
@@ -81,11 +82,20 @@ var CONFIG = {
   FISH_BUY_NUM: 50, // 单次购买量(默认与目标数一致)
   FISH_TRY_FALLBACK_HARVEST: false,
   FISH_FALLBACK_INDEX: "",
-  FISH_MAX_POND: 6,
+  // 目标池塘格数：手游端常见为 8；若你实际只有 6 格也没关系，放养会自动停止。
+  FISH_MAX_POND: 8,
   // 鱼塘复查安全上限（0=不限制，达到条件即退出）
   FISH_CLEANUP_MAX_PASS: 0,
   // 空池塘未知时，尝试通过购买预览页补判空位
   FISH_EMPTY_FALLBACK: true,
+  // 鱼塘空位主判定：优先走 JSON(cgi_fish_index)，WAP 仅作兜底与对照
+  FISH_JSON_INDEX_ENABLE: true,
+  // 放养优先走 JSON(cgi_fish_plant)，WAP 作为兜底
+  FISH_PLANT_JSON_FIRST: true,
+  // 珍珠抽奖：每天仅尝试一次免费抽奖（QX/Surge/Loon 默认启用，Node 默认关闭）
+  FISH_PEARL_DRAW_DAILY: true,
+  FISH_PEARL_DRAW_NODE: false,
+  FISH_PEARL_DRAW_FORCE_FREE: true,
 
   // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
@@ -113,6 +123,8 @@ var CONFIG = {
   RETRY_502: 2,
   RETRY_SHORT_BODY_LEN: 120,
   RETRY_WAIT_MS: 800,
+  // 针对“系统繁忙/网络繁忙/请稍后再试”等提示的额外重试次数（不影响 502 重试）
+  RETRY_TRANSIENT: 5,
 
   // 任务开关
   ENABLE: {
@@ -270,6 +282,14 @@ function sleep(ms) {
 
 function nowTs() {
   return Math.floor(Date.now() / 1000);
+}
+
+function localDateKey() {
+  var d = new Date();
+  var y = d.getFullYear();
+  var m = d.getMonth() + 1;
+  var day = d.getDate();
+  return y + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
 }
 
 function getFarmTime() {
@@ -721,9 +741,9 @@ function extractMcappLink(html) {
 
 function extractDldPastureLink(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/https?:\/\/mcapp\.z\.qq\.com[^"'\\s]*wap_pasture_index[^"'\\s]*/i);
+  var m = h.match(/https?:\/\/mcapp\.z\.qq\.com[^"'\s]*wap_pasture_index[^"'\s]*/i);
   if (m) return m[0];
-  m = h.match(/mcapp\.z\.qq\.com[^"'\\s]*wap_pasture_index[^"'\\s]*/i);
+  m = h.match(/mcapp\.z\.qq\.com[^"'\s]*wap_pasture_index[^"'\s]*/i);
   if (m) {
     var raw = m[0].replace(/^https?:\/\//i, "");
     return "https://" + raw;
@@ -747,7 +767,7 @@ function extractContinueLink(html) {
 
 function extractAnyMcappPath(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/(\/(?:nc|mc)\/cgi-bin\/wap_[^"'\\s>]+)/i);
+  var m = h.match(/(\/(?:nc|mc)\/cgi-bin\/wap_[^"'\s>]+)/i);
   return m ? m[1] : "";
 }
 
@@ -769,9 +789,9 @@ function resolveUrl(base, link) {
 
 function extractRedirectUrl(html) {
   var h = html || "";
-  var meta = h.match(/http-equiv=["']?refresh["']?[^>]*content=["']?[^;]+;\\s*url=([^"'>\\s]+)/i);
+  var meta = h.match(/http-equiv=["']?refresh["']?[^>]*content=["']?[^;]+;\s*url=([^"'>\s]+)/i);
   if (meta) return meta[1];
-  var js = h.match(/location\\.href\\s*=\\s*['"]([^'"]+)['"]/i);
+  var js = h.match(/location\.href\s*=\s*['"]([^'"]+)['"]/i);
   if (js) return js[1];
   return "";
 }
@@ -1103,6 +1123,9 @@ var FISH_STATS = {
   sell: 0,
   buy: 0,
   plant: 0,
+  pearlDraw: 0,
+  pearlSpend: 0,
+  pearlGain: "",
   errors: 0
 };
 
@@ -1150,9 +1173,14 @@ var LAST_FISH_ENTRY_URL = "";
 var PURCHASE_LOGS = [];
 var LAST_FISH_EMPTY = null;
 var LAST_FISH_HAS_EMPTY = false;
+var LAST_FISH_CAP = 0;
 var NO_MONEY = { farmSeed: false, grassSeed: false, fishSeed: false };
 var FISH_FEED_EMPTY_SEEN = false;
 var FISH_FEED_NOOP_SEEN = false;
+var STORE_KEY_FISH_PEARL_DAY = "qqfarm_fish_pearl_day";
+var STORE_KEY_FISH_PEARL_DONE = "qqfarm_fish_pearl_done";
+var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
+var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
 
 function bannerStart() {
   log(LINE);
@@ -1227,6 +1255,16 @@ function buildRanchHeaders(cookie, referer) {
     "Accept-Language": "zh-CN,zh;q=0.9",
     Cookie: cookie,
     Referer: referer || "https://mcapp.z.qq.com/"
+  };
+}
+
+function buildFishJsonHeaders(cookie) {
+  return {
+    "User-Agent": "qqfarm/45 CFNetwork/3860.400.51 Darwin/25.3.0",
+    Accept: "*/*",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Content-Type": "application/x-www-form-urlencoded",
+    Cookie: cookie
   };
 }
 
@@ -1457,9 +1495,9 @@ function isFishFeedNoopText(msg, html) {
 
 function parseSpendFromMsg(msg) {
   if (!msg) return 0;
-  var m = msg.match(/花费\\s*([0-9]+)\\s*个?金币/);
+  var m = msg.match(/花费\s*([0-9]+)\s*个?金币/);
   if (m) return Number(m[1] || 0);
-  m = msg.match(/共花费\\s*([0-9]+)\\s*个?金币/);
+  m = msg.match(/共花费\s*([0-9]+)\s*个?金币/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1486,9 +1524,9 @@ function countParamList(link, key) {
 function parseFishFeedPondCount(textOrHtml) {
   var text = stripTags(textOrHtml || "");
   if (!text) return 0;
-  var m = text.match(/为\\s*([0-9]+)\\s*块?池塘.*?喂/);
+  var m = text.match(/为\s*([0-9]+)\s*块?池塘.*?喂/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/喂鱼[^0-9]{0,6}([0-9]+)\\s*块?池塘/);
+  m = text.match(/喂鱼[^0-9]{0,6}([0-9]+)\s*块?池塘/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1498,7 +1536,7 @@ function parseRanchHelpCount(textOrHtml) {
   if (!text) return 0;
   var m = text.match(/清理[^xX0-9]{0,8}[xX]([0-9]+)/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/清理[^0-9]{0,8}([0-9]+)\\s*个/);
+  m = text.match(/清理[^0-9]{0,8}([0-9]+)\s*个/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1599,11 +1637,11 @@ function parsePlantCountFromMsg(msg) {
   if (!msg) return 0;
   var text = String(msg);
   var m;
-  m = text.match(/成功在\\s*([0-9]+)\\s*块空地上种植/);
+  m = text.match(/成功在\s*([0-9]+)\s*块空地上种植/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/成功种植\\s*([0-9]+)\\s*块/);
+  m = text.match(/成功种植\s*([0-9]+)\s*块/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/种植[^0-9]{0,6}([0-9]+)\\s*块/);
+  m = text.match(/种植[^0-9]{0,6}([0-9]+)\s*块/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1716,8 +1754,8 @@ function parseActionResult(res, type) {
 function parseSeedUnitPrice(html) {
   var text = stripTags(html || "");
   if (!text) return 0;
-  text = text.replace(/\\s+/g, " ");
-  var re = /单价[:：]?\\s*([0-9]+)/g;
+  text = text.replace(/\s+/g, " ");
+  var re = /单价[:：]?\s*([0-9]+)/g;
   var m;
   while ((m = re.exec(text))) {
     var price = Number(m[1] || 0);
@@ -1734,11 +1772,11 @@ function parseSeedUnitPrice(html) {
 function parseFishFeedUsage(textOrHtml) {
   var text = stripTags(textOrHtml || "");
   if (!text) return null;
-  var m = text.match(/使用\\s*([^\\d,，。！!]{0,12}?鱼食)\\s*([0-9]+)\\s*袋/);
+  var m = text.match(/使用\s*([^\d,，。！!]{0,12}?鱼食)\s*([0-9]+)\s*袋/);
   if (m) {
     return { name: normalizeSpace(m[1]), count: Number(m[2] || 0) };
   }
-  m = text.match(/使用\\s*([0-9]+)\\s*袋/);
+  m = text.match(/使用\s*([0-9]+)\s*袋/);
   if (m) {
     return { name: "鱼食", count: Number(m[1] || 0) };
   }
@@ -1748,13 +1786,13 @@ function parseFishFeedUsage(textOrHtml) {
 function parseFishPlantCountFromMsg(msg) {
   if (!msg) return 0;
   var text = String(msg);
-  var m = text.match(/放养[^0-9]{0,6}([0-9]+)\\s*条/);
+  var m = text.match(/放养[^0-9]{0,6}([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/养殖了\\s*([0-9]+)\\s*条/);
+  m = text.match(/养殖了\s*([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/池塘养殖了\\s*([0-9]+)\\s*条/);
+  m = text.match(/池塘养殖了\s*([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/成功[^0-9]{0,6}([0-9]+)\\s*条/);
+  m = text.match(/成功[^0-9]{0,6}([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1762,9 +1800,9 @@ function parseFishPlantCountFromMsg(msg) {
 function parseFishHarvestCountFromMsg(msg) {
   if (!msg) return 0;
   var text = String(msg);
-  var m = text.match(/收获了\\s*([0-9]+)\\s*条/);
+  var m = text.match(/收获了\s*([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/成功收获[^0-9]{0,6}([0-9]+)\\s*条/);
+  m = text.match(/成功收获[^0-9]{0,6}([0-9]+)\s*条/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1772,14 +1810,14 @@ function parseFishHarvestCountFromMsg(msg) {
 function parseRanchFeedCountFromMsg(msg) {
   if (!msg) return 0;
   var text = String(msg);
-  var m = text.match(/成功添加\\s*([0-9]+)\\s*[棵颗]/);
+  var m = text.match(/成功添加\s*([0-9]+)\s*[棵颗]/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
 
 function parseRanchHarvestCountFromMsg(msg) {
   if (!msg) return 0;
-  var text = stripTags(String(msg || "")).replace(/\\s+/g, " ").trim();
+  var text = stripTags(String(msg || "")).replace(/\s+/g, " ").trim();
   if (!text) return 0;
   var sum = 0;
   var head = text;
@@ -1807,7 +1845,7 @@ function parseRanchHarvestCountFromMsg(msg) {
 function isRanchBlankHarvestMsg(msg, html) {
   var text = normalizeSpace(msg || stripTags(html || ""));
   if (!text) return false;
-  if (/成功收获了\\s*获得经验/.test(text)) return true;
+  if (/成功收获了\s*获得经验/.test(text)) return true;
   if (/成功收获/.test(text) && /获得经验/.test(text) && !/[0-9]/.test(text) && !/[×xX]/.test(text)) {
     return true;
   }
@@ -1816,11 +1854,11 @@ function isRanchBlankHarvestMsg(msg, html) {
 
 function parseRanchProductCountFromMsg(msg) {
   if (!msg) return 0;
-  var text = stripTags(String(msg || "")).replace(/\\s+/g, " ").trim();
+  var text = stripTags(String(msg || "")).replace(/\s+/g, " ").trim();
   if (!text) return 0;
-  var m = text.match(/成功将\\s*([0-9]+)\\s*只/);
+  var m = text.match(/成功将\s*([0-9]+)\s*只/);
   if (m) return Number(m[1] || 0);
-  m = text.match(/赶去生产[^0-9]{0,8}([0-9]+)\\s*只/);
+  m = text.match(/赶去生产[^0-9]{0,8}([0-9]+)\s*只/);
   if (m) return Number(m[1] || 0);
   return 0;
 }
@@ -1892,7 +1930,7 @@ function recordActionNoop(type, n) {
 
 function buildFishFallbackIndex() {
   if (CONFIG.FISH_FALLBACK_INDEX) return CONFIG.FISH_FALLBACK_INDEX;
-  var max = CONFIG.FISH_MAX_POND || 6;
+  var max = CONFIG.FISH_MAX_POND || 8;
   var arr = [];
   for (var i = 0; i < max; i++) arr.push(i);
   return arr.join(",");
@@ -1946,10 +1984,10 @@ function extractHelpParams(html) {
 
 function extractHelpLinks(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var re = /wap_pasture_help\\?[^\"'>]*/g;
+  var re = /wap_pasture_help\?[^\"'>]*/g;
   var list = [];
   var m;
-  while ((m = re.exec(h))) list.push(m[0].replace(/\\s+/g, ""));
+  while ((m = re.exec(h))) list.push(m[0].replace(/\s+/g, ""));
   return uniqLinks(list);
 }
 
@@ -2028,14 +2066,14 @@ function parseGrassCount(html) {
   text = text.replace(/\s+/g, " ").trim();
 
   // 牧场背包页常见展示：牧草：347
-  var m = text.match(/牧草\\s*[:：]\\s*([0-9]+)/);
+  var m = text.match(/牧草\s*[:：]\s*([0-9]+)/);
   if (m) {
     var v0 = parseInt(m[1], 10);
     return isNaN(v0) ? null : v0;
   }
 
   // 喂草预览页常见提示：仓库里还剩315颗牧草
-  m = text.match(/仓库里还剩\\s*([0-9]+)\\s*颗?牧草/);
+  m = text.match(/仓库里还剩\s*([0-9]+)\s*颗?牧草/);
   if (m) {
     var v1 = parseInt(m[1], 10);
     return isNaN(v1) ? null : v1;
@@ -2043,10 +2081,10 @@ function parseGrassCount(html) {
 
   // 兜底：旧样式（尽量避免误匹配“种子/阈值”等）
   m =
-    text.match(/(?:^|\\s)牧草[^0-9]{0,8}([0-9]+)(?:$|\\s)/) ||
-    text.match(/(?:^|\\s)([0-9]+)[^0-9]{0,8}牧草(?:$|\\s)/) ||
-    text.match(/牧草\\s*[×xX]\\s*([0-9]+)/) ||
-    text.match(/牧草\\s*\\((\\d+)\\)/);
+    text.match(/(?:^|\s)牧草[^0-9]{0,8}([0-9]+)(?:$|\s)/) ||
+    text.match(/(?:^|\s)([0-9]+)[^0-9]{0,8}牧草(?:$|\s)/) ||
+    text.match(/牧草\s*[×xX]\s*([0-9]+)/) ||
+    text.match(/牧草\s*\((\d+)\)/);
   if (!m) return null;
   var v = parseInt(m[1], 10);
   return isNaN(v) ? null : v;
@@ -2055,11 +2093,11 @@ function parseGrassCount(html) {
 function parseFeedPreInfo(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var info = { B_UID: "", total: null, n: null, cap: 1000 };
-  var m = h.match(/name=["']B_UID["']\\s+value=["']([^"']+)/i);
+  var m = h.match(/name=["']B_UID["']\s+value=["']([^"']+)/i);
   if (m) info.B_UID = m[1];
-  m = h.match(/name=["']total["']\\s+value=["']([^"']+)/i);
+  m = h.match(/name=["']total["']\s+value=["']([^"']+)/i);
   if (m) info.total = parseInt(m[1], 10);
-  m = h.match(/name=["']n["']\\s+value=["']([^"']+)/i);
+  m = h.match(/name=["']n["']\s+value=["']([^"']+)/i);
   if (m) info.n = parseInt(m[1], 10);
   var text = stripTags(h);
   var clean = text.replace(/\s+/g, "");
@@ -2073,13 +2111,13 @@ function parseFeedPreInfo(html) {
   m =
     clean.match(/剩余饲料([0-9]+)/) ||
     clean.match(/你目前剩余饲料([0-9]+)/) ||
-    text.match(/剩余饲料[:：]?\\s*([0-9]+)/) ||
-    text.match(/你目前剩余饲料\\s*([0-9]+)/);
+    text.match(/剩余饲料[:：]?\s*([0-9]+)/) ||
+    text.match(/你目前剩余饲料\s*([0-9]+)/);
   if (m) {
     var n2 = parseInt(m[1], 10);
     if (!isNaN(n2)) info.n = n2;
   }
-  m = clean.match(/仓库里还剩([0-9]+)颗?牧草/) || text.match(/仓库里还剩\\s*([0-9]+)\\s*颗?牧草/);
+  m = clean.match(/仓库里还剩([0-9]+)颗?牧草/) || text.match(/仓库里还剩\s*([0-9]+)\s*颗?牧草/);
   if (m) {
     var t2 = parseInt(m[1], 10);
     if (!isNaN(t2)) info.total = t2;
@@ -2087,7 +2125,7 @@ function parseFeedPreInfo(html) {
   if (/仓库里已经没有牧草|仓库没有牧草|已没有牧草/.test(text)) {
     info.total = 0;
   }
-  m = text.match(/最多可(?:喂|放|添加)\\s*([0-9]+)/);
+  m = text.match(/最多可(?:喂|放|添加)\s*([0-9]+)/);
   if (m) {
     var c2 = parseInt(m[1], 10);
     if (!isNaN(c2)) info.cap = c2;
@@ -2103,14 +2141,14 @@ function extractFeedFormAction(html) {
 
 function extractFishLevel(html) {
   var text = stripTags(html);
-  var m = text.match(/等级[:：]?\\s*([0-9]+)/);
+  var m = text.match(/等级[:：]?\s*([0-9]+)/);
   return m ? m[1] : "";
 }
 
 function extractFishFertilizeIndices(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var idx = {};
-  var re = /wap_farm_fish_fertilize\\?[^\"\\s>]*index=([0-9]+)/g;
+  var re = /wap_farm_fish_fertilize\?[^\"\s>]*index=([0-9]+)/g;
   var m;
   while ((m = re.exec(h))) {
     idx[m[1]] = true;
@@ -2124,28 +2162,28 @@ function extractFishHarvestLinks(html) {
   var re = /wap_farm_fish_harvest[^\"'>]*/g;
   var m;
   while ((m = re.exec(h))) {
-    links.push(m[0].replace(/\\s+/g, ""));
+    links.push(m[0].replace(/\s+/g, ""));
   }
   return links;
 }
 
 function extractFishHarvestIndex(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/wap_farm_fish_harvest\\?[^\"\\s>]*index=([0-9,]+)/);
+  var m = h.match(/wap_farm_fish_harvest\?[^\"\s>]*index=([0-9,]+)/);
   return m ? m[1] : "";
 }
 
 function extractFishPlantLink(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/wap_fish_plant\\?[^\"'>]*/);
-  return m ? m[0].replace(/\\s+/g, "") : "";
+  var m = h.match(/wap_fish_plant\?[^\"'>]*/);
+  return m ? m[0].replace(/\s+/g, "") : "";
 }
 
 function extractFishBuyFids(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var ids = [];
   var seen = {};
-  var re = /wap_fish_buy_(?:pre_)?new\\?[^\"'>]*fid=([0-9]+)/g;
+  var re = /wap_fish_buy_(?:pre_)?new\?[^\"'>]*fid=([0-9]+)/g;
   var m;
   while ((m = re.exec(h))) {
     if (!seen[m[1]]) {
@@ -2160,10 +2198,10 @@ function extractFishBuyOptions(html) {
   var h = (html || "").replace(/&amp;/g, "&");
   var list = [];
   var seen = {};
-  var re = /<p>\\s*\\d+\\.\\s*([^<(]+?)\\s*\\([^)]*\\)[\\s\\S]{0,200}?wap_fish_buy_(?:pre_)?new\\?[^\"'>]*fid=([0-9]+)/g;
+  var re = /<p>\s*\d+\.\s*([^<(]+?)\s*\([^)]*\)[\s\S]{0,200}?wap_fish_buy_(?:pre_)?new\?[^\"'>]*fid=([0-9]+)/g;
   var m;
   while ((m = re.exec(h))) {
-    var name = (m[1] || "").replace(/\\s+/g, " ").trim();
+    var name = (m[1] || "").replace(/\s+/g, " ").trim();
     var fid = m[2];
     if (!fid || seen[fid]) continue;
     seen[fid] = true;
@@ -2180,7 +2218,7 @@ function extractFishNameFromPre(html) {
 
 function extractFishMaxBuy(html) {
   var text = stripTags(html || "");
-  var m = text.match(/最多可购买\\s*([0-9]+)/);
+  var m = text.match(/最多可购买\s*([0-9]+)/);
   if (!m) return null;
   var v = parseInt(m[1], 10);
   return isNaN(v) ? null : v;
@@ -2190,11 +2228,11 @@ function extractFishEmptyPonds(html) {
   var text = stripTags(html || "");
   var clean = text.replace(/\s+/g, "");
   var m = clean.match(/你有([0-9]+)块空池塘/);
-  if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空池塘/);
+  if (!m) m = text.match(/你有\s*([0-9]+)\s*块空池塘/);
   if (!m) m = clean.match(/你有([0-9]+)块空鱼塘/);
-  if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空鱼塘/);
+  if (!m) m = text.match(/你有\s*([0-9]+)\s*块空鱼塘/);
   if (!m) m = clean.match(/你有([0-9]+)块空鱼池/);
-  if (!m) m = text.match(/你有\\s*([0-9]+)\\s*块空鱼池/);
+  if (!m) m = text.match(/你有\s*([0-9]+)\s*块空鱼池/);
   if (!m) m = clean.match(/空池塘[:：]?([0-9]+)/);
   if (!m) m = clean.match(/空鱼塘[:：]?([0-9]+)/);
   if (!m) m = clean.match(/空鱼池[:：]?([0-9]+)/);
@@ -2203,12 +2241,418 @@ function extractFishEmptyPonds(html) {
   return isNaN(v) ? null : v;
 }
 
+function parseFishIndexOccupancy(html) {
+  var out = {
+    occupied: 0,
+    maxNo: 0,
+    serialNos: [],
+    indices: [],
+    hasOneKeyFeed: false
+  };
+  if (!html) return out;
+  var h = String(html || "").replace(/&amp;/g, "&");
+
+  // 1) 编号行（最稳）：1. / 2. / ... / 8.
+  var noSet = {};
+  var m;
+  var noRe = /(?:^|[\r\n>])\s*([0-9]{1,2})\.\s*/g;
+  while ((m = noRe.exec(h))) {
+    var no = parseInt(m[1], 10);
+    if (isNaN(no) || no <= 0 || no > 99) continue;
+    noSet[no] = true;
+  }
+  for (var k in noSet) {
+    if (!noSet.hasOwnProperty(k)) continue;
+    var n = parseInt(k, 10);
+    if (isNaN(n)) continue;
+    out.serialNos.push(n);
+    if (n > out.maxNo) out.maxNo = n;
+  }
+  out.serialNos.sort(function (a, b) {
+    return a - b;
+  });
+
+  // 2) fish_fertilize index（用于定位已占用的真实槽位，0-based）
+  var idxSet = {};
+  var idxRe = /wap_farm_fish_fertilize\?[^\"\s>]*index=([0-9]+)/g;
+  while ((m = idxRe.exec(h))) {
+    var idx = parseInt(m[1], 10);
+    if (isNaN(idx) || idx < 0 || idx > 98) continue;
+    idxSet[idx] = true;
+  }
+  for (var k2 in idxSet) {
+    if (!idxSet.hasOwnProperty(k2)) continue;
+    var i2 = parseInt(k2, 10);
+    if (isNaN(i2)) continue;
+    out.indices.push(i2);
+  }
+  out.indices.sort(function (a, b) {
+    return a - b;
+  });
+
+  // 3) occupied 优先看编号数量；若未解析到则回退 index 数量
+  if (out.serialNos.length > 0) out.occupied = out.serialNos.length;
+  else if (out.indices.length > 0) out.occupied = out.indices.length;
+
+  // 4) 是否存在“一键喂鱼食”入口（可作为页面识别辅助）
+  out.hasOneKeyFeed = /index=-1/.test(h) || /一键[^<]{0,8}喂鱼食/.test(stripTags(h));
+
+  return out;
+}
+
+function guessFishPoolCap(maxIndex, occupied) {
+  var cap = Number(CONFIG.FISH_MAX_POND || 8);
+  if (!cap || isNaN(cap) || cap < 1) cap = 8;
+  if (LAST_FISH_CAP && LAST_FISH_CAP > cap) cap = LAST_FISH_CAP;
+  if (maxIndex >= 0 && maxIndex + 1 > cap) cap = maxIndex + 1;
+  if (occupied > cap) cap = occupied;
+  return cap;
+}
+
+function parseFishIndexJsonState(json) {
+  if (!json || Number(json.code) !== 1) return null;
+  var fish = ensureArray(json.fish);
+  if (!fish.length && fish !== json.fish) return null;
+  var occupied = fish.length;
+  var maxIndex = -1;
+  for (var i = 0; i < fish.length; i++) {
+    var it = fish[i] || {};
+    var idx = Number(it.i);
+    if (!isNaN(idx) && idx >= 0 && idx > maxIndex) maxIndex = idx;
+  }
+  var cap = guessFishPoolCap(maxIndex, occupied);
+  var empty = cap - occupied;
+  if (empty < 0) empty = 0;
+  var pearl = json.pearl != null ? Number(json.pearl) : null;
+  if (pearl !== null && isNaN(pearl)) pearl = null;
+  return {
+    occupied: occupied,
+    cap: cap,
+    empty: empty,
+    maxIndex: maxIndex,
+    pearl: pearl,
+    raw: json
+  };
+}
+
+function ensureFishJsonContext(cookie) {
+  var uIdx = FARM_CTX.uIdx || "";
+  var uinY = FARM_CTX.uinY || getFarmUinFromCookie(cookie) || "";
+  if (uIdx && uinY) return Promise.resolve({ uIdx: uIdx, uinY: uinY });
+  if (!CONFIG.FARM_JSON_ENABLE) return Promise.resolve({ uIdx: uIdx, uinY: uinY });
+  return ensureFarmJsonContext(cookie)
+    .then(function () {
+      return {
+        uIdx: FARM_CTX.uIdx || "",
+        uinY: FARM_CTX.uinY || getFarmUinFromCookie(cookie) || ""
+      };
+    })
+    .catch(function () {
+      return { uIdx: uIdx, uinY: uinY };
+    });
+}
+
+function fetchFishIndexJsonState(cookie, tag) {
+  if (!CONFIG.FISH_JSON_INDEX_ENABLE) return Promise.resolve(null);
+  return ensureFishJsonContext(cookie).then(function (ctx) {
+    var uIdx = ctx.uIdx || "";
+    var uinY = ctx.uinY || "";
+    if (!uIdx || !uinY) {
+      if (CONFIG.DEBUG) logDebug("🐟 JSON空位(" + (tag || "读取") + "): 缺少 uIdx/uinY，跳过");
+      return null;
+    }
+    var params = {
+      uinY: uinY,
+      uIdx: uIdx,
+      ownerId: uIdx,
+      farmTime: getFarmTime(),
+      platform: CONFIG.FARM_PLATFORM || "13",
+      appid: CONFIG.FARM_APPID || "353",
+      version: CONFIG.FARM_VERSION || "4.0.20.0"
+    };
+    var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_index";
+    return httpRequest({
+      method: "POST",
+      url: url,
+      headers: buildFishJsonHeaders(cookie),
+      body: buildLegacyBody(params)
+    })
+      .then(function (resp) {
+        var json = tryJson(resp.body);
+        var state = parseFishIndexJsonState(json);
+        if (!state) {
+          if (CONFIG.DEBUG) {
+            var code = json && json.code != null ? json.code : "非JSON";
+            logDebug("🐟 JSON空位(" + (tag || "读取") + "): 无效回包 code=" + code + " status=" + resp.status);
+          }
+          return null;
+        }
+        LAST_FISH_EMPTY = state.empty;
+        LAST_FISH_HAS_EMPTY = state.empty > 0;
+        if (state.cap > 0) LAST_FISH_CAP = state.cap;
+        if (CONFIG.DEBUG) {
+          logDebug(
+            "🐟 JSON空位(" +
+              (tag || "读取") +
+              "): 占用" +
+              state.occupied +
+              "/" +
+              state.cap +
+              " 空位" +
+              state.empty +
+              (state.pearl !== null ? " 珍珠" + state.pearl : "")
+          );
+        }
+        return state;
+      })
+      .catch(function (e) {
+        if (CONFIG.DEBUG) logDebug("🐟 JSON空位(" + (tag || "读取") + ")失败: " + e);
+        return null;
+      });
+  });
+}
+
+function parseFishPearlPkg(pkg) {
+  var arr = ensureArray(pkg);
+  if (!arr.length) return "";
+  var parts = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    var id = it.id != null ? String(it.id) : "";
+    var num = Number(it.num || 0);
+    if (isNaN(num) || num <= 0) num = 1;
+    if (!id) continue;
+    parts.push("id" + id + "×" + num);
+  }
+  return parts.join("，");
+}
+
+function updateFishPearlFreeCache(freeTimes, freeStamp) {
+  if (freeTimes !== null && freeTimes !== undefined && freeTimes !== "") {
+    $.write(String(freeTimes), STORE_KEY_FISH_PEARL_FREE_TIMES);
+  }
+  if (freeStamp !== null && freeStamp !== undefined && freeStamp !== "") {
+    $.write(String(freeStamp), STORE_KEY_FISH_PEARL_FREE_STAMP);
+  }
+}
+
+function fetchFishPieceState(cookie, tag) {
+  return ensureFishJsonContext(cookie).then(function (ctx) {
+    var uIdx = ctx.uIdx || "";
+    var uinY = ctx.uinY || "";
+    if (!uIdx || !uinY) return null;
+    var params = {
+      act: "index",
+      uIdx: uIdx,
+      uinY: uinY,
+      farmTime: getFarmTime(),
+      platform: CONFIG.FARM_PLATFORM || "13",
+      appid: CONFIG.FARM_APPID || "353",
+      version: CONFIG.FARM_VERSION || "4.0.20.0"
+    };
+    var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_piece";
+    return httpRequest({
+      method: "POST",
+      url: url,
+      headers: buildFishJsonHeaders(cookie),
+      body: buildLegacyBody(params)
+    })
+      .then(function (resp) {
+        var json = tryJson(resp.body);
+        if (!json || Number(json.ret) !== 0 || Number(json.ecode || 0) !== 0) return null;
+        var freeTimes = json.free_times != null ? Number(json.free_times) : null;
+        var freeStamp = json.free_stamp != null ? Number(json.free_stamp) : null;
+        if (freeTimes !== null && isNaN(freeTimes)) freeTimes = null;
+        if (freeStamp !== null && isNaN(freeStamp)) freeStamp = null;
+        updateFishPearlFreeCache(freeTimes, freeStamp);
+        if (CONFIG.DEBUG) {
+          logDebug(
+            "🎁 珍珠池(" +
+              (tag || "读取") +
+              "): free_times=" +
+              (freeTimes !== null ? freeTimes : "未知") +
+              " free_stamp=" +
+              (freeStamp !== null ? freeStamp : "未知")
+          );
+        }
+        return { freeTimes: freeTimes, freeStamp: freeStamp, raw: json };
+      })
+      .catch(function (e) {
+        if (CONFIG.DEBUG) logDebug("🎁 珍珠池(" + (tag || "读取") + ")失败: " + e);
+        return null;
+      });
+  });
+}
+
+function shouldRunFishPearlDraw() {
+  if (!CONFIG.FISH_PEARL_DRAW_DAILY) return false;
+  if (IS_NODE && !CONFIG.FISH_PEARL_DRAW_NODE) return false;
+  return true;
+}
+
+function runFishPearlDrawDaily(cookie) {
+  if (!shouldRunFishPearlDraw()) {
+    if (IS_NODE && CONFIG.DEBUG && CONFIG.FISH_PEARL_DRAW_DAILY && !CONFIG.FISH_PEARL_DRAW_NODE) {
+      logDebug("🎁 珍珠抽奖: Node 默认关闭");
+    }
+    return Promise.resolve(false);
+  }
+  var today = localDateKey();
+  var oldDay = $.read(STORE_KEY_FISH_PEARL_DAY) || "";
+  if (oldDay !== today) {
+    $.write(today, STORE_KEY_FISH_PEARL_DAY);
+    $.write("0", STORE_KEY_FISH_PEARL_DONE);
+    $.write("", STORE_KEY_FISH_PEARL_FREE_TIMES);
+    $.write("", STORE_KEY_FISH_PEARL_FREE_STAMP);
+    if (CONFIG.DEBUG) logDebug("🎁 珍珠抽奖: 新的一天，已重置日计数(" + today + ")");
+  }
+  var done = $.read(STORE_KEY_FISH_PEARL_DONE) || "0";
+  if (done === "1") {
+    var cachedTimes = $.read(STORE_KEY_FISH_PEARL_FREE_TIMES) || "";
+    var cachedStamp = $.read(STORE_KEY_FISH_PEARL_FREE_STAMP) || "";
+    var extra = [];
+    if (cachedTimes !== "") extra.push("free_times=" + cachedTimes);
+    if (cachedStamp !== "") extra.push("free_stamp=" + cachedStamp);
+    log("🎁 珍珠抽奖: 今日已执行，跳过" + (extra.length ? " (" + extra.join(" ") + ")" : ""));
+    return Promise.resolve(false);
+  }
+
+  var beforePearl = null;
+  var afterPearl = null;
+  var latestFreeTimes = null;
+  var latestFreeStamp = null;
+  var pieceState = null;
+  return ensureFishJsonContext(cookie)
+    .then(function (ctx) {
+      var uIdx = ctx.uIdx || "";
+      var uinY = ctx.uinY || "";
+      if (!uIdx || !uinY) {
+        log("⚠️ 珍珠抽奖: 缺少 uIdx/uinY，跳过");
+        return { skip: true, reason: "ctx-missing" };
+      }
+      return fetchFishPieceState(cookie, "抽奖前").then(function (piece) {
+        pieceState = piece;
+        if (piece) {
+          latestFreeTimes = piece.freeTimes;
+          latestFreeStamp = piece.freeStamp;
+        }
+        if (piece && piece.freeTimes !== null && piece.freeTimes <= 0) {
+          var tail = [];
+          if (piece.freeStamp !== null && piece.freeStamp !== undefined) tail.push("free_stamp=" + piece.freeStamp);
+          return { skip: true, reason: "free-empty", extra: tail.join(" ") };
+        }
+        return { skip: false, uIdx: uIdx, uinY: uinY };
+      });
+    })
+    .then(function (meta) {
+      if (!meta || meta.skip) {
+        if (meta && meta.reason === "free-empty") {
+          log("🎁 珍珠抽奖: 免费次数不足，跳过" + (meta.extra ? " (" + meta.extra + ")" : ""));
+        }
+        return false;
+      }
+      return fetchFishIndexJsonState(cookie, "珍珠抽奖前")
+        .then(function (st) {
+          if (st && st.pearl !== null && st.pearl !== undefined) beforePearl = st.pearl;
+          var params = {
+            uinY: meta.uinY,
+            uIdx: meta.uIdx,
+            type: 1,
+            farmTime: getFarmTime(),
+            platform: CONFIG.FARM_PLATFORM || "13",
+            appid: CONFIG.FARM_APPID || "353",
+            version: CONFIG.FARM_VERSION || "4.0.20.0"
+          };
+          if (CONFIG.FISH_PEARL_DRAW_FORCE_FREE) params.free = 1;
+          var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_pearl_gift";
+          return httpRequest({
+            method: "POST",
+            url: url,
+            headers: buildFishJsonHeaders(cookie),
+            body: buildLegacyBody(params)
+          }).then(function (resp) {
+            var json = tryJson(resp.body);
+            if (!json) {
+              log("⚠️ 珍珠抽奖: 响应非 JSON");
+              return false;
+            }
+            if (json.free_times != null && json.free_times !== "") {
+              var ft = Number(json.free_times);
+              if (!isNaN(ft)) latestFreeTimes = ft;
+            }
+            if (json.free_stamp != null && json.free_stamp !== "") {
+              var fs = Number(json.free_stamp);
+              if (!isNaN(fs)) latestFreeStamp = fs;
+            }
+            updateFishPearlFreeCache(
+              json.free_times != null ? json.free_times : "",
+              json.free_stamp != null ? json.free_stamp : ""
+            );
+            var ok = Number(json.ret) === 0 && Number(json.ecode || 0) === 0;
+            var pkg = parseFishPearlPkg(json.pkg);
+            var tip = pkg ? " 奖励[" + pkg + "]" : "";
+            if (ok) {
+              FISH_STATS.pearlDraw += 1;
+              if (pkg) FISH_STATS.pearlGain = pkg;
+              log("🎁 珍珠抽奖: 已执行" + tip);
+            } else {
+              var msg = json.direction || json.msg || json.message || ("ret=" + json.ret + " ecode=" + json.ecode);
+              log("⚠️ 珍珠抽奖失败: " + msg);
+            }
+            if (json.free_times != null || json.free_stamp != null) {
+              logDebug(
+                "🎁 珍珠抽奖状态: free_times=" +
+                  (json.free_times != null ? json.free_times : "未知") +
+                  " free_stamp=" +
+                  (json.free_stamp != null ? json.free_stamp : "未知")
+              );
+            }
+            return ok;
+          });
+        })
+        .then(function (ok) {
+          if (!ok) return false;
+          return fetchFishIndexJsonState(cookie, "珍珠抽奖后").then(function (st2) {
+            if (st2 && st2.pearl !== null && st2.pearl !== undefined) afterPearl = st2.pearl;
+            return true;
+          });
+        });
+    })
+    .then(function (ok) {
+      if (!ok) return false;
+      if (beforePearl !== null && afterPearl !== null) {
+        var delta = afterPearl - beforePearl;
+        if (delta < 0) {
+          FISH_STATS.pearlSpend += -delta;
+          log("⚠️ 珍珠抽奖: 珍珠变化 " + beforePearl + "→" + afterPearl + " (Δ" + delta + ")");
+        } else {
+          log("🎁 珍珠抽奖: 珍珠变化 " + beforePearl + "→" + afterPearl + " (Δ+" + delta + ")");
+        }
+      }
+      $.write(today, STORE_KEY_FISH_PEARL_DAY);
+      $.write("1", STORE_KEY_FISH_PEARL_DONE);
+      if (latestFreeTimes !== null || latestFreeStamp !== null || pieceState) {
+        logDebug(
+          "🎁 珍珠抽奖缓存: done=1 free_times=" +
+            (latestFreeTimes !== null ? latestFreeTimes : "未知") +
+            " free_stamp=" +
+            (latestFreeStamp !== null ? latestFreeStamp : "未知")
+        );
+      }
+      return true;
+    })
+    .catch(function (e) {
+      log("⚠️ 珍珠抽奖异常: " + e);
+      return false;
+    });
+}
+
 function extractFishEntryLink(html) {
   var h = (html || "").replace(/&amp;/g, "&");
-  var m = h.match(/wap_(?:farm_)?fish_index\\?[^\"'>]*/);
-  if (m) return m[0].replace(/\\s+/g, "");
-  m = h.match(/fish_index\\?[^\"'>]*/);
-  return m ? m[0].replace(/\\s+/g, "") : "";
+  var m = h.match(/wap_(?:farm_)?fish_index\?[^\"'>]*/);
+  if (m) return m[0].replace(/\s+/g, "");
+  m = h.match(/fish_index\?[^\"'>]*/);
+  return m ? m[0].replace(/\s+/g, "") : "";
 }
 
 function isContinuePage(html) {
@@ -2404,7 +2848,7 @@ function recordCropName(cid, name) {
   var key = String(cid);
   var nm = normalizeSpace(name);
   if (!nm) return;
-  if (!CROP_NAME_MAP[key] || /^cId\\d+/.test(CROP_NAME_MAP[key])) CROP_NAME_MAP[key] = nm;
+  if (!CROP_NAME_MAP[key] || /^cId\d+/.test(CROP_NAME_MAP[key])) CROP_NAME_MAP[key] = nm;
 }
 
 function getCropNameByCid(cid) {
@@ -2469,7 +2913,7 @@ function parseHarvestDetailFromMsg(msg) {
   if (!text) return [];
   var list = [];
   var m;
-  var re1 = /收获了?\\s*([0-9]+)\\s*个\\s*([^\\s，。,.]+)/g;
+  var re1 = /收获了?\s*([0-9]+)\s*个\s*([^\s，。,.]+)/g;
   while ((m = re1.exec(text))) {
     var n1 = Number(m[1] || 0);
     var name1 = normalizeSpace(m[2] || "");
@@ -2477,7 +2921,7 @@ function parseHarvestDetailFromMsg(msg) {
     if (/^(金币|经验|点券|经验值|积分|贡献|人气)$/.test(name1)) continue;
     list.push({ name: name1, count: n1 });
   }
-  var re2 = /([^\\s，。,.]+)\\s*[×xX]\\s*([0-9]+)/g;
+  var re2 = /([^\s，。,.]+)\s*[×xX]\s*([0-9]+)/g;
   while ((m = re2.exec(text))) {
     var n2 = Number(m[2] || 0);
     var name2 = normalizeSpace(m[1] || "");
@@ -2615,8 +3059,8 @@ function formatRanchOpsSum() {
 function formatFishOpsSum() {
   var total =
     FISH_STATS.feed + FISH_STATS.harvest + FISH_STATS.plant + FISH_STATS.buy + FISH_STATS.sell;
-  if (!total) return "";
-  return (
+  if (!total && !FISH_STATS.pearlDraw && !FISH_STATS.pearlSpend && !FISH_STATS.pearlGain) return "";
+  var base =
     "喂" +
     FISH_STATS.feed +
     " 收" +
@@ -2628,8 +3072,11 @@ function formatFishOpsSum() {
     " 卖" +
     FISH_STATS.sell +
     " 合计" +
-    total
-  );
+    total;
+  if (FISH_STATS.pearlDraw) base += " 抽" + FISH_STATS.pearlDraw;
+  if (FISH_STATS.pearlSpend) base += " 扣珠" + FISH_STATS.pearlSpend;
+  if (FISH_STATS.pearlGain) base += " 奖励[" + FISH_STATS.pearlGain + "]";
+  return base;
 }
 
 function recordPlantFail(kind, n) {
@@ -3659,6 +4106,7 @@ function captureStartFishStatus(cookie) {
   return getHtmlFollow(fishUrl, cookie, null, "鱼塘统计", 0)
     .then(function (ret) {
       STATUS_START.fish = parseFishStatus(ret.body || "");
+      return fetchFishIndexJsonState(cookie, "开始统计");
     })
     .catch(function (e) {
       log("📊 鱼塘统计读取失败: " + e);
@@ -3673,10 +4121,16 @@ function refreshEndFishStatus(cookie) {
     .then(function (ret) {
       var html = ret.body || "";
       STATUS_END.fish = parseFishStatus(html);
-      LAST_FISH_EMPTY = extractFishEmptyPonds(html);
+      var emptyByWap = extractFishEmptyPonds(html);
+      LAST_FISH_EMPTY = emptyByWap;
       LAST_FISH_HAS_EMPTY =
-        (LAST_FISH_EMPTY !== null && LAST_FISH_EMPTY !== undefined && LAST_FISH_EMPTY > 0) ||
+        (emptyByWap !== null && emptyByWap !== undefined && emptyByWap > 0) ||
         (html.indexOf("一键养殖") >= 0 || html.indexOf("空池塘") >= 0);
+      return fetchFishIndexJsonState(cookie, "结束统计").then(function (jState) {
+        if (!jState) return;
+        LAST_FISH_EMPTY = jState.empty;
+        LAST_FISH_HAS_EMPTY = jState.empty > 0;
+      });
     })
     .catch(function (e) {
       log("📊 鱼塘统计读取失败: " + e);
@@ -4204,7 +4658,7 @@ function ranchSummaryLine() {
 }
 
 function fishSummaryLine() {
-  return (
+  var line =
     "喂鱼=" +
     FISH_STATS.feed +
     " 收获=" +
@@ -4216,8 +4670,9 @@ function fishSummaryLine() {
     " 购买=" +
     FISH_STATS.buy +
     " 错误=" +
-    FISH_STATS.errors
-  );
+    FISH_STATS.errors;
+  line += " 抽奖=" + FISH_STATS.pearlDraw + " 扣珠=" + FISH_STATS.pearlSpend;
+  return line;
 }
 
 function summaryLines() {
@@ -4268,6 +4723,10 @@ function summaryLines() {
     FISH_STATS.sell +
     " 买" +
     FISH_STATS.buy +
+    " 抽" +
+    FISH_STATS.pearlDraw +
+    " 扣珠" +
+    FISH_STATS.pearlSpend +
     " 错" +
     FISH_STATS.errors;
 
@@ -4363,7 +4822,11 @@ function buildNotifyBody() {
       " 买" +
       FISH_STATS.buy +
       " 售" +
-      FISH_STATS.sell
+      FISH_STATS.sell +
+      " 抽" +
+      FISH_STATS.pearlDraw +
+      " 扣珠" +
+      FISH_STATS.pearlSpend
   );
   var spendPartsBrief = [];
   if (MONEY_STATS.farmBuy > 0) spendPartsBrief.push("种子" + MONEY_STATS.farmBuy);
@@ -4477,7 +4940,11 @@ function buildNotifyBody() {
     " 买" +
     FISH_STATS.buy +
     " 卖" +
-    FISH_STATS.sell;
+    FISH_STATS.sell +
+    " 抽" +
+    FISH_STATS.pearlDraw +
+    " 扣珠" +
+    FISH_STATS.pearlSpend;
 
   var farmStatusStart = formatFarmStatusCountsNoLock("开始:", STATUS_START.farm);
   var farmStatusEnd = formatFarmStatusCountsNoLock("结束:", STATUS_END.farm);
@@ -4500,15 +4967,15 @@ function buildNotifyBody() {
   var actionDetails = farmActionDetailLine();
   var detailLines = [
     "【🌅 开始状态】",
-    "🌾 土地 | " + formatStatusLine("", STATUS_START.farm).replace(/^:\\s*/, ""),
-    "🐟 鱼塘 | " + formatStatusLine("", STATUS_START.fish).replace(/^:\\s*/, ""),
-    "🐮 动物 | " + formatStatusLine("", STATUS_START.ranch).replace(/^:\\s*/, ""),
+    "🌾 土地 | " + formatStatusLine("", STATUS_START.farm).replace(/^:\s*/, ""),
+    "🐟 鱼塘 | " + formatStatusLine("", STATUS_START.fish).replace(/^:\s*/, ""),
+    "🐮 动物 | " + formatStatusLine("", STATUS_START.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusStart,
     SUBLINE,
     "【🌇 结束状态】",
-    "🌾 土地 | " + formatStatusLine("", STATUS_END.farm).replace(/^:\\s*/, ""),
-    "🐟 鱼塘 | " + formatStatusLine("", STATUS_END.fish).replace(/^:\\s*/, ""),
-    "🐮 动物 | " + formatStatusLine("", STATUS_END.ranch).replace(/^:\\s*/, ""),
+    "🌾 土地 | " + formatStatusLine("", STATUS_END.farm).replace(/^:\s*/, ""),
+    "🐟 鱼塘 | " + formatStatusLine("", STATUS_END.fish).replace(/^:\s*/, ""),
+    "🐮 动物 | " + formatStatusLine("", STATUS_END.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusEnd,
     farmDelta ? "🧮 农场Δ | " + farmDelta : "",
     harvestableDelta ? "🍎 可收变化 | " + harvestableDelta : "",
@@ -4808,6 +5275,61 @@ function callFarmJsonAction(base, cookie, action, params) {
   });
 }
 
+function fetchFarmJsonOutputStatus(base, cookie, uin, place) {
+  if (!CONFIG.FARM_JSON_GET_OUTPUT_ON_FAIL) return Promise.resolve(null);
+  if (!uin && uin !== 0) return Promise.resolve(null);
+  if (place === null || place === undefined || place === "") return Promise.resolve(null);
+  var farmTime = getFarmTime();
+  var params = {
+    v_client: 1,
+    place: place,
+    uinY: uin,
+    uIdx: uin,
+    ownerId: uin,
+    farmTime: farmTime,
+    platform: CONFIG.FARM_PLATFORM || "13",
+    appid: CONFIG.FARM_APPID || "353",
+    version: CONFIG.FARM_VERSION || "4.0.20.0"
+  };
+  var placeName = FARM_PLACE_NAME[place];
+  if (placeName) {
+    params.fName = placeName;
+    params.tName = placeName;
+  }
+  return callFarmJsonAction(base, cookie, "/cgi-bin/cgi_farm_plant?mod=farmlandstatus&act=getOutput", params)
+    .then(function (res) {
+      var status = res && res.status ? res.status : null;
+      if (!status || typeof status !== "object") return null;
+      return status;
+    })
+    .catch(function () {
+      return null;
+    });
+}
+
+function logFarmOutputStatus(place, status) {
+  if (!status || !CONFIG.DEBUG) return;
+  var cid = status.cId != null ? status.cId : "-";
+  var cropStatus = status.cropStatus != null ? status.cropStatus : "-";
+  var output = status.output != null ? status.output : "-";
+  var leavings = status.leavings != null ? status.leavings : "-";
+  var humidity = status.humidity != null ? status.humidity : "-";
+  logDebug(
+    "🌾 收获后验 place=" +
+      place +
+      " cId=" +
+      cid +
+      " cropStatus=" +
+      cropStatus +
+      " output=" +
+      output +
+      " leavings=" +
+      leavings +
+      " humidity=" +
+      humidity
+  );
+}
+
 function planJsonActions(farm) {
   var actions = [];
   var list = ensureArray(farm.farmlandStatus);
@@ -4913,6 +5435,7 @@ function execFarmJsonActions(base, cookie, actions) {
         if (a.type === "scarify" && a.withered) recordWitheredTry(1);
         return callFarmJsonAction(base, cookie, actMap[a.type], params)
           .then(function (res) {
+            var postHook = Promise.resolve();
             var ret = parseActionResult(res, a.type);
             if (ret.msg && CONFIG.DEBUG) log("ℹ️ 动作结果 " + actionLabel(a.type) + ": " + ret.msg);
             if (CONFIG.DEBUG && ret.count) logDebug("📊 计数 " + actionLabel(a.type) + ": " + ret.count);
@@ -4927,12 +5450,18 @@ function execFarmJsonActions(base, cookie, actions) {
             } else if (isNoActionMsg(ret.msg, a.type)) {
               recordActionNoop(a.type, 1);
             } else if (a.type === "harvest") {
-            skipAfter[a.place] = true;
-            logDebug("JSON 动作: 收获失败，跳过翻地/播种 place=" + a.place);
-          } else if (a.type === "scarify") {
-            skipAfter[a.place] = true;
-            logDebug("JSON 动作: 翻地失败，跳过播种 place=" + a.place);
-          }
+              skipAfter[a.place] = true;
+              logDebug("JSON 动作: 收获失败，跳过翻地/播种 place=" + a.place);
+              if (CONFIG.FARM_JSON_GET_OUTPUT_ON_FAIL) {
+                postHook = fetchFarmJsonOutputStatus(base, cookie, uin, a.place).then(function (st) {
+                  logFarmOutputStatus(a.place, st);
+                });
+              }
+            } else if (a.type === "scarify") {
+              skipAfter[a.place] = true;
+              logDebug("JSON 动作: 翻地失败，跳过播种 place=" + a.place);
+            }
+            return postHook;
         })
         .catch(function (e) {
           ACTION_STATS.errors += 1;
@@ -5751,7 +6280,7 @@ function farmSellAllWap(cookie) {
   var step1 = base + "/nc/cgi-bin/wap_farm_sale_all?step=1&sid=" + sid + "&g_ut=" + g_ut;
   return ranchGet(step1, cookie).then(function (html) {
     var h = html.replace(/&amp;/g, "&");
-    var link = firstMatch(h, /(wap_farm_sale_all\\?[^\"\\s>]*step=2[^\"\\s>]*)/);
+    var link = firstMatch(h, /(wap_farm_sale_all\?[^\"\s>]*step=2[^\"\s>]*)/);
     if (link && (!/sid=/.test(link) || !/g_ut=/.test(link))) {
       link = "";
     }
@@ -5958,7 +6487,7 @@ function farmOneKeySow(cookie, seedCid) {
   function extractEmptyLandSeeds(html) {
     if (!html) return [];
     var h = html.replace(/&amp;/g, "&");
-    var re = /wap_farm_seed_plant_list\?[^"'\\s>]+/g;
+    var re = /wap_farm_seed_plant_list\?[^"'\s>]+/g;
     var list = [];
     var m;
     var seen = {};
@@ -6104,7 +6633,7 @@ function farmOneKeySow(cookie, seedCid) {
         .then(function (html) {
           var h = (html || "").replace(/&amp;/g, "&");
           var links = [];
-          var re = /wap_farm_plant\\?[^\"\\s>]+/g;
+          var re = /wap_farm_plant\?[^\"\s>]+/g;
           var m;
           while ((m = re.exec(h))) links.push(m[0]);
           var normalized = links
@@ -6167,7 +6696,7 @@ function extractFarmWapLinks(html) {
     water: [],
     dig: []
   };
-  var re = /wap_farm_(harvest|opt|dig)\\?[^\"\\s>]+/g;
+  var re = /wap_farm_(harvest|opt|dig)\?[^\"\s>]+/g;
   var m;
   while ((m = re.exec(h))) {
     var link = m[0];
@@ -6826,11 +7355,15 @@ function buildCtx(html) {
         if (ret.url !== indexUrl) {
           return fetchIndex(indexUrl, 0, ret.url).then(function (ret2) {
             if (ret2.noEntry) logEntryHint(ret2.html);
-            return execFishActions(base, cookie, ret2.ctx);
+            return execFishActions(base, cookie, ret2.ctx).then(function () {
+              return runFishPearlDrawDaily(cookie);
+            });
           });
         }
       }
-      return execFishActions(base, cookie, ctx);
+      return execFishActions(base, cookie, ctx).then(function () {
+        return runFishPearlDrawDaily(cookie);
+      });
     })
     .catch(function (e) {
       FISH_STATS.errors += 1;
@@ -6844,6 +7377,97 @@ function autoPlantFishFromBag(base, cookie, ctx) {
   var g_ut = ctx.g_ut;
   var indexUrl = base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + sid + "&g_ut=" + g_ut;
   var didPlant = false;
+  var startOcc = null;
+  var startCap = null;
+  var endOcc = null;
+  var endCap = null;
+  var fallbackConflictSeen = false;
+  var jsonConflictSeen = false;
+  var transientRetries = Math.max(0, Number(CONFIG.RETRY_TRANSIENT || 0));
+  if (isNaN(transientRetries)) transientRetries = 0;
+
+  function calcFishCapacityFromIndex(occ) {
+    if (!occ) return CONFIG.FISH_MAX_POND || 8;
+    var cap = Number(CONFIG.FISH_MAX_POND || 8) || 8;
+    if (occ.maxNo && occ.maxNo > cap) cap = occ.maxNo;
+    if (occ.occupied > cap) cap = occ.occupied;
+    return cap;
+  }
+
+  function deriveEmptyFromIndex(html) {
+    var occ = parseFishIndexOccupancy(html || "");
+    var cap = calcFishCapacityFromIndex(occ);
+    var empty = cap - (occ.occupied || 0);
+    if (empty < 0) empty = 0;
+    return { empty: empty, cap: cap, occ: occ };
+  }
+
+  function refreshIndexSnapshot(tag) {
+    var jsonState = null;
+    return fetchFishIndexJsonState(cookie, tag)
+      .then(function (state) {
+        jsonState = state;
+        return fishGet(indexUrl, cookie);
+      })
+      .then(function (html) {
+        ctx.indexHtml = html || ctx.indexHtml;
+        var info = deriveEmptyFromIndex(html || "");
+        var occupied = info.occ.occupied;
+        var cap = info.cap;
+        var empty = info.empty;
+        var source = "fish_wap";
+
+        if (jsonState) {
+          if (
+            !jsonConflictSeen &&
+            (jsonState.occupied !== occupied || jsonState.cap !== cap || jsonState.empty !== empty)
+          ) {
+            jsonConflictSeen = true;
+            log(
+              "⚠️ 放养口径冲突: fish_json占用=" +
+                jsonState.occupied +
+                "/" +
+                jsonState.cap +
+                "，fish_wap占用=" +
+                occupied +
+                "/" +
+                cap +
+                "；优先 fish_json"
+            );
+          }
+          occupied = jsonState.occupied;
+          cap = jsonState.cap;
+          empty = jsonState.empty;
+          source = "fish_json";
+        }
+
+        if (CONFIG.DEBUG) {
+          logDebug(
+            "🐟 " +
+              (tag || "鱼塘快照") +
+              ": 占用" +
+              occupied +
+              "/" +
+              cap +
+              " (empty=" +
+              empty +
+              "，来源=" +
+              source +
+              (jsonState ? "，wap=" + info.occ.occupied + "/" + info.cap : "") +
+              ")"
+          );
+        }
+        return {
+          html: html || "",
+          empty: empty,
+          cap: cap,
+          occupied: occupied,
+          occ: info.occ,
+          source: source,
+          json: jsonState
+        };
+    });
+  }
 
   function fetchEmptyFromBuyPre() {
     if (!CONFIG.FISH_EMPTY_FALLBACK) return Promise.resolve(null);
@@ -6862,6 +7486,9 @@ function autoPlantFishFromBag(base, cookie, ctx) {
           base + "/nc/cgi-bin/wap_fish_buy_pre_new?sid=" + sid + "&g_ut=" + g_ut + "&fid=" + fid + "&buyway=0";
         return fishGet(preUrl, cookie).then(function (html2) {
           var empty = extractFishEmptyPonds(html2);
+          if (CONFIG.DEBUG && empty !== null && empty !== undefined) {
+            logDebug("🧪 buy_pre 空池塘: " + empty + " (fid=" + fid + ")");
+          }
           return empty === null || empty === undefined ? null : empty;
         });
       })
@@ -6870,15 +7497,105 @@ function autoPlantFishFromBag(base, cookie, ctx) {
       });
   }
 
-  function doPlant(empty) {
-    if (empty === 0) {
+  function plantByJson(fid, num, pre) {
+    if (!CONFIG.FISH_PLANT_JSON_FIRST) return Promise.resolve({ ok: false, delta: 0, full: false });
+    if (!fid || !num || num <= 0) return Promise.resolve({ ok: false, delta: 0, full: false });
+    return ensureFishJsonContext(cookie)
+      .then(function (jctx) {
+        var uIdx = jctx && jctx.uIdx ? jctx.uIdx : "";
+        var uinY = jctx && jctx.uinY ? jctx.uinY : "";
+        if (!uIdx || !uinY) return { ok: false, delta: 0, full: false };
+        var successHints = 0;
+        var stoppedFull = false;
+
+        function step(remain, busyRetry) {
+          if (remain <= 0) return Promise.resolve();
+          var params = {
+            fid: fid,
+            uIdx: uIdx,
+            uinY: uinY,
+            farmTime: getFarmTime(),
+            platform: CONFIG.FARM_PLATFORM || "13",
+            appid: CONFIG.FARM_APPID || "353",
+            version: CONFIG.FARM_VERSION || "4.0.20.0"
+          };
+          var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_plant";
+          return httpRequest({
+            method: "POST",
+            url: url,
+            headers: buildFishJsonHeaders(cookie),
+            body: buildLegacyBody(params)
+          })
+            .then(function (resp) {
+              var json = tryJson(resp.body);
+              if (json && Number(json.code) === 1) {
+                successHints += 1;
+                if (CONFIG.DEBUG) {
+                  logDebug(
+                    "🪣 JSON放养: 成功 fid=" + fid + " i=" + (json.i != null ? json.i : "-") + " 剩余尝试=" + (remain - 1)
+                  );
+                }
+                return sleep(CONFIG.WAIT_MS).then(function () {
+                  return step(remain - 1, 0);
+                });
+              }
+              var msg = "";
+              if (json && (json.direction || json.msg || json.message)) {
+                msg = normalizeSpace(json.direction || json.msg || json.message || "");
+              }
+              if (!msg && typeof resp.body === "string") msg = normalizeSpace(stripTags(resp.body || ""));
+              if (msg) log("🪣 放养(JSON): " + msg);
+              var transient = isTransientFailText(msg || "");
+              if (transient && busyRetry < transientRetries) {
+                log("⚠️ 放养(JSON): 系统繁忙，第" + (busyRetry + 1) + "次重试");
+                return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                  return step(remain, busyRetry + 1);
+                });
+              }
+              if (/池塘已经满|空池塘=0|没有空池塘|已满/.test(msg || "")) stoppedFull = true;
+              return;
+            })
+            .catch(function (e) {
+              if (CONFIG.DEBUG) logDebug("🪣 JSON放养请求异常: " + e);
+              return;
+            });
+        }
+
+        return step(num, 0).then(function () {
+          return refreshIndexSnapshot("JSON放养后复查").then(function (post) {
+            var delta = post.occupied - pre.occupied;
+            if (delta > 0) {
+              log("🪣 放养(JSON): 实际新增 " + delta + " 条");
+              return { ok: true, delta: delta, full: stoppedFull };
+            }
+            if (CONFIG.DEBUG && successHints > 0) {
+              logDebug("🪣 JSON放养: 成功提示" + successHints + "次，但占用未变化");
+            }
+            return { ok: false, delta: 0, full: stoppedFull };
+          });
+        });
+      })
+      .catch(function (e) {
+        if (CONFIG.DEBUG) logDebug("🪣 JSON放养失败: " + e);
+        return { ok: false, delta: 0, full: false };
+      });
+  }
+
+  function doPlant(targetEmpty) {
+    if (!targetEmpty || targetEmpty <= 0) {
       log("🪣 放养: 空池塘=0");
-      return;
+      return Promise.resolve(false);
     }
-    return ensureFishSeedTotal(cookie).then(function (total) {
+    return refreshIndexSnapshot("放养前复查").then(function (pre) {
+      var empty = pre.empty;
+      if (empty <= 0) {
+        if (CONFIG.DEBUG) logDebug("🪣 放养前复查: 空池塘=0，跳过本轮");
+        return false;
+      }
+      return ensureFishSeedTotal(cookie).then(function (total) {
       if (!total || total <= 0) {
         log("🪣 放养: 背包无鱼苗");
-        return;
+        return false;
       }
       var seedUrl =
         base +
@@ -6887,15 +7604,22 @@ function autoPlantFishFromBag(base, cookie, ctx) {
         "&g_ut=" +
         g_ut +
         "&pnum=" +
-        empty +
+        targetEmpty +
         "&flag=1&time=-2147483648";
       return fishGet(seedUrl, cookie).then(function (html2) {
         var link = extractFishPlantLink(html2);
-        var needNum = Math.min(empty, total);
-        if (!link) {
-          var fid = firstMatch(html2, /fid=([0-9]+)/);
-          if (fid) {
-            link =
+        var needNum = Math.min(targetEmpty, total);
+        var fid = "";
+        if (link) fid = firstMatch(link, /fid=([0-9]+)/);
+        if (!fid) fid = firstMatch(html2, /fid=([0-9]+)/) || String(CONFIG.FISH_BUY_FID || "");
+
+        function runWapPlant(wantNum, baseline) {
+          var num = Number(wantNum || 0);
+          var basePre = baseline || pre;
+          if (!num || num <= 0) return Promise.resolve(false);
+          var workLink = link;
+          if (!workLink && fid) {
+            workLink =
               "wap_fish_plant?sid=" +
               sid +
               "&g_ut=" +
@@ -6903,25 +7627,85 @@ function autoPlantFishFromBag(base, cookie, ctx) {
               "&fid=" +
               fid +
               "&flag=1&step=2&num=" +
-              needNum;
+              num;
           }
-        }
-        if (!link) {
-          log("🪣 放养: 未发现可放养入口");
-          return;
-        }
-        var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
-        return fishGet(url, cookie).then(function (html3) {
-          var msg = extractMessage(html3);
-          if (msg) log("🪣 放养: " + msg);
-          else log("🪣 放养: 已提交");
-          if (!/(对不起|没有足够|无法|不足|失败|未满足|输入有误|系统繁忙|稍候)/.test(msg || "")) {
-            var cnt = parseFishPlantCountFromMsg(msg || html3) || needNum || 1;
-            FISH_STATS.plant += cnt;
-            didPlant = true;
+          if (workLink && /num=\d+/.test(workLink)) workLink = workLink.replace(/num=\d+/, "num=" + num);
+          else if (workLink) workLink += (workLink.indexOf("?") >= 0 ? "&" : "?") + "num=" + num;
+          if (!workLink) {
+            log("🪣 放养: 未发现可放养入口");
+            return Promise.resolve(false);
           }
-        });
+          var url = workLink.indexOf("http") === 0 ? workLink : base + "/nc/cgi-bin/" + workLink.replace(/^\.?\//, "");
+          function tryPlant(attempt) {
+            return fishGet(url, cookie).then(function (html3) {
+              var msg = extractMessage(html3);
+              var text = normalizeSpace(msg || stripTags(html3 || ""));
+              var transient = isTransientFailText(text);
+              if (msg) log("🪣 放养: " + msg);
+              else log("🪣 放养: 已提交");
+              if (transient && attempt < transientRetries) {
+                log("⚠️ 放养: 系统繁忙，第" + (attempt + 1) + "次重试");
+                return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                  return tryPlant(attempt + 1);
+                });
+              }
+              if (/(对不起|没有足够|无法|不足|失败|未满足|输入有误|系统繁忙|稍候)/.test(msg || "")) {
+                return refreshIndexSnapshot("放养后复查").then(function (postBusy) {
+                  var deltaBusy = postBusy.occupied - basePre.occupied;
+                  if (deltaBusy > 0) {
+                    log("🪣 放养: 回包失败提示，但占用已变化，按成功记 " + deltaBusy + " 条");
+                    FISH_STATS.plant += deltaBusy;
+                    didPlant = true;
+                    return true;
+                  }
+                  return false;
+                });
+              }
+              return refreshIndexSnapshot("放养后复查").then(function (post) {
+                var delta = post.occupied - basePre.occupied;
+                if (delta > 0) {
+                  FISH_STATS.plant += delta;
+                  didPlant = true;
+                  if (CONFIG.DEBUG && delta !== num) {
+                    logDebug("🪣 放养: 请求数量=" + num + "，实际占用变化=" + delta);
+                  }
+                  return true;
+                }
+                var cnt = parseFishPlantCountFromMsg(msg || html3) || 0;
+                if (cnt > 0) {
+                  FISH_STATS.plant += cnt;
+                  didPlant = true;
+                  log("🪣 放养: 已按回包数量记账 " + cnt + " 条（占用未变化）");
+                  return true;
+                }
+                if (CONFIG.DEBUG) logDebug("🪣 放养: 回包成功但占用未变化，记为未成功");
+                return false;
+              });
+            });
+          }
+          return tryPlant(0);
+        }
+
+        if (!needNum || needNum <= 0) return false;
+        if (CONFIG.FISH_PLANT_JSON_FIRST && fid) {
+          return plantByJson(fid, needNum, pre).then(function (jret) {
+            if (jret && jret.ok && jret.delta > 0) {
+              FISH_STATS.plant += jret.delta;
+              didPlant = true;
+              var remain = needNum - jret.delta;
+              if (remain <= 0 || jret.full) return true;
+              if (CONFIG.DEBUG) logDebug("🪣 JSON放养后仍需补投放 " + remain + " 条，转 WAP 兜底");
+              return refreshIndexSnapshot("JSON后WAP前基线").then(function (pre2) {
+                return runWapPlant(remain, pre2);
+              });
+            }
+            if (jret && jret.full) return false;
+            return runWapPlant(needNum, pre);
+          });
+        }
+        return runWapPlant(needNum, pre);
       });
+    });
     });
   }
 
@@ -6936,41 +7720,70 @@ function autoPlantFishFromBag(base, cookie, ctx) {
       log("🪣 放养复查: 空池塘=" + empty + "，继续补投放");
     }
     return doPlant(empty).then(function () {
-      return fetchEmptyFromBuyPre().then(function (remain) {
-        if (remain === null || remain === undefined) return;
-        if (remain <= 0) return;
-        if (r >= 2) {
-          log("🪣 放养复查: 剩余空池塘=" + remain + "，达到补投放上限");
-          return;
-        }
-        return fillByEmpty(remain, r + 1);
+      return refreshIndexSnapshot("放养轮次复查").then(function (post) {
+        var remainByIndex = post.empty;
+        var mainSource = post.source === "fish_json" ? "fish_json" : "fish_wap";
+        return fetchEmptyFromBuyPre().then(function (remainByPre) {
+          if (remainByPre !== null && remainByPre !== undefined && remainByPre !== remainByIndex) {
+            fallbackConflictSeen = true;
+            log(
+              "⚠️ 放养口径冲突: " + mainSource + "空位=" + remainByIndex + "，buy_pre空位=" + remainByPre + "；优先 " + mainSource
+            );
+          }
+          if (remainByIndex <= 0) return;
+          if (r >= 2) {
+            log("🪣 放养复查: 剩余空池塘=" + remainByIndex + "，达到补投放上限");
+            return;
+          }
+          return fillByEmpty(remainByIndex, r + 1);
+        });
       });
     });
   }
 
-  return fishGet(indexUrl, cookie)
-    .then(function (html) {
-      ctx.indexHtml = html || ctx.indexHtml;
-      var maxPond = CONFIG.FISH_MAX_POND || 6;
-      var empty = extractFishEmptyPonds(html || "");
-      if (empty === 0) return fillByEmpty(0, 0);
-      if (empty === null || empty === undefined) {
-        return fetchEmptyFromBuyPre().then(function (fallback) {
-          if (fallback !== null && fallback !== undefined) return fillByEmpty(fallback, 0);
-          if (
-            (html || "").indexOf("一键养殖") >= 0 ||
-            (html || "").indexOf("空池塘") >= 0 ||
-            (html || "").indexOf("空鱼塘") >= 0 ||
-            (html || "").indexOf("空鱼池") >= 0
-          ) {
-            return fillByEmpty(maxPond, 0);
-          }
-          log("🪣 放养: 空池塘未知，跳过");
-        });
-      }
-      return fillByEmpty(empty, 0);
+  return refreshIndexSnapshot("放养开始")
+    .then(function (start) {
+      startOcc = start.occupied;
+      startCap = start.cap;
+      var emptyByIndex = start.empty;
+      var startSource = start.source === "fish_json" ? "fish_json" : "fish_wap";
+      if (emptyByIndex <= 0) return fillByEmpty(0, 0);
+      return fetchEmptyFromBuyPre().then(function (fallback) {
+        if (fallback !== null && fallback !== undefined && fallback !== emptyByIndex) {
+          fallbackConflictSeen = true;
+          log(
+            "⚠️ 放养口径冲突: " + startSource + "空位=" + emptyByIndex + "，buy_pre空位=" + fallback + "；优先 " + startSource
+          );
+        }
+        return fillByEmpty(emptyByIndex, 0);
+      });
     })
     .then(function () {
+      return refreshIndexSnapshot("放养结束").then(function (end) {
+        endOcc = end.occupied;
+        endCap = end.cap;
+      });
+    })
+    .then(function () {
+      if (startOcc !== null && endOcc !== null) {
+        var delta = endOcc - startOcc;
+        log(
+          "🪣 放养占用: 开始" +
+            startOcc +
+            "/" +
+            (startCap || "-") +
+            " → 结束" +
+            endOcc +
+            "/" +
+            (endCap || "-") +
+            " (Δ" +
+            formatDelta(delta) +
+            ")"
+        );
+      }
+      if (fallbackConflictSeen && CONFIG.DEBUG) {
+        logDebug("🧪 已触发空位口径冲突告警（buy_pre 与主判定口径不一致）");
+      }
       return didPlant;
     })
     .catch(function (e) {
@@ -7159,116 +7972,82 @@ function execFishActions(base, cookie, ctx, opts) {
       if (opts.skipHarvest) return;
       var indexParam = extractFishHarvestIndex(ctx.indexHtml || "");
       var links = ctx.harvestLinks || [];
-      if (!indexParam && links.length === 0) {
-        // 兜底再拉一次首页
+      if (!links || links.length === 0) links = extractFishHarvestLinks(ctx.indexHtml || "");
+
+      function doHarvestByLinks(hlinks) {
+        if (!hlinks || hlinks.length === 0) {
+          log("🎣 收获: 未发现可收获入口");
+          return Promise.resolve();
+        }
+        var i = 0;
+        function next() {
+          if (i >= hlinks.length) return Promise.resolve();
+          var link = hlinks[i++];
+          var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
+          return fishGet(url, cookie)
+            .then(function (html) {
+              var msg = extractMessage(html);
+              if (msg) log("🎣 收获: " + msg);
+              if (isSuccessMsg(msg)) {
+                var hc = parseFishHarvestCountFromMsg(msg || html) || 1;
+                FISH_STATS.harvest += hc;
+                didHarvest = true;
+              }
+            })
+            .then(function () {
+              return sleep(CONFIG.WAIT_MS);
+            })
+            .then(next);
+        }
+        return next();
+      }
+
+      function doHarvestNow() {
+        if (indexParam) {
+          var url =
+            base +
+            "/nc/cgi-bin/wap_farm_fish_harvest?sid=" +
+            ctx.sid +
+            "&g_ut=" +
+            ctx.g_ut +
+            "&index=" +
+            indexParam +
+            "&flag=2&time=-2147483648";
+          return fishGet(url, cookie)
+            .then(function (html) {
+              var msg = extractMessage(html);
+              if (msg) log("🎣 收获: " + msg);
+              if (isSuccessMsg(msg)) {
+                var hc =
+                  parseFishHarvestCountFromMsg(msg || html) ||
+                  countCommaList(indexParam) ||
+                  1;
+                FISH_STATS.harvest += hc;
+                didHarvest = true;
+                return true; // one-key harvest ok
+              }
+              return false;
+            })
+            .then(function (ok) {
+              // One-key harvest succeeded => do not harvest again by per-pond links.
+              if (ok) return;
+              return doHarvestByLinks(links);
+            });
+        }
+        return doHarvestByLinks(links);
+      }
+
+      if (!indexParam && (!links || links.length === 0)) {
+        // 兜底再拉一次首页（避免旧页面缺入口）
         return fishGet(base + "/nc/cgi-bin/wap_farm_fish_index?sid=" + ctx.sid + "&g_ut=" + ctx.g_ut, cookie)
           .then(function (htmlRetry) {
             ctx.indexHtml = htmlRetry;
             indexParam = extractFishHarvestIndex(htmlRetry || "");
             links = extractFishHarvestLinks(htmlRetry || "");
-            return { indexParam: indexParam, links: links };
-          })
-          .then(function (ret) {
-            var idxParam = ret.indexParam;
-            var hlinks = ret.links || [];
-            if (idxParam) {
-              var url =
-                base +
-                "/nc/cgi-bin/wap_farm_fish_harvest?sid=" +
-                ctx.sid +
-                "&g_ut=" +
-                ctx.g_ut +
-                "&index=" +
-                idxParam +
-                "&flag=2&time=-2147483648";
-              return fishGet(url, cookie).then(function (html) {
-                var msg = extractMessage(html);
-                if (msg) log("🎣 收获: " + msg);
-                if (isSuccessMsg(msg)) {
-                  var hc =
-                    parseFishHarvestCountFromMsg(msg || html) ||
-                    countCommaList(idxParam) ||
-                    1;
-                  FISH_STATS.harvest += hc;
-                  didHarvest = true;
-                }
-              });
-            }
-            if (!hlinks || hlinks.length === 0) {
-              log("🎣 收获: 未发现可收获入口");
-              return;
-            }
-            var ii = 0;
-            function next2() {
-              if (ii >= hlinks.length) return Promise.resolve();
-              var link = hlinks[ii++];
-              var url2 = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
-              return fishGet(url2, cookie)
-                .then(function (html) {
-                  var msg = extractMessage(html);
-                  if (msg) log("🎣 收获: " + msg);
-                  if (isSuccessMsg(msg)) {
-                    var hc = parseFishHarvestCountFromMsg(msg || html) || 1;
-                    FISH_STATS.harvest += hc;
-                    didHarvest = true;
-                  }
-                })
-                .then(function () {
-                  return sleep(CONFIG.WAIT_MS);
-                })
-                .then(next2);
-            }
-            return next2();
+            return doHarvestNow();
           });
       }
-      if (indexParam) {
-        var url =
-          base +
-          "/nc/cgi-bin/wap_farm_fish_harvest?sid=" +
-          ctx.sid +
-          "&g_ut=" +
-          ctx.g_ut +
-          "&index=" +
-          indexParam +
-          "&flag=2&time=-2147483648";
-        return fishGet(url, cookie).then(function (html) {
-          var msg = extractMessage(html);
-          if (msg) log("🎣 收获: " + msg);
-          if (isSuccessMsg(msg)) {
-            var hc =
-              parseFishHarvestCountFromMsg(msg || html) ||
-              countCommaList(indexParam) ||
-              1;
-            FISH_STATS.harvest += hc;
-            didHarvest = true;
-          }
-        });
-      }
-      if (!links || links.length === 0) {
-        log("🎣 收获: 未发现可收获入口");
-        return;
-      }
-      var i = 0;
-      function next() {
-        if (i >= links.length) return Promise.resolve();
-        var link = links[i++];
-        var url = link.indexOf("http") === 0 ? link : base + "/nc/cgi-bin/" + link.replace(/^\.?\//, "");
-        return fishGet(url, cookie)
-          .then(function (html) {
-            var msg = extractMessage(html);
-            if (msg) log("🎣 收获: " + msg);
-            if (isSuccessMsg(msg)) {
-              var hc = parseFishHarvestCountFromMsg(msg || html) || 1;
-              FISH_STATS.harvest += hc;
-              didHarvest = true;
-            }
-          })
-          .then(function () {
-            return sleep(CONFIG.WAIT_MS);
-          })
-          .then(next);
-      }
-      return next();
+      return doHarvestNow();
     })
     .then(function () {
       if (!CONFIG.FISH_AUTO_PLANT) return;
@@ -7833,7 +8612,7 @@ function ranchSellAll(base, cookie, ctx) {
         log("⚠️ 牧场售卖(step1): 系统繁忙，继续尝试 step2");
       }
       var h = html.replace(/&amp;/g, "&");
-      var link = firstMatch(h, /(wap_pasture_rep_sale[^\"\\s>]*step=2[^\"\\s>]*)/);
+      var link = firstMatch(h, /(wap_pasture_rep_sale[^\"\s>]*step=2[^\"\s>]*)/);
       if (!link) {
         link = "wap_pasture_rep_sale?saleAll=1&step=2&sid=" + ctx.sid + "&g_ut=" + ctx.g_ut;
       }
@@ -8342,8 +9121,8 @@ function execRanchActions(base, cookie, ctx, opts) {
       return ranchGet(url, cookie)
         .then(function (html) {
           var msg = extractMessage(html);
-          if (msg && /成功将\\s*赶去生产/.test(msg)) {
-            msg = msg.replace(/成功将\\s*赶去生产/, "成功将可生产动物赶去生产");
+          if (msg && /成功将\s*赶去生产/.test(msg)) {
+            msg = msg.replace(/成功将\s*赶去生产/, "成功将可生产动物赶去生产");
           }
           if (msg) log("🥚 一键生产: " + msg);
           var ok = isSuccessMsg(msg);
@@ -8422,7 +9201,7 @@ function execRanchActions(base, cookie, ctx, opts) {
       function next() {
         if (i >= links.length) return Promise.resolve();
         var link = links[i++];
-        var url = link.indexOf("http") === 0 ? link : base + "/mc/cgi-bin/" + link.replace(/^\\.?\//, "");
+        var url = link.indexOf("http") === 0 ? link : base + "/mc/cgi-bin/" + link.replace(/^\.?\//, "");
         return ranchGet(url, cookie)
           .then(function (html) {
             var msg = extractMessage(html);
@@ -8576,14 +9355,14 @@ function main() {
     .then(function () {
       log(SUBLINE);
       log("【开始状态】");
-      log("🌾 土地: " + formatStatusLine("", STATUS_START.farm).replace(/^:\\s*/, ""));
-      log("🐟 鱼塘: " + formatStatusLine("", STATUS_START.fish).replace(/^:\\s*/, ""));
-      log("🐮 动物: " + formatStatusLine("", STATUS_START.ranch).replace(/^:\\s*/, ""));
+      log("🌾 土地: " + formatStatusLine("", STATUS_START.farm).replace(/^:\s*/, ""));
+      log("🐟 鱼塘: " + formatStatusLine("", STATUS_START.fish).replace(/^:\s*/, ""));
+      log("🐮 动物: " + formatStatusLine("", STATUS_START.ranch).replace(/^:\s*/, ""));
       log(SUBLINE);
       log("【结束状态】");
-      log("🌾 土地: " + formatStatusLine("", STATUS_END.farm).replace(/^:\\s*/, ""));
-      log("🐟 鱼塘: " + formatStatusLine("", STATUS_END.fish).replace(/^:\\s*/, ""));
-      log("🐮 动物: " + formatStatusLine("", STATUS_END.ranch).replace(/^:\\s*/, ""));
+      log("🌾 土地: " + formatStatusLine("", STATUS_END.farm).replace(/^:\s*/, ""));
+      log("🐟 鱼塘: " + formatStatusLine("", STATUS_END.fish).replace(/^:\s*/, ""));
+      log("🐮 动物: " + formatStatusLine("", STATUS_END.ranch).replace(/^:\s*/, ""));
       log(SUBLINE);
       var logBody = summaryLines().join("\n");
       var notifyBody = buildNotifyBody();
