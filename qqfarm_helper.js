@@ -4046,12 +4046,19 @@ function refreshFinalStats(cookie) {
   var ranchUrl = CONFIG.RANCH_BASE + "/mc/cgi-bin/wap_pasture_index?sid=" + sid + "&g_ut=" + ranchGut;
   return getHtmlFollow(farmUrl, cookie, null, "农场统计", 0)
     .then(function (ret) {
+      var farmHtml = ret.body || "";
       var stats = parseCommonStats(ret.body || "");
       setEndStats("farm", stats);
       if (!CONFIG.FARM_JSON_ENABLE) {
-        STATUS_END.farm = parseFarmStatus(ret.body || "");
+        STATUS_END.farm = parseFarmStatus(farmHtml);
       } else if (!FARM_STATUS_JSON_END || FARM_STATUS_JSON_END.length === 0) {
-        // JSON 优先，未获取到时不使用 WAP 状态
+        var fallback = parseFarmStatus(farmHtml);
+        if (fallback && fallback.length) {
+          STATUS_END.farm = fallback;
+          if (CONFIG.DEBUG) logDebug("🌾 农场状态: JSON结束态缺失，展示兜底为 WAP(" + fallback.length + "块)");
+        } else if (CONFIG.DEBUG) {
+          logDebug("🌾 农场状态: JSON结束态缺失，WAP兜底也为空");
+        }
       }
       return getHtmlFollow(ranchUrl, ret.cookie || cookie, null, "牧场统计", 0);
     })
@@ -4073,10 +4080,15 @@ function captureFarmStartStats(cookie) {
   var farmUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
   return getHtmlFollow(farmUrl, cookie, null, "农场统计", 0)
     .then(function (ret) {
+      var farmHtml = ret.body || "";
       setStartStats("farm", parseCommonStats(ret.body || ""));
-      if (!CONFIG.FARM_JSON_ENABLE) {
-        STATUS_START.farm = parseFarmStatus(ret.body || "");
+      if (!CONFIG.FARM_JSON_ENABLE || !STATUS_START.farm || STATUS_START.farm.length === 0) {
+        var fallback = parseFarmStatus(farmHtml);
+        STATUS_START.farm = fallback;
         setFarmPlaceNameFromStatus(STATUS_START.farm);
+        if (CONFIG.FARM_JSON_ENABLE && CONFIG.DEBUG) {
+          logDebug("🌾 农场状态: JSON开始态待刷新，先用 WAP 基线(" + fallback.length + "块)");
+        }
       }
     })
     .catch(function (e) {
