@@ -3947,6 +3947,18 @@ function hasMatureStatus(list) {
   return false;
 }
 
+function hasFishHarvestableStatus(list) {
+  if (!list || list.length === 0) return false;
+  for (var i = 0; i < list.length; i++) {
+    var st = normalizeSpace((list[i] && list[i].status) || "");
+    if (!st) continue;
+    if (/至收获期/.test(st)) continue;
+    if (/(鱼苗期|幼鱼期|成鱼期|成熟期)/.test(st)) continue;
+    if (/(可收|待收|收获|已成熟)/.test(st)) return true;
+  }
+  return false;
+}
+
 function hasWitheredStatus(list) {
   if (!list || list.length === 0) return false;
   for (var i = 0; i < list.length; i++) {
@@ -4007,7 +4019,7 @@ function buildNoActionHint() {
   if (RANCH_STATS.harvest === 0 && RANCH_STATS.product === 0 && !hasMatureStatus(STATUS_START.ranch)) {
     hints.push("牧场未成熟");
   }
-  if (FISH_STATS.harvest === 0 && !hasMatureStatus(STATUS_START.fish)) {
+  if (FISH_STATS.harvest === 0 && !hasFishHarvestableStatus(STATUS_START.fish)) {
     hints.push("鱼塘未成熟");
   }
   if (CONFIG.ENABLE.plant && STATUS_END.farm && STATUS_END.farm.length && hasEmptyFarmLand(STATUS_END.farm)) {
