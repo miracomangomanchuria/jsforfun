@@ -2311,8 +2311,19 @@ function guessFishPoolCap(maxIndex, occupied) {
 
 function parseFishIndexJsonState(json) {
   if (!json || Number(json.code) !== 1) return null;
-  var fish = ensureArray(json.fish);
-  if (!fish.length && fish !== json.fish) return null;
+  var hasFishField = json && Object.prototype.hasOwnProperty.call(json, "fish");
+  if (!hasFishField) return null;
+  var fishRaw = json.fish;
+  var fish = ensureArray(fishRaw);
+  if (!fish.length && fishRaw && typeof fishRaw !== "object") return null;
+  if (!fish.length && fishRaw && typeof fishRaw === "object") {
+    var keys = Object.keys(fishRaw);
+    for (var ki = 0; ki < keys.length; ki++) {
+      var kk = keys[ki];
+      if (kk === "length") continue;
+      if (!/^\d+$/.test(kk)) return null;
+    }
+  }
   var occupied = fish.length;
   var maxIndex = -1;
   for (var i = 0; i < fish.length; i++) {
@@ -2383,7 +2394,25 @@ function fetchFishIndexJsonState(cookie, tag) {
         if (!state) {
           if (CONFIG.DEBUG) {
             var code = json && json.code != null ? json.code : "非JSON";
-            logDebug("🐟 JSON空位(" + (tag || "读取") + "): 无效回包 code=" + code + " status=" + resp.status);
+            var fishRaw = json && Object.prototype.hasOwnProperty.call(json, "fish") ? json.fish : undefined;
+            var fishType = Object.prototype.toString.call(fishRaw);
+            var fishKeys =
+              fishRaw && typeof fishRaw === "object"
+                ? Object.keys(fishRaw)
+                    .slice(0, 5)
+                    .join(",")
+                : "";
+            logDebug(
+              "🐟 JSON空位(" +
+                (tag || "读取") +
+                "): 无效回包 code=" +
+                code +
+                " status=" +
+                resp.status +
+                " fishType=" +
+                fishType +
+                (fishKeys ? " fishKeys=" + fishKeys : "")
+            );
           }
           return null;
         }
@@ -3211,6 +3240,7 @@ function formatFarmStatusCounts(label, list) {
 }
 
 function formatFarmStatusCountsNoLock(label, list) {
+  if (!list || !list.length) return (label || "") + "未知";
   var sum = summarizeFarmStatusCounts(list);
   var out =
     (label || "") +
@@ -3225,6 +3255,11 @@ function formatFarmStatusCountsNoLock(label, list) {
   if (sum.growing) out += " 长" + sum.growing;
   if (sum.other) out += " 其" + sum.other;
   return out;
+}
+
+function formatFarmStatusLine(list) {
+  if (!list || !list.length) return "未知";
+  return formatStatusLine("", list).replace(/^:\s*/, "");
 }
 
 function formatFarmStatusDelta(startList, endList, includeLock) {
@@ -3810,7 +3845,7 @@ function logFarmJsonStatus(tag, farm) {
 
 function setFarmStatusFromJson(farm, isStart) {
   var list = buildFarmStatusFromJson(farm);
-  if (!list.length) return;
+  if (!list.length) return false;
   if (isStart) {
     FARM_STATUS_JSON_START = list;
     STATUS_START.farm = list;
@@ -3819,6 +3854,7 @@ function setFarmStatusFromJson(farm, isStart) {
     FARM_STATUS_JSON_END = list;
     STATUS_END.farm = list;
   }
+  return true;
 }
 
 function formatStatusLine(label, items) {
@@ -4064,8 +4100,9 @@ function refreshFinalStats(cookie) {
         var uin = getFarmUin(cookie);
         return fetchFarmJson(CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com", ret.cookie || cookie, uin)
           .then(function (farm) {
-            if (isFarmJson(farm)) setFarmStatusFromJson(farm, false);
-            else fallbackWap();
+            if (isFarmJson(farm)) {
+              if (!setFarmStatusFromJson(farm, false)) fallbackWap();
+            } else fallbackWap();
           })
           .catch(function () {
             fallbackWap();
@@ -4111,8 +4148,9 @@ function captureFarmStartStats(cookie) {
       var uin = getFarmUin(cookie);
       return fetchFarmJson(CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com", ret.cookie || cookie, uin)
         .then(function (farm) {
-          if (isFarmJson(farm)) setFarmStatusFromJson(farm, true);
-          else fallbackWap();
+          if (isFarmJson(farm)) {
+            if (!setFarmStatusFromJson(farm, true)) fallbackWap();
+          } else fallbackWap();
         })
         .catch(function () {
           fallbackWap();
@@ -4594,8 +4632,31 @@ function isFarmJson(json) {
   return json && json.farmlandStatus && json.user;
 }
 
+function toNumericKeyArray(v) {
+  if (!v || typeof v !== "object") return null;
+  if (Object.prototype.toString.call(v) === "[object Array]") return v;
+  var keys = Object.keys(v);
+  if (!keys.length) return [];
+  var pairs = [];
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    if (k === "length") continue;
+    if (!/^\d+$/.test(k)) return null;
+    pairs.push({ idx: parseInt(k, 10), val: v[k] });
+  }
+  if (!pairs.length) return [];
+  pairs.sort(function (a, b) {
+    return a.idx - b.idx;
+  });
+  var out = [];
+  for (var j = 0; j < pairs.length; j++) out.push(pairs[j].val);
+  return out;
+}
+
 function ensureArray(v) {
-  return Object.prototype.toString.call(v) === "[object Array]" ? v : [];
+  if (Object.prototype.toString.call(v) === "[object Array]") return v;
+  var converted = toNumericKeyArray(v);
+  return converted || [];
 }
 
 function uniqLinks(list) {
@@ -5006,13 +5067,13 @@ function buildNotifyBody() {
   var actionDetails = farmActionDetailLine();
   var detailLines = [
     "【🌅 开始状态】",
-    "🌾 土地 | " + formatStatusLine("", STATUS_START.farm).replace(/^:\s*/, ""),
+    "🌾 土地 | " + formatFarmStatusLine(STATUS_START.farm),
     "🐟 鱼塘 | " + formatStatusLine("", STATUS_START.fish).replace(/^:\s*/, ""),
     "🐮 动物 | " + formatStatusLine("", STATUS_START.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusStart,
     SUBLINE,
     "【🌇 结束状态】",
-    "🌾 土地 | " + formatStatusLine("", STATUS_END.farm).replace(/^:\s*/, ""),
+    "🌾 土地 | " + formatFarmStatusLine(STATUS_END.farm),
     "🐟 鱼塘 | " + formatStatusLine("", STATUS_END.fish).replace(/^:\s*/, ""),
     "🐮 动物 | " + formatStatusLine("", STATUS_END.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusEnd,
@@ -5522,8 +5583,7 @@ function runFarmJson(cookie) {
   var base = CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
   log("🧩 模式: JSON @ " + base);
   var uin = getFarmUin(cookie);
-  return fetchFarmJson(base, cookie, uin).then(function (farm) {
-    if (!isFarmJson(farm)) return { ok: false, reason: "farm json missing" };
+  function runWithFarm(farm) {
     applyFarmLockHeuristicGuard(farm, "json-start");
     logFarmJsonStatus("开始", farm);
     if (CONFIG.DEBUG) logDebug("🧩 JSON核心地块(开始): " + formatJsonCoreTodoPlaceSample(farm, 10));
@@ -5579,6 +5639,38 @@ function runFarmJson(cookie) {
       }
       return { ok: true };
     });
+  }
+
+  function validFarmLandCount(farm) {
+    if (!isFarmJson(farm)) return 0;
+    return ensureArray(farm.farmlandStatus).length;
+  }
+
+  return fetchFarmJson(base, cookie, uin).then(function (farm) {
+    if (!isFarmJson(farm)) return { ok: false, reason: "farm json missing" };
+    var firstCount = validFarmLandCount(farm);
+    if (firstCount > 0) return runWithFarm(farm);
+    log("⚠️ JSON 地块列表为空，尝试重取一次");
+    return fetchFarmJson(base, cookie, uin)
+      .then(function (farm2) {
+        if (!isFarmJson(farm2)) return { ok: false, reason: "farm json missing(retry)" };
+        var retryCount = validFarmLandCount(farm2);
+        if (retryCount <= 0) {
+          ACTION_STATS.errors += 1;
+          log("⚠️ JSON 地块列表仍为空：已跳过农场收获/铲除/播种");
+          if (CONFIG.DEBUG) {
+            var lv = Number((farm2.user && (farm2.user.level || farm2.user.lv || farm2.user.userLevel)) || 0);
+            logDebug("🧪 空地块回包: lv=" + lv + " keys=" + Object.keys(farm2 || {}).join(","));
+          }
+          return { ok: false, reason: "farm json empty" };
+        }
+        return runWithFarm(farm2);
+      })
+      .catch(function (e) {
+        ACTION_STATS.errors += 1;
+        log("⚠️ JSON 重取失败: " + e);
+        return { ok: false, reason: "farm json retry failed" };
+      });
   });
 }
 
@@ -9394,12 +9486,12 @@ function main() {
     .then(function () {
       log(SUBLINE);
       log("【开始状态】");
-      log("🌾 土地: " + formatStatusLine("", STATUS_START.farm).replace(/^:\s*/, ""));
+      log("🌾 土地: " + formatFarmStatusLine(STATUS_START.farm));
       log("🐟 鱼塘: " + formatStatusLine("", STATUS_START.fish).replace(/^:\s*/, ""));
       log("🐮 动物: " + formatStatusLine("", STATUS_START.ranch).replace(/^:\s*/, ""));
       log(SUBLINE);
       log("【结束状态】");
-      log("🌾 土地: " + formatStatusLine("", STATUS_END.farm).replace(/^:\s*/, ""));
+      log("🌾 土地: " + formatFarmStatusLine(STATUS_END.farm));
       log("🐟 鱼塘: " + formatStatusLine("", STATUS_END.fish).replace(/^:\s*/, ""));
       log("🐮 动物: " + formatStatusLine("", STATUS_END.ranch).replace(/^:\s*/, ""));
       log(SUBLINE);
