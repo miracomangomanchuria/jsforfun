@@ -4049,9 +4049,7 @@ function refreshFinalStats(cookie) {
       var farmHtml = ret.body || "";
       var stats = parseCommonStats(ret.body || "");
       setEndStats("farm", stats);
-      if (!CONFIG.FARM_JSON_ENABLE) {
-        STATUS_END.farm = parseFarmStatus(farmHtml);
-      } else if (!FARM_STATUS_JSON_END || FARM_STATUS_JSON_END.length === 0) {
+      function fallbackWap() {
         var fallback = parseFarmStatus(farmHtml);
         if (fallback && fallback.length) {
           STATUS_END.farm = fallback;
@@ -4059,6 +4057,22 @@ function refreshFinalStats(cookie) {
         } else if (CONFIG.DEBUG) {
           logDebug("🌾 农场状态: JSON结束态缺失，WAP兜底也为空");
         }
+      }
+      if (!CONFIG.FARM_JSON_ENABLE) {
+        STATUS_END.farm = parseFarmStatus(farmHtml);
+      } else if (!FARM_STATUS_JSON_END || FARM_STATUS_JSON_END.length === 0) {
+        var uin = getFarmUin(cookie);
+        return fetchFarmJson(CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com", ret.cookie || cookie, uin)
+          .then(function (farm) {
+            if (isFarmJson(farm)) setFarmStatusFromJson(farm, false);
+            else fallbackWap();
+          })
+          .catch(function () {
+            fallbackWap();
+          })
+          .then(function () {
+            return getHtmlFollow(ranchUrl, ret.cookie || cookie, null, "牧场统计", 0);
+          });
       }
       return getHtmlFollow(ranchUrl, ret.cookie || cookie, null, "牧场统计", 0);
     })
@@ -4082,7 +4096,7 @@ function captureFarmStartStats(cookie) {
     .then(function (ret) {
       var farmHtml = ret.body || "";
       setStartStats("farm", parseCommonStats(ret.body || ""));
-      if (!CONFIG.FARM_JSON_ENABLE || !STATUS_START.farm || STATUS_START.farm.length === 0) {
+      function fallbackWap() {
         var fallback = parseFarmStatus(farmHtml);
         STATUS_START.farm = fallback;
         setFarmPlaceNameFromStatus(STATUS_START.farm);
@@ -4090,6 +4104,19 @@ function captureFarmStartStats(cookie) {
           logDebug("🌾 农场状态: JSON开始态待刷新，先用 WAP 基线(" + fallback.length + "块)");
         }
       }
+      if (!CONFIG.FARM_JSON_ENABLE) {
+        fallbackWap();
+        return;
+      }
+      var uin = getFarmUin(cookie);
+      return fetchFarmJson(CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com", ret.cookie || cookie, uin)
+        .then(function (farm) {
+          if (isFarmJson(farm)) setFarmStatusFromJson(farm, true);
+          else fallbackWap();
+        })
+        .catch(function () {
+          fallbackWap();
+        });
     })
     .catch(function (e) {
       log("📊 农场统计读取失败: " + e);
