@@ -92,7 +92,7 @@ var CONFIG = {
   FISH_JSON_INDEX_ENABLE: true,
   // 放养优先走 JSON(cgi_fish_plant)，WAP 作为兜底
   FISH_PLANT_JSON_FIRST: true,
-  // 珍珠抽奖：每天仅尝试一次免费抽奖（QX/Surge/Loon 默认启用，Node 默认关闭）
+  // 珍珠抽奖：每次运行按 free_times 判定免费额度并尝试（QX/Surge/Loon 默认启用，Node 默认关闭）
   FISH_PEARL_DRAW_DAILY: true,
   FISH_PEARL_DRAW_NODE: false,
   FISH_PEARL_DRAW_FORCE_FREE: true,
@@ -1201,7 +1201,6 @@ var NO_MONEY = { farmSeed: false, grassSeed: false, fishSeed: false };
 var FISH_FEED_EMPTY_SEEN = false;
 var FISH_FEED_NOOP_SEEN = false;
 var STORE_KEY_FISH_PEARL_DAY = "qqfarm_fish_pearl_day";
-var STORE_KEY_FISH_PEARL_DONE = "qqfarm_fish_pearl_done";
 var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
 var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
 
@@ -1220,7 +1219,8 @@ function bannerStart() {
 function bannerEnd() {
   log(LINE);
   log("✅ 结束 | 农场 " + actionSummaryLine());
-  log("🐮 牧场 " + ranchSummaryLine() + " | 🐟 鱼塘 " + fishSummaryLine());
+  log("🐮 牧场 " + ranchSummaryLine());
+  log("🐟 鱼塘 " + fishSummaryLine());
   if (timeFarmEnabled()) log("🕰️ 时光农场 " + timeFarmSummaryLine());
   log(LINE);
 }
@@ -2579,20 +2579,9 @@ function runFishPearlDrawDaily(cookie) {
   var oldDay = $.read(STORE_KEY_FISH_PEARL_DAY) || "";
   if (oldDay !== today) {
     $.write(today, STORE_KEY_FISH_PEARL_DAY);
-    $.write("0", STORE_KEY_FISH_PEARL_DONE);
     $.write("", STORE_KEY_FISH_PEARL_FREE_TIMES);
     $.write("", STORE_KEY_FISH_PEARL_FREE_STAMP);
     if (CONFIG.DEBUG) logDebug("🎁 珍珠抽奖: 新的一天，已重置日计数(" + today + ")");
-  }
-  var done = $.read(STORE_KEY_FISH_PEARL_DONE) || "0";
-  if (done === "1") {
-    var cachedTimes = $.read(STORE_KEY_FISH_PEARL_FREE_TIMES) || "";
-    var cachedStamp = $.read(STORE_KEY_FISH_PEARL_FREE_STAMP) || "";
-    var extra = [];
-    if (cachedTimes !== "") extra.push("free_times=" + cachedTimes);
-    if (cachedStamp !== "") extra.push("free_stamp=" + cachedStamp);
-    log("🎁 珍珠抽奖: 今日已执行，跳过" + (extra.length ? " (" + extra.join(" ") + ")" : ""));
-    return Promise.resolve(false);
   }
 
   var beforePearl = null;
@@ -2746,10 +2735,9 @@ function runFishPearlDrawDaily(cookie) {
         }
       }
       $.write(today, STORE_KEY_FISH_PEARL_DAY);
-      $.write("1", STORE_KEY_FISH_PEARL_DONE);
       if (latestFreeTimes !== null || latestFreeStamp !== null || pieceState) {
         logDebug(
-          "🎁 珍珠抽奖缓存: done=1 free_times=" +
+          "🎁 珍珠抽奖缓存: free_times=" +
             (latestFreeTimes !== null ? latestFreeTimes : "未知") +
             " free_stamp=" +
             (latestFreeStamp !== null ? latestFreeStamp : "未知")
