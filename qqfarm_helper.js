@@ -97,6 +97,18 @@ var CONFIG = {
   FISH_PEARL_DRAW_NODE: false,
   FISH_PEARL_DRAW_FORCE_FREE: true,
 
+  // 时光农场（独立于普通农场）
+  TIME_FARM_BASE: "https://nc.qzone.qq.com",
+  TIME_FARM_SEED_BASE: "https://farm.qzone.qq.com",
+  TIME_FARM_ENABLE: true,
+  TIME_FARM_MAX_PASS: 2,
+  TIME_FARM_HARVEST_ENABLE: true,
+  TIME_FARM_DIG_ENABLE: true,
+  TIME_FARM_PLANT_ENABLE: true,
+  TIME_FARM_PLANT_CROPID: "", // 空=从时光农场种子列表自动选择首个可种
+  TIME_FARM_FERTILIZE_ENABLE: false, // 默认关闭，避免日常误消耗化肥
+  TIME_FARM_FERT_TOOLID: "1",
+
   // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
   GRASS_THRESHOLD: 10000, // 牧草果实库存低于此值，优先种牧草
@@ -145,7 +157,8 @@ var CONFIG = {
     ranch_signin: true,
     fish_feed: true,
     fish_sell_all: true,
-    fish_harvest: true
+    fish_harvest: true,
+    time_farm: true
   },
 
   // 调试开关
@@ -1129,6 +1142,16 @@ var FISH_STATS = {
   errors: 0
 };
 
+var TIME_FARM_STATS = {
+  harvest: 0,
+  dig: 0,
+  plant: 0,
+  fertilize: 0,
+  errors: 0,
+  start: "",
+  end: ""
+};
+
 var PLANT_STATS = {
   total: 0,
   byCid: {}
@@ -1198,6 +1221,7 @@ function bannerEnd() {
   log(LINE);
   log("✅ 结束 | 农场 " + actionSummaryLine());
   log("🐮 牧场 " + ranchSummaryLine() + " | 🐟 鱼塘 " + fishSummaryLine());
+  if (timeFarmEnabled()) log("🕰️ 时光农场 " + timeFarmSummaryLine());
   log(LINE);
 }
 
@@ -2519,6 +2543,31 @@ function shouldRunFishPearlDraw() {
   return true;
 }
 
+function formatTsLocal(ts) {
+  var n = Number(ts || 0);
+  if (!n || isNaN(n) || n < 1000000000) return "";
+  var d = new Date(n * 1000);
+  var hh = d.getHours();
+  var mm = d.getMinutes();
+  var ss = d.getSeconds();
+  return (
+    (hh < 10 ? "0" + hh : "" + hh) +
+    ":" +
+    (mm < 10 ? "0" + mm : "" + mm) +
+    ":" +
+    (ss < 10 ? "0" + ss : "" + ss)
+  );
+}
+
+function formatWaitSec(sec) {
+  var n = Number(sec || 0);
+  if (!n || isNaN(n) || n <= 0) return "0秒";
+  var m = Math.floor(n / 60);
+  var s = n % 60;
+  if (m > 0) return m + "分" + s + "秒";
+  return s + "秒";
+}
+
 function runFishPearlDrawDaily(cookie) {
   if (!shouldRunFishPearlDraw()) {
     if (IS_NODE && CONFIG.DEBUG && CONFIG.FISH_PEARL_DRAW_DAILY && !CONFIG.FISH_PEARL_DRAW_NODE) {
@@ -2551,6 +2600,7 @@ function runFishPearlDrawDaily(cookie) {
   var latestFreeTimes = null;
   var latestFreeStamp = null;
   var pieceState = null;
+  var cooldownHint = null;
   return ensureFishJsonContext(cookie)
     .then(function (ctx) {
       var uIdx = ctx.uIdx || "";
@@ -2565,20 +2615,43 @@ function runFishPearlDrawDaily(cookie) {
           latestFreeTimes = piece.freeTimes;
           latestFreeStamp = piece.freeStamp;
         }
-        if (piece && piece.freeTimes !== null && piece.freeTimes <= 0) {
+        // free_times 是“今日已免费抽次数”，达到 5 表示当天免费额度用完
+        if (piece && piece.freeTimes !== null && piece.freeTimes >= 5) {
           var tail = [];
           if (piece.freeStamp !== null && piece.freeStamp !== undefined) tail.push("free_stamp=" + piece.freeStamp);
-          return { skip: true, reason: "free-empty", extra: tail.join(" ") };
+          return { skip: true, reason: "free-limit", extra: tail.join(" ") };
+        }
+        // free_stamp 仅作提示，不作为硬门槛；是否可抽以 gift 接口返回为准。
+        if (
+          piece &&
+          piece.freeStamp !== null &&
+          piece.freeStamp !== undefined &&
+          Number(piece.freeStamp) > 1000000000
+        ) {
+          var now = getFarmTime();
+          var waitSec = Number(piece.freeStamp) - now;
+          if (waitSec > 0) {
+            cooldownHint = { freeStamp: Number(piece.freeStamp), waitSec: waitSec };
+          }
         }
         return { skip: false, uIdx: uIdx, uinY: uinY };
       });
     })
     .then(function (meta) {
       if (!meta || meta.skip) {
-        if (meta && meta.reason === "free-empty") {
-          log("🎁 珍珠抽奖: 免费次数不足，跳过" + (meta.extra ? " (" + meta.extra + ")" : ""));
+        if (meta && meta.reason === "free-limit") {
+          log("🎁 珍珠抽奖: 今日免费次数已用完，跳过" + (meta.extra ? " (" + meta.extra + ")" : ""));
         }
         return false;
+      }
+      if (cooldownHint && CONFIG.DEBUG) {
+        var when2 = formatTsLocal(cooldownHint.freeStamp);
+        logDebug(
+          "🎁 珍珠抽奖预判: 可能仍在冷却(剩余" +
+            formatWaitSec(cooldownHint.waitSec) +
+            (when2 ? "，约 " + when2 : "") +
+            ")，继续实测 gift 接口"
+        );
       }
       return fetchFishIndexJsonState(cookie, "珍珠抽奖前")
         .then(function (st) {
@@ -2626,7 +2699,21 @@ function runFishPearlDrawDaily(cookie) {
               log("🎁 珍珠抽奖: 已执行" + tip);
             } else {
               var msg = json.direction || json.msg || json.message || ("ret=" + json.ret + " ecode=" + json.ecode);
-              log("⚠️ 珍珠抽奖失败: " + msg);
+              if (/免费抽取时间还没有到/.test(msg)) {
+                var wait2 = "";
+                if (json.free_stamp != null && Number(json.free_stamp) > 1000000000) {
+                  var now2 = getFarmTime();
+                  var sec2 = Number(json.free_stamp) - now2;
+                  if (sec2 > 0) {
+                    var when3 = formatTsLocal(Number(json.free_stamp));
+                    wait2 =
+                      " (剩余" + formatWaitSec(sec2) + (when3 ? "，约 " + when3 : "") + ")";
+                  }
+                }
+                log("🎁 珍珠抽奖: 免费冷却中，未执行" + wait2);
+              } else {
+                log("⚠️ 珍珠抽奖失败: " + msg);
+              }
             }
             if (json.free_times != null || json.free_stamp != null) {
               logDebug(
@@ -4787,6 +4874,21 @@ function fishSummaryLine() {
   return line;
 }
 
+function timeFarmSummaryLine() {
+  return (
+    "收获=" +
+    TIME_FARM_STATS.harvest +
+    " 铲地=" +
+    TIME_FARM_STATS.dig +
+    " 种植=" +
+    TIME_FARM_STATS.plant +
+    " 施肥=" +
+    TIME_FARM_STATS.fertilize +
+    " 错误=" +
+    TIME_FARM_STATS.errors
+  );
+}
+
 function summaryLines() {
   var farmLine =
     "【农场】收" +
@@ -4842,6 +4944,18 @@ function summaryLines() {
     " 错" +
     FISH_STATS.errors;
 
+  var timeFarmLine =
+    "【时光农场】收" +
+    TIME_FARM_STATS.harvest +
+    " 铲" +
+    TIME_FARM_STATS.dig +
+    " 种" +
+    TIME_FARM_STATS.plant +
+    " 肥" +
+    TIME_FARM_STATS.fertilize +
+    " 错" +
+    TIME_FARM_STATS.errors;
+
   var farmStatusStart = formatFarmStatusCountsNoLock("始:", STATUS_START.farm);
   var farmStatusEnd = formatFarmStatusCountsNoLock("终:", STATUS_END.farm);
   var farmDeltaLine = formatFarmStatusDelta(STATUS_START.farm, STATUS_END.farm, false);
@@ -4865,6 +4979,7 @@ function summaryLines() {
     farmLine,
     ranchLine,
     fishLine,
+    timeFarmEnabled() ? timeFarmLine : "",
     "【🧾 农场状态】" + farmStatusStart + " | " + farmStatusEnd,
     farmDeltaLine ? "【📈 农场Δ】" + farmDeltaLine : "",
     harvestableDelta ? "【🍎 可收变化】" + harvestableDelta : "",
@@ -4877,6 +4992,9 @@ function summaryLines() {
     plantFailLine ? "【⚠️ 播种失败】" + plantFailLine : "",
     ranchSum ? "【🐮 牧场合计】" + ranchSum : "",
     fishSum ? "【🐟 鱼塘合计】" + fishSum : "",
+    timeFarmEnabled() ? "【🕰️ 时光农场】" + timeFarmSummaryLine() : "",
+    timeFarmEnabled() && TIME_FARM_STATS.start ? "【🕰️ 时光开始】" + TIME_FARM_STATS.start : "",
+    timeFarmEnabled() && TIME_FARM_STATS.end ? "【🕰️ 时光结束】" + TIME_FARM_STATS.end : "",
     "【🧩 动作详情】" + actionDetails[0],
     "【🧩 动作详情】" + actionDetails[1],
     "【📊 等级】" + formatStatsLine("农场/鱼塘", STATS_START.farm, STATS_END.farm),
@@ -4940,6 +5058,18 @@ function buildNotifyBody() {
       " 扣珠" +
       FISH_STATS.pearlSpend
   );
+  if (timeFarmEnabled()) {
+    briefLines.push(
+      "🕰️ 时光农场 | 收" +
+        TIME_FARM_STATS.harvest +
+        " 铲" +
+        TIME_FARM_STATS.dig +
+        " 种" +
+        TIME_FARM_STATS.plant +
+        " 肥" +
+        TIME_FARM_STATS.fertilize
+    );
+  }
   var spendPartsBrief = [];
   if (MONEY_STATS.farmBuy > 0) spendPartsBrief.push("种子" + MONEY_STATS.farmBuy);
   if (MONEY_STATS.grassBuy > 0) spendPartsBrief.push("牧草种子" + MONEY_STATS.grassBuy);
@@ -5058,6 +5188,16 @@ function buildNotifyBody() {
     " 扣珠" +
     FISH_STATS.pearlSpend;
 
+  var timeFarmActionLine =
+    "时光农场：收" +
+    TIME_FARM_STATS.harvest +
+    " 铲" +
+    TIME_FARM_STATS.dig +
+    " 种" +
+    TIME_FARM_STATS.plant +
+    " 肥" +
+    TIME_FARM_STATS.fertilize;
+
   var farmStatusStart = formatFarmStatusCountsNoLock("开始:", STATUS_START.farm);
   var farmStatusEnd = formatFarmStatusCountsNoLock("结束:", STATUS_END.farm);
   var farmDelta = formatFarmStatusDelta(STATUS_START.farm, STATUS_END.farm, false);
@@ -5083,12 +5223,14 @@ function buildNotifyBody() {
     "🐟 鱼塘 | " + formatStatusLine("", STATUS_START.fish).replace(/^:\s*/, ""),
     "🐮 动物 | " + formatStatusLine("", STATUS_START.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusStart,
+    timeFarmEnabled() && TIME_FARM_STATS.start ? "🕰️ 时光状态 | 开始:" + TIME_FARM_STATS.start : "",
     SUBLINE,
     "【🌇 结束状态】",
     "🌾 土地 | " + formatFarmStatusLine(STATUS_END.farm),
     "🐟 鱼塘 | " + formatStatusLine("", STATUS_END.fish).replace(/^:\s*/, ""),
     "🐮 动物 | " + formatStatusLine("", STATUS_END.ranch).replace(/^:\s*/, ""),
     "🧮 农场状态 | " + farmStatusEnd,
+    timeFarmEnabled() && TIME_FARM_STATS.end ? "🕰️ 时光状态 | 结束:" + TIME_FARM_STATS.end : "",
     farmDelta ? "🧮 农场Δ | " + farmDelta : "",
     harvestableDelta ? "🍎 可收变化 | " + harvestableDelta : "",
     witheredRecon ? "🪓 枯萎变化 | " + witheredRecon : "",
@@ -5100,6 +5242,7 @@ function buildNotifyBody() {
     plantFailLine ? "⚠️ 播种失败 | " + plantFailLine : "",
     ranchSum ? "🐮 牧场合计 | " + ranchSum : "",
     fishSum ? "🐟 鱼塘合计 | " + fishSum : "",
+    timeFarmEnabled() ? "🕰️ 时光合计 | " + timeFarmSummaryLine() : "",
     SUBLINE,
     "📊 等级 | " + formatStatsLine("农场/鱼塘", STATS_START.farm, STATS_END.farm),
     "📊 等级 | " + formatStatsLine("牧场", STATS_START.ranch, STATS_END.ranch),
@@ -5111,7 +5254,7 @@ function buildNotifyBody() {
     noActionHint ? "⏳ 提示 | " + noActionHint : "",
     "🧮 动作详情 | " + actionDetails[0],
     "🧮 动作详情 | " + actionDetails[1],
-    "🧩 动作 | " + farmLine + " / " + ranchLine + " / " + fishLine,
+    "🧩 动作 | " + farmLine + " / " + ranchLine + " / " + fishLine + (timeFarmEnabled() ? " / " + timeFarmActionLine : ""),
     "⏱ 用时 | " + (costSec ? costSec + "s" : "未知")
   ];
   detailLines = detailLines.filter(function (it) {
@@ -5180,6 +5323,11 @@ function ranchEnabled() {
 
 function fishEnabled() {
   return CONFIG.ENABLE.fish_feed || CONFIG.ENABLE.fish_sell_all || CONFIG.ENABLE.fish_harvest;
+}
+
+function timeFarmEnabled() {
+  if (!CONFIG.TIME_FARM_ENABLE) return false;
+  return CONFIG.ENABLE.time_farm !== false;
 }
 
 /* =======================
@@ -9410,6 +9558,381 @@ function execRanchActions(base, cookie, ctx, opts) {
 }
 
 /* =======================
+ *  TIME FARM (时光农场)
+ * ======================= */
+function timeFarmParams(ctx, extra) {
+  var p = {
+    uIdx: ctx.uIdx,
+    uinY: ctx.uinY,
+    farmTime: getFarmTime(),
+    platform: CONFIG.FARM_PLATFORM || "13",
+    appid: CONFIG.FARM_APPID || "353",
+    version: CONFIG.FARM_VERSION || "4.0.20.0"
+  };
+  if (extra) {
+    for (var k in extra) {
+      if (!extra.hasOwnProperty(k)) continue;
+      p[k] = extra[k];
+    }
+  }
+  return p;
+}
+
+function isTimeFarmOk(json) {
+  return !!(json && Number(json.code) === 1 && Number(json.ecode || 0) === 0);
+}
+
+function timeFarmErrMsg(json) {
+  if (!json) return "非JSON";
+  return json.direction || json.msg || json.message || ("ecode=" + (json.ecode != null ? json.ecode : "未知"));
+}
+
+function isTimeFarmNoop(json) {
+  var ecode = Number(json && json.ecode);
+  if (isNaN(ecode)) return false;
+  return ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31;
+}
+
+function parseTimeFarmLandList(json) {
+  return ensureArray(json && json.res && json.res.farmlandstatus);
+}
+
+function summarizeTimeFarmLand(list) {
+  var out = { total: 0, empty: 0, withered: 0, mature: 0, growing: 0 };
+  for (var i = 0; i < list.length; i++) {
+    var land = list[i] || {};
+    out.total += 1;
+    var b = Number(land.b || 0);
+    if (b === 0) out.empty += 1;
+    else if (b === 6) out.mature += 1;
+    else if (b === 7) out.withered += 1;
+    else out.growing += 1;
+  }
+  return out;
+}
+
+function formatTimeFarmState(sum) {
+  if (!sum || !sum.total) return "总0";
+  return "总" + sum.total + " 空" + sum.empty + " 枯" + sum.withered + " 熟" + sum.mature + " 长" + sum.growing;
+}
+
+function fetchTimeFarmContext(cookie) {
+  return ensureFarmJsonContext(cookie)
+    .catch(function () {
+      return null;
+    })
+    .then(function () {
+      var uIdx = FARM_CTX.uIdx || getFarmUin(cookie);
+      var uinY = FARM_CTX.uinY || getFarmUinFromCookie(cookie) || "";
+      if (!uIdx || !uinY) return null;
+      return { uIdx: String(uIdx), uinY: String(uinY) };
+    });
+}
+
+function callTimeFarmApi(cookie, act, params, seedBase) {
+  var base = seedBase ? CONFIG.TIME_FARM_SEED_BASE || "https://farm.qzone.qq.com" : CONFIG.TIME_FARM_BASE || "https://nc.qzone.qq.com";
+  var url = base + (seedBase ? "/cgi-bin/cgi_farm_seed_list" : "/cgi-bin/cgi_farm_time_space?act=" + act);
+  return httpRequest({
+    method: "POST",
+    url: url,
+    headers: buildFishJsonHeaders(cookie),
+    body: buildLegacyBody(params)
+  }).then(function (resp) {
+    return tryJson(resp.body);
+  });
+}
+
+function fetchTimeFarmIndex(cookie, ctx) {
+  return callTimeFarmApi(cookie, "index", timeFarmParams(ctx)).then(function (json) {
+    if (!isTimeFarmOk(json)) return null;
+    return {
+      raw: json,
+      list: parseTimeFarmLandList(json),
+      sum: summarizeTimeFarmLand(parseTimeFarmLandList(json))
+    };
+  });
+}
+
+function pickTimeFarmCrop(seedList) {
+  var list = ensureArray(seedList);
+  if (!list.length) return null;
+  var target = String(CONFIG.TIME_FARM_PLANT_CROPID || "");
+  var first = null;
+  for (var i = 0; i < list.length; i++) {
+    var it = list[i] || {};
+    var amount = Number(it.amount || 0);
+    var cid = String(it.cId || "");
+    var name = it.cName || (cid ? "cId" + cid : "");
+    if (cid && name) recordCropName(cid, name);
+    if (amount <= 0 || !cid) continue;
+    if (!first) first = it;
+    if (target && cid === target) return it;
+  }
+  return first;
+}
+
+function runTimeFarm(cookie) {
+  if (!timeFarmEnabled()) return Promise.resolve();
+  log("🕰️ 时光农场模块: 启动");
+  var ctx = null;
+  var crop = null;
+  var maxPass = Number(CONFIG.TIME_FARM_MAX_PASS || 1);
+  if (!maxPass || isNaN(maxPass) || maxPass < 1) maxPass = 1;
+  var didFertilize = false;
+
+  function doBatch(act, label) {
+    return callTimeFarmApi(cookie, act, timeFarmParams(ctx)).then(function (json) {
+      if (isTimeFarmOk(json)) return { ok: true, json: json };
+      var msg = timeFarmErrMsg(json);
+      if (isTimeFarmNoop(json)) {
+        if (CONFIG.DEBUG) logDebug("🕰️ 时光" + label + ": 无需执行(" + msg + ")");
+        return { ok: false, noop: true, json: json };
+      }
+      TIME_FARM_STATS.errors += 1;
+      log("⚠️ 时光" + label + "失败: " + msg);
+      return { ok: false, noop: false, json: json };
+    });
+  }
+
+  function plantOne(landid, cropid) {
+    return callTimeFarmApi(
+      cookie,
+      "plant",
+      timeFarmParams(ctx, {
+        landid: landid,
+        cropid: cropid
+      })
+    ).then(function (json) {
+      if (isTimeFarmOk(json)) return { ok: true, json: json };
+      var msg = timeFarmErrMsg(json);
+      if (isTimeFarmNoop(json)) {
+        if (CONFIG.DEBUG) logDebug("🕰️ 时光种植 land=" + landid + " 无需执行(" + msg + ")");
+        return { ok: false, noop: true, json: json };
+      }
+      TIME_FARM_STATS.errors += 1;
+      log("⚠️ 时光种植失败 land=" + landid + ": " + msg);
+      return { ok: false, noop: false, json: json };
+    });
+  }
+
+  function maybeFertilize(list) {
+    if (!CONFIG.TIME_FARM_FERTILIZE_ENABLE || didFertilize) return Promise.resolve(false);
+    var toolid = Number(CONFIG.TIME_FARM_FERT_TOOLID || 0);
+    if (!toolid || isNaN(toolid) || toolid < 1) return Promise.resolve(false);
+    var target = null;
+    for (var i = 0; i < list.length; i++) {
+      var land = list[i] || {};
+      var b = Number(land.b || 0);
+      if (b > 0 && b < 6 && Number(land.landid || 0) > 0) {
+        target = land;
+        break;
+      }
+    }
+    if (!target) return Promise.resolve(false);
+    return callTimeFarmApi(
+      cookie,
+      "fertilize",
+      timeFarmParams(ctx, {
+        toolid: toolid,
+        landid: Number(target.landid)
+      })
+    ).then(function (json) {
+      if (!isTimeFarmOk(json)) {
+        var msg = timeFarmErrMsg(json);
+        if (isTimeFarmNoop(json)) {
+          if (CONFIG.DEBUG) logDebug("🕰️ 时光施肥: 无需执行(" + msg + ")");
+          return false;
+        }
+        TIME_FARM_STATS.errors += 1;
+        log("⚠️ 时光施肥失败: " + msg);
+        return false;
+      }
+      TIME_FARM_STATS.fertilize += 1;
+      didFertilize = true;
+      log("🕰️ 时光施肥: land=" + target.landid + " tool=" + toolid + " 成功");
+      return true;
+    });
+  }
+
+  function plantEmptyLands(list) {
+    if (!CONFIG.TIME_FARM_PLANT_ENABLE) return Promise.resolve(0);
+    var empties = [];
+    for (var i = 0; i < list.length; i++) {
+      var land = list[i] || {};
+      if (Number(land.b || 0) === 0 && Number(land.landid || 0) > 0) empties.push(Number(land.landid));
+    }
+    if (!empties.length) return Promise.resolve(0);
+    if (crop && Number(crop.amount || 0) <= 0) crop = null;
+    if (!crop) {
+      return callTimeFarmApi(cookie, "", timeFarmParams(ctx), true).then(function (seedJson) {
+        crop = pickTimeFarmCrop(seedJson);
+        if (!crop) {
+          log("⚠️ 时光种植: 未找到可用种子");
+          return 0;
+        }
+        if (CONFIG.DEBUG) logDebug("🕰️ 时光种植选种: " + (crop.cName || ("cId" + crop.cId)) + " (cId=" + crop.cId + ")");
+        return plantLoop();
+      });
+    }
+    return plantLoop();
+
+    function plantLoop() {
+      var idx = 0;
+      var succ = 0;
+      function next() {
+        if (idx >= empties.length) return Promise.resolve({ success: succ, tried: empties.length });
+        if (crop && crop.amount != null && Number(crop.amount || 0) <= 0) return Promise.resolve({ success: succ, tried: idx });
+        var landid = empties[idx++];
+        return plantOne(landid, crop.cId)
+          .then(function (ret) {
+            if (ret && ret.ok) {
+              succ += 1;
+              if (crop.amount != null) crop.amount = Number(crop.amount || 0) - 1;
+            } else if (ret && !ret.noop) {
+              return { stop: true };
+            }
+          })
+          .then(function (ret2) {
+            if (ret2 && ret2.stop) return { success: succ, tried: idx };
+            return null;
+          })
+          .then(function () {
+            return sleep(CONFIG.WAIT_MS);
+          })
+          .then(next)
+          .then(function (x) {
+            return x || { success: succ, tried: idx };
+          });
+      }
+      return next();
+    }
+  }
+
+  function pass(round) {
+    return fetchTimeFarmIndex(cookie, ctx).then(function (state) {
+      if (!state) {
+        TIME_FARM_STATS.errors += 1;
+        log("⚠️ 时光农场: 读取状态失败");
+        return;
+      }
+      if (round === 0) {
+        TIME_FARM_STATS.start = formatTimeFarmState(state.sum);
+        log("🕰️ 时光状态(开始): " + TIME_FARM_STATS.start);
+      }
+      var curState = state;
+      var hasAction = false;
+      var p = Promise.resolve();
+      if (CONFIG.TIME_FARM_HARVEST_ENABLE && curState.sum.mature > 0) {
+        p = p.then(function () {
+          var before = curState.sum.mature;
+          return doBatch("batchharvest", "收获").then(function (ret) {
+            if (!ret || !ret.ok) return;
+            return fetchTimeFarmIndex(cookie, ctx).then(function (afterState) {
+              if (!afterState) return;
+              curState = afterState;
+              var delta = before - curState.sum.mature;
+              if (delta < 0) delta = 0;
+              if (delta > 0) {
+                TIME_FARM_STATS.harvest += delta;
+                hasAction = true;
+                log("🕰️ 时光收获: +" + delta);
+              } else if (CONFIG.DEBUG) {
+                logDebug("🕰️ 时光收获: 接口成功但成熟地块未减少");
+              }
+            });
+          });
+        });
+      }
+      if (CONFIG.TIME_FARM_DIG_ENABLE && curState.sum.withered > 0) {
+        p = p.then(function () {
+          var before = curState.sum.withered;
+          return doBatch("batchdig", "铲地").then(function (ret) {
+            if (!ret || !ret.ok) return;
+            return fetchTimeFarmIndex(cookie, ctx).then(function (afterState) {
+              if (!afterState) return;
+              curState = afterState;
+              var delta = before - curState.sum.withered;
+              if (delta < 0) delta = 0;
+              if (delta > 0) {
+                TIME_FARM_STATS.dig += delta;
+                hasAction = true;
+                log("🕰️ 时光铲地: +" + delta);
+              } else if (CONFIG.DEBUG) {
+                logDebug("🕰️ 时光铲地: 接口成功但枯萎地块未减少");
+              }
+            });
+          });
+        });
+      }
+      return p
+        .then(function () {
+          return fetchTimeFarmIndex(cookie, ctx);
+        })
+        .then(function (state2) {
+          if (!state2) return null;
+          curState = state2;
+          if (
+            !CONFIG.TIME_FARM_PLANT_ENABLE &&
+            !CONFIG.TIME_FARM_FERTILIZE_ENABLE &&
+            curState.sum.mature <= 0 &&
+            curState.sum.withered <= 0
+          ) {
+            return curState;
+          }
+          return plantEmptyLands(curState.list).then(function (resPlant) {
+            var n = 0;
+            if (typeof resPlant === "number") n = resPlant;
+            else if (resPlant && typeof resPlant.success === "number") n = resPlant.success;
+            if (n > 0) {
+              TIME_FARM_STATS.plant += n;
+              hasAction = true;
+              log("🕰️ 时光种植: +" + n);
+            }
+            return fetchTimeFarmIndex(cookie, ctx).then(function (state3) {
+              if (state3) curState = state3;
+              return curState;
+            });
+          });
+        })
+        .then(function (stateFinalBase) {
+          if (!stateFinalBase) return null;
+          return maybeFertilize(stateFinalBase.list).then(function (ferted) {
+            if (ferted) hasAction = true;
+            return fetchTimeFarmIndex(cookie, ctx).then(function (state4) {
+              if (state4) TIME_FARM_STATS.end = formatTimeFarmState(state4.sum);
+              return { hasAction: hasAction, sum: state4 ? state4.sum : null };
+            });
+          });
+        })
+        .then(function (res) {
+          if (!res) return;
+          if (!TIME_FARM_STATS.end && res.sum) TIME_FARM_STATS.end = formatTimeFarmState(res.sum);
+          if (!res.hasAction || round + 1 >= maxPass) return;
+          return pass(round + 1);
+        });
+    });
+  }
+
+  return fetchTimeFarmContext(cookie)
+    .then(function (c) {
+      ctx = c;
+      if (!ctx) {
+        TIME_FARM_STATS.errors += 1;
+        log("⚠️ 时光农场: 缺少 uIdx/uinY，跳过");
+        return;
+      }
+      return pass(0).then(function () {
+        if (!TIME_FARM_STATS.end && TIME_FARM_STATS.start) TIME_FARM_STATS.end = TIME_FARM_STATS.start;
+        if (TIME_FARM_STATS.end) log("🕰️ 时光状态(结束): " + TIME_FARM_STATS.end);
+      });
+    })
+    .catch(function (e) {
+      TIME_FARM_STATS.errors += 1;
+      log("⚠️ 时光农场异常: " + e);
+    });
+}
+
+/* =======================
  *  MAIN
  * ======================= */
 function main() {
@@ -9475,9 +9998,11 @@ function main() {
     })
     .then(function () {
       return runFarmAuto(cookie).then(function () {
-        return farmSignIn(cookie).then(function () {
-          return feedRanchFromWarehouse(CONFIG.RANCH_BASE, cookie, ranchCookie).then(function () {
-            return farmSellAll(cookie);
+        return runTimeFarm(cookie).then(function () {
+          return farmSignIn(cookie).then(function () {
+            return feedRanchFromWarehouse(CONFIG.RANCH_BASE, cookie, ranchCookie).then(function () {
+              return farmSellAll(cookie);
+            });
           });
         });
       });
