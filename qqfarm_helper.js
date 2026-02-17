@@ -1242,11 +1242,47 @@ var STORE_KEY_FISH_PEARL_DAY = "qqfarm_fish_pearl_day";
 var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
 var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
 
+function pad2(n) {
+  var x = Number(n || 0);
+  return x < 10 ? "0" + x : String(x);
+}
+
+function tzOffsetText(d) {
+  var mins = -d.getTimezoneOffset();
+  var sign = mins >= 0 ? "+" : "-";
+  var abs = Math.abs(mins);
+  var hh = Math.floor(abs / 60);
+  var mm = abs % 60;
+  return "UTC" + sign + pad2(hh) + ":" + pad2(mm);
+}
+
+function dateTimeText(d) {
+  return (
+    d.getFullYear() +
+    "-" +
+    pad2(d.getMonth() + 1) +
+    "-" +
+    pad2(d.getDate()) +
+    " " +
+    pad2(d.getHours()) +
+    ":" +
+    pad2(d.getMinutes()) +
+    ":" +
+    pad2(d.getSeconds())
+  );
+}
+
+function formatRunClockLine(d) {
+  var now = d || new Date();
+  return "时区 " + tzOffsetText(now) + " | " + dateTimeText(now);
+}
+
 function bannerStart() {
   log(LINE);
   log("🌾 QQ 农牧场助手");
-  var meta = "⏱ " + new Date().toLocaleString() + " | " + ENV_NAME;
+  var meta = "🧭 环境 " + ENV_NAME;
   if (CONFIG.DEBUG) meta += " | DEBUG";
+  log("🕒 开始时间 | " + formatRunClockLine(new Date()));
   log(meta);
   log(LINE);
   RUN_START = Date.now();
@@ -1256,6 +1292,7 @@ function bannerStart() {
 
 function bannerEnd() {
   log(LINE);
+  log("🕒 结束时间 | " + formatRunClockLine(new Date()));
   log("✅ 结束 | 农场 " + actionSummaryLine());
   log("🐮 牧场 " + ranchSummaryLine());
   log("🐟 鱼塘 " + fishSummaryLine());
@@ -5560,8 +5597,28 @@ function timeFarmSummaryLine() {
   );
 }
 
+function moduleEmoji(name) {
+  if (name === "农场作物+经验") return "🌾";
+  if (name === "农场作物") return "🌾";
+  if (name === "农场经验") return "📈";
+  if (name === "牧场动物+经验") return "🐮";
+  if (name === "牧场动物") return "🐮";
+  if (name === "牧场经验") return "📈";
+  if (name === "牧草果实") return "🌿";
+  if (name === "持有金币") return "💰";
+  if (name === "鱼塘养鱼") return "🐟";
+  if (name === "时光农场") return "🕰️";
+  if (name === "蜂巢采蜜") return "🐝";
+  return "";
+}
+
+function moduleTag(name) {
+  var em = moduleEmoji(name);
+  return "【" + (em ? em + " " : "") + name + "】";
+}
+
 function moduleLine(name, text) {
-  return "【" + name + "】" + (text || "无");
+  return moduleTag(name) + (text || "无");
 }
 
 function plainStatusText(items) {
@@ -5620,29 +5677,19 @@ function grassHarvestCount() {
 }
 
 function statusModuleFarmLine() {
-  return (
-    "作物 开始:" +
-    formatFarmStatusLine(STATUS_START.farm) +
-    " | 结束:" +
-    formatFarmStatusLine(STATUS_END.farm) +
-    "；经验 开始:" +
-    formatLevelExpStatus(STATS_START.farm) +
-    " | 结束:" +
-    formatLevelExpStatus(STATS_END.farm)
-  );
+  return "开始:" + formatFarmStatusLine(STATUS_START.farm) + " | 结束:" + formatFarmStatusLine(STATUS_END.farm);
+}
+
+function statusModuleFarmExpLine() {
+  return "开始:" + formatLevelExpStatus(STATS_START.farm) + " | 结束:" + formatLevelExpStatus(STATS_END.farm);
 }
 
 function statusModuleRanchLine() {
-  return (
-    "动物 开始:" +
-    plainStatusText(STATUS_START.ranch) +
-    " | 结束:" +
-    plainStatusText(STATUS_END.ranch) +
-    "；经验 开始:" +
-    formatLevelExpStatus(STATS_START.ranch) +
-    " | 结束:" +
-    formatLevelExpStatus(STATS_END.ranch)
-  );
+  return "开始:" + plainStatusText(STATUS_START.ranch) + " | 结束:" + plainStatusText(STATUS_END.ranch);
+}
+
+function statusModuleRanchExpLine() {
+  return "开始:" + formatLevelExpStatus(STATS_START.ranch) + " | 结束:" + formatLevelExpStatus(STATS_END.ranch);
 }
 
 function statusModuleGrassLine() {
@@ -5699,6 +5746,10 @@ function summaryModuleFarmLine() {
   );
 }
 
+function summaryModuleFarmExpLine() {
+  return formatExpOnlyLine("农场", STATS_START.farm, STATS_END.farm);
+}
+
 function summaryModuleRanchLine() {
   return (
     "收" +
@@ -5718,6 +5769,10 @@ function summaryModuleRanchLine() {
   );
 }
 
+function summaryModuleRanchExpLine() {
+  return formatExpOnlyLine("牧场", STATS_START.ranch, STATS_END.ranch);
+}
+
 function summaryModuleGrassLine() {
   var parts = ["喂草" + RANCH_STATS.feed];
   var grass = grassHarvestCount();
@@ -5734,7 +5789,15 @@ function summaryModuleMoneyLine() {
   if (MONEY_STATS.grassBuy > 0) spendParts.push("牧草种子" + MONEY_STATS.grassBuy);
   if (MONEY_STATS.fishBuy > 0) spendParts.push("鱼苗" + MONEY_STATS.fishBuy);
   if (MONEY_STATS.fishFeed > 0) spendParts.push("鱼食" + MONEY_STATS.fishFeed);
-  var line = "卖出 农" + MONEY_STATS.farmSell + " 牧" + MONEY_STATS.ranchSell + " 鱼" + MONEY_STATS.fishSell;
+  var line =
+    "持有" +
+    formatMoneyStatus(STATS_END.farm) +
+    " 卖出 农" +
+    MONEY_STATS.farmSell +
+    " 牧" +
+    MONEY_STATS.ranchSell +
+    " 鱼" +
+    MONEY_STATS.fishSell;
   if (spendParts.length) line += " | 花费 " + spendParts.join(" ");
   if (purchaseLine) line += " | 购买[" + purchaseLine + "]";
   return line;
@@ -5811,23 +5874,44 @@ function formatRanchFeedChangeLine() {
     var eCap = end.cap !== null && end.cap !== undefined ? end.cap : sCap;
     var sSlot = start.n !== null && start.n !== undefined ? start.n + "/" + sCap : "?/" + sCap;
     var eSlot = end.n !== null && end.n !== undefined ? end.n + "/" + eCap : "?/" + eCap;
-    var slotDelta =
-      start.n !== null && start.n !== undefined && end.n !== null && end.n !== undefined
-        ? " (Δ" + formatDelta(end.n - start.n) + ")"
-        : "";
-    parts.push("饲料槽 " + sSlot + "→" + eSlot + slotDelta);
+    if (
+      start.n !== null &&
+      start.n !== undefined &&
+      end.n !== null &&
+      end.n !== undefined &&
+      start.n === end.n &&
+      sCap === eCap
+    ) {
+      parts.push("饲料槽 " + eSlot + "（无变化）");
+    } else {
+      var slotDelta =
+        start.n !== null && start.n !== undefined && end.n !== null && end.n !== undefined
+          ? " (Δ" + formatDelta(end.n - start.n) + ")"
+          : "";
+      parts.push("饲料槽 " + sSlot + "→" + eSlot + slotDelta);
+    }
   }
   if (hasStoreInfo) {
     var sStore = start.total !== null && start.total !== undefined ? String(start.total) : "?";
     var eStore = end.total !== null && end.total !== undefined ? String(end.total) : "?";
-    var storeDelta =
+    if (
       start.total !== null &&
       start.total !== undefined &&
       end.total !== null &&
-      end.total !== undefined
-        ? " (Δ" + formatDelta(end.total - start.total) + ")"
-        : "";
-    parts.push("仓库牧草 " + sStore + "→" + eStore + storeDelta);
+      end.total !== undefined &&
+      start.total === end.total
+    ) {
+      parts.push("仓库牧草 " + eStore + "（无变化）");
+    } else {
+      var storeDelta =
+        start.total !== null &&
+        start.total !== undefined &&
+        end.total !== null &&
+        end.total !== undefined
+          ? " (Δ" + formatDelta(end.total - start.total) + ")"
+          : "";
+      parts.push("仓库牧草 " + sStore + "→" + eStore + storeDelta);
+    }
   }
   return parts.join("；");
 }
@@ -5854,8 +5938,11 @@ function changeModuleFarmLine() {
   if (harvestDetailLine) parts.push("收获[" + harvestDetailLine + "]");
   if (plantSkipLine) parts.push("播种未执行[" + plantSkipLine + "]");
   if (plantFailLine) parts.push("播种失败[" + plantFailLine + "]");
-  parts.push("经验 " + formatExpOnlyLine("农场", STATS_START.farm, STATS_END.farm));
   return parts.join("；");
+}
+
+function changeModuleFarmExpLine() {
+  return formatExpOnlyLine("农场", STATS_START.farm, STATS_END.farm);
 }
 
 function changeModuleRanchLine() {
@@ -5863,8 +5950,11 @@ function changeModuleRanchLine() {
   var sHarvestable = summarizeRanchHarvestable(STATUS_START.ranch).total;
   var eHarvestable = summarizeRanchHarvestable(STATUS_END.ranch).total;
   parts.push("可收 开始" + sHarvestable + " 结束" + eHarvestable + " Δ" + formatDelta(eHarvestable - sHarvestable));
-  parts.push("经验 " + formatExpOnlyLine("牧场", STATS_START.ranch, STATS_END.ranch));
   return parts.join("；");
+}
+
+function changeModuleRanchExpLine() {
+  return formatExpOnlyLine("牧场", STATS_START.ranch, STATS_END.ranch);
 }
 
 function changeModuleFishLine() {
@@ -5879,7 +5969,6 @@ function changeModuleFishLine() {
   if (composeDetail) parts.push("合成[" + composeDetail + "]");
   if (FISH_STATS.pearlGain) parts.push("珍珠奖励[" + FISH_STATS.pearlGain + "]");
   if (FISH_STATS.feedUsed > 0) parts.push("鱼食消耗 " + (FISH_STATS.feedItem || "鱼食") + "×" + FISH_STATS.feedUsed + "袋");
-  parts.push("经验 " + formatExpOnlyLine("鱼塘", STATS_START.farm, STATS_END.farm));
   return parts.join("；");
 }
 
@@ -5898,10 +5987,14 @@ function changeModuleMoneyLine() {
   var parts = [];
   var s = STATS_START.farm && STATS_START.farm.money != null ? Number(STATS_START.farm.money) : null;
   var e = STATS_END.farm && STATS_END.farm.money != null ? Number(STATS_END.farm.money) : null;
-  var holdText =
-    s !== null && !isNaN(s) && e !== null && !isNaN(e)
-      ? s + "→" + e + " (Δ" + formatDelta(e - s) + ")"
-      : formatMoneyStatus(STATS_START.farm) + "→" + formatMoneyStatus(STATS_END.farm);
+  var holdText = "";
+  if (s !== null && !isNaN(s) && e !== null && !isNaN(e)) {
+    holdText = s === e ? String(e) + "（无变化）" : s + "→" + e + " (Δ" + formatDelta(e - s) + ")";
+  } else {
+    var ss = formatMoneyStatus(STATS_START.farm);
+    var ee = formatMoneyStatus(STATS_END.farm);
+    holdText = ss === ee ? ee : ss + "→" + ee;
+  }
   var spendParts = [];
   parts.push("持有 " + holdText);
   parts.push("卖出 农" + MONEY_STATS.farmSell + " 牧" + MONEY_STATS.ranchSell + " 鱼" + MONEY_STATS.fishSell);
@@ -5941,7 +6034,8 @@ function changeModuleHiveLine() {
   var startHoney = extractHiveHoneyFromStateText(HIVE_STATS.start);
   var endHoney = extractHiveHoneyFromStateText(HIVE_STATS.end || HIVE_STATS.start);
   if (startHoney !== null && endHoney !== null) {
-    parts.push("蜂蜜 " + startHoney + "→" + endHoney + " (Δ" + formatDelta(endHoney - startHoney) + ")");
+    if (startHoney === endHoney) parts.push("蜂蜜 " + endHoney + "（无变化）");
+    else parts.push("蜂蜜 " + startHoney + "→" + endHoney + " (Δ" + formatDelta(endHoney - startHoney) + ")");
   } else if (HIVE_STATS.start || HIVE_STATS.end) {
     parts.push("状态无可比蜂蜜字段");
   } else {
@@ -5953,27 +6047,33 @@ function changeModuleHiveLine() {
 function buildModuleSections() {
   return {
     status: [
-      moduleLine("农场作物+经验", statusModuleFarmLine()),
-      moduleLine("牧场动物+经验", statusModuleRanchLine()),
+      moduleLine("农场作物", statusModuleFarmLine()),
+      moduleLine("农场经验", statusModuleFarmExpLine()),
       moduleLine("牧草果实", statusModuleGrassLine()),
+      moduleLine("牧场动物", statusModuleRanchLine()),
+      moduleLine("牧场经验", statusModuleRanchExpLine()),
       moduleLine("持有金币", statusModuleMoneyLine()),
       moduleLine("鱼塘养鱼", statusModuleFishLine()),
       moduleLine("时光农场", statusModuleTimeFarmLine()),
       moduleLine("蜂巢采蜜", statusModuleHiveLine())
     ],
     summary: [
-      moduleLine("农场作物+经验", summaryModuleFarmLine()),
-      moduleLine("牧场动物+经验", summaryModuleRanchLine()),
+      moduleLine("农场作物", summaryModuleFarmLine()),
+      moduleLine("农场经验", summaryModuleFarmExpLine()),
       moduleLine("牧草果实", summaryModuleGrassLine()),
+      moduleLine("牧场动物", summaryModuleRanchLine()),
+      moduleLine("牧场经验", summaryModuleRanchExpLine()),
       moduleLine("持有金币", summaryModuleMoneyLine()),
       moduleLine("鱼塘养鱼", summaryModuleFishLine()),
       moduleLine("时光农场", summaryModuleTimeFarmLine()),
       moduleLine("蜂巢采蜜", summaryModuleHiveLine())
     ],
     change: [
-      moduleLine("农场作物+经验", changeModuleFarmLine()),
-      moduleLine("牧场动物+经验", changeModuleRanchLine()),
+      moduleLine("农场作物", changeModuleFarmLine()),
+      moduleLine("农场经验", changeModuleFarmExpLine()),
       moduleLine("牧草果实", changeModuleGrassLine()),
+      moduleLine("牧场动物", changeModuleRanchLine()),
+      moduleLine("牧场经验", changeModuleRanchExpLine()),
       moduleLine("持有金币", changeModuleMoneyLine()),
       moduleLine("鱼塘养鱼", changeModuleFishLine()),
       moduleLine("时光农场", changeModuleTimeFarmLine()),
@@ -5985,13 +6085,13 @@ function buildModuleSections() {
 function summaryLines() {
   var sec = buildModuleSections();
   var lines = [];
-  lines.push("【状态】");
+  lines.push("【📋 状态】");
   lines = lines.concat(sec.status);
   lines.push(SUBLINE);
-  lines.push("【汇总】");
+  lines.push("【🧾 汇总】");
   lines = lines.concat(sec.summary);
   lines.push(SUBLINE);
-  lines.push("【变化】");
+  lines.push("【📈 变化】");
   lines = lines.concat(sec.change);
   return lines;
 }
@@ -6005,22 +6105,24 @@ function buildNotifyBody() {
   var briefLines = [];
   var costTag = costSec ? costSec + "s" : "未知";
   briefLines.push("✨简报 | ⏱ 用时 " + costTag + " | ⚠️ 错误 " + totalErr);
-  briefLines.push("农场作物+经验 | " + summaryModuleFarmLine());
-  briefLines.push("牧场动物+经验 | " + summaryModuleRanchLine());
-  briefLines.push("牧草果实 | " + summaryModuleGrassLine());
-  briefLines.push("持有金币 | " + summaryModuleMoneyLine());
-  briefLines.push("鱼塘养鱼 | " + summaryModuleFishLine());
-  briefLines.push("时光农场 | " + summaryModuleTimeFarmLine());
-  briefLines.push("蜂巢采蜜 | " + summaryModuleHiveLine());
+  briefLines.push("🌾 农场作物 | " + summaryModuleFarmLine());
+  briefLines.push("📈 农场经验 | " + summaryModuleFarmExpLine());
+  briefLines.push("🌿 牧草果实 | " + summaryModuleGrassLine());
+  briefLines.push("🐮 牧场动物 | " + summaryModuleRanchLine());
+  briefLines.push("📈 牧场经验 | " + summaryModuleRanchExpLine());
+  briefLines.push("💰 持有金币 | " + summaryModuleMoneyLine());
+  briefLines.push("🐟 鱼塘养鱼 | " + summaryModuleFishLine());
+  briefLines.push("🕰️ 时光农场 | " + summaryModuleTimeFarmLine());
+  briefLines.push("🐝 蜂巢采蜜 | " + summaryModuleHiveLine());
   var brief = briefLines.join("\n");
   var detailLines = [];
-  detailLines.push("【状态】");
+  detailLines.push("【📋 状态】");
   detailLines = detailLines.concat(sec.status);
   detailLines.push(SUBLINE);
-  detailLines.push("【汇总】");
+  detailLines.push("【🧾 汇总】");
   detailLines = detailLines.concat(sec.summary);
   detailLines.push(SUBLINE);
-  detailLines.push("【变化】");
+  detailLines.push("【📈 变化】");
   detailLines = detailLines.concat(sec.change);
   detailLines.push("⏱ 用时 | " + (costSec ? costSec + "s" : "未知"));
   return [brief, SUBLINE, detailLines.join("\n")].join("\n");
@@ -10563,17 +10665,7 @@ function hiveErrMsg(json) {
 
 function formatHiveState(state) {
   if (!state) return "未知";
-  var stamp = state.stamp ? String(state.stamp) : "-";
-  return (
-    "状态" +
-    state.status +
-    " 蜂蜜" +
-    state.honey +
-    " 等级" +
-    state.level +
-    " 戳" +
-    stamp
-  );
+  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level;
 }
 
 function callHiveApi(cookie, path, params) {
@@ -11334,28 +11426,32 @@ function main() {
     })
     .then(function () {
       log(SUBLINE);
-      log("【开始状态】");
-      log("【农场作物+经验】作物 " + formatFarmStatusLine(STATUS_START.farm) + "；经验 " + formatLevelExpStatus(STATS_START.farm));
-      log("【牧场动物+经验】动物 " + plainStatusText(STATUS_START.ranch) + "；经验 " + formatLevelExpStatus(STATS_START.ranch));
-      log("【牧草果实】" + formatRanchFeedInfoLine(RANCH_FEED_STATE.start));
-      log("【持有金币】" + formatMoneyStatus(STATS_START.farm));
-      log("【鱼塘养鱼】" + plainStatusText(STATUS_START.fish));
-      log("【时光农场】" + (timeFarmEnabled() ? timeFarmStateText(TIME_FARM_STATS.startSum, TIME_FARM_STATS.start) : "未启用"));
-      log("【蜂巢采蜜】" + (hiveEnabled() ? HIVE_STATS.start || "未知" : "未启用"));
+      log("【🧭 开始状态】");
+      log(moduleTag("农场作物") + formatFarmStatusLine(STATUS_START.farm));
+      log(moduleTag("农场经验") + formatLevelExpStatus(STATS_START.farm));
+      log(moduleTag("牧草果实") + formatRanchFeedInfoLine(RANCH_FEED_STATE.start));
+      log(moduleTag("牧场动物") + plainStatusText(STATUS_START.ranch));
+      log(moduleTag("牧场经验") + formatLevelExpStatus(STATS_START.ranch));
+      log(moduleTag("持有金币") + formatMoneyStatus(STATS_START.farm));
+      log(moduleTag("鱼塘养鱼") + plainStatusText(STATUS_START.fish));
+      log(moduleTag("时光农场") + (timeFarmEnabled() ? timeFarmStateText(TIME_FARM_STATS.startSum, TIME_FARM_STATS.start) : "未启用"));
+      log(moduleTag("蜂巢采蜜") + (hiveEnabled() ? HIVE_STATS.start || "未知" : "未启用"));
       log(SUBLINE);
-      log("【结束状态】");
-      log("【农场作物+经验】作物 " + formatFarmStatusLine(STATUS_END.farm) + "；经验 " + formatLevelExpStatus(STATS_END.farm));
-      log("【牧场动物+经验】动物 " + plainStatusText(STATUS_END.ranch) + "；经验 " + formatLevelExpStatus(STATS_END.ranch));
-      log("【牧草果实】" + formatRanchFeedInfoLine(RANCH_FEED_STATE.end || RANCH_FEED_STATE.start));
-      log("【持有金币】" + formatMoneyStatus(STATS_END.farm));
-      log("【鱼塘养鱼】" + plainStatusText(STATUS_END.fish));
+      log("【🧭 结束状态】");
+      log(moduleTag("农场作物") + formatFarmStatusLine(STATUS_END.farm));
+      log(moduleTag("农场经验") + formatLevelExpStatus(STATS_END.farm));
+      log(moduleTag("牧草果实") + formatRanchFeedInfoLine(RANCH_FEED_STATE.end || RANCH_FEED_STATE.start));
+      log(moduleTag("牧场动物") + plainStatusText(STATUS_END.ranch));
+      log(moduleTag("牧场经验") + formatLevelExpStatus(STATS_END.ranch));
+      log(moduleTag("持有金币") + formatMoneyStatus(STATS_END.farm));
+      log(moduleTag("鱼塘养鱼") + plainStatusText(STATUS_END.fish));
       log(
-        "【时光农场】" +
+        moduleTag("时光农场") +
           (timeFarmEnabled()
             ? timeFarmStateText(TIME_FARM_STATS.endSum || TIME_FARM_STATS.startSum, TIME_FARM_STATS.end || TIME_FARM_STATS.start)
             : "未启用")
       );
-      log("【蜂巢采蜜】" + (hiveEnabled() ? HIVE_STATS.end || HIVE_STATS.start || "未知" : "未启用"));
+      log(moduleTag("蜂巢采蜜") + (hiveEnabled() ? HIVE_STATS.end || HIVE_STATS.start || "未知" : "未启用"));
       log(SUBLINE);
       var logBody = summaryLines().join("\n");
       var notifyBody = buildNotifyBody();
