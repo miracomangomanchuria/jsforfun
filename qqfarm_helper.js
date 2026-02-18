@@ -113,7 +113,8 @@ var CONFIG = {
   // 蜂巢（放养蜜蜂/收获蜂蜜）
   HIVE_BASE: "https://nc.qzone.qq.com",
   HIVE_ENABLE: true,
-  HIVE_AUTO_HARVEST: true,
+  HIVE_AUTO_HARVEST: true, // 收蜂蜜(非卖蜜)
+  HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
 
   // 时光农场（独立于普通农场）
@@ -1167,6 +1168,7 @@ var FISH_STATS = {
 
 var HIVE_STATS = {
   harvest: 0,
+  pollen: 0,
   work: 0,
   honey: 0,
   errors: 0,
@@ -5579,7 +5581,18 @@ function fishSummaryLine() {
 }
 
 function hiveSummaryLine() {
-  return "收蜜=" + HIVE_STATS.harvest + " 放蜂=" + HIVE_STATS.work + " 蜂蜜=" + HIVE_STATS.honey + " 错误=" + HIVE_STATS.errors;
+  return (
+    "收蜜=" +
+    HIVE_STATS.harvest +
+    " 喂粉=" +
+    HIVE_STATS.pollen +
+    " 放蜂=" +
+    HIVE_STATS.work +
+    " 蜂蜜=" +
+    HIVE_STATS.honey +
+    " 错误=" +
+    HIVE_STATS.errors
+  );
 }
 
 function timeFarmSummaryLine() {
@@ -5847,7 +5860,18 @@ function summaryModuleTimeFarmLine() {
 
 function summaryModuleHiveLine() {
   if (!hiveEnabled()) return "未启用";
-  return "收蜜" + HIVE_STATS.harvest + " 放蜂" + HIVE_STATS.work + " 蜂蜜" + HIVE_STATS.honey + " 错" + HIVE_STATS.errors;
+  return (
+    "收蜜" +
+    HIVE_STATS.harvest +
+    " 喂粉" +
+    HIVE_STATS.pollen +
+    " 放蜂" +
+    HIVE_STATS.work +
+    " 蜂蜜" +
+    HIVE_STATS.honey +
+    " 错" +
+    HIVE_STATS.errors
+  );
 }
 
 function countFishHarvestableStatus(list) {
@@ -10663,9 +10687,120 @@ function hiveErrMsg(json) {
   return json.direction || json.msg || json.message || ("ecode=" + (json.ecode != null ? json.ecode : "未知"));
 }
 
+function isHiveNoop(json, msg) {
+  var ecode = Number(json && json.ecode);
+  if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
+  var m = normalizeSpace(msg || hiveErrMsg(json));
+  if (!m) return false;
+  return /(状态不对|无需|不能|已在工作|冷却|免费次数|花粉不足|蜜蜂不足|无可收|未达到|未满足)/.test(m);
+}
+
+function parseHiveHarvestGain(json, fallback) {
+  var gain = Number((json && (json.addHoney || json.add || 0)) || 0) || 0;
+  if (gain > 0) return gain;
+  var fb = Number(fallback || 0) || 0;
+  return fb > 0 ? fb : 0;
+}
+
+function hiveNum(v, dft) {
+  var n = Number(v);
+  if (isNaN(n)) return Number(dft || 0) || 0;
+  return n;
+}
+
+function buildHiveActionPlan(state) {
+  var plan = {
+    canPollen: false,
+    canHarvest: false,
+    canWork: false,
+    pollenReason: "",
+    harvestReason: "",
+    workReason: "",
+    status: 0,
+    honey: 0,
+    freeCD: 0,
+    payCD: 0,
+    remainCd: 0,
+    summary: "状态未知"
+  };
+  if (!state) {
+    plan.pollenReason = "状态缺失";
+    plan.harvestReason = "状态缺失";
+    plan.workReason = "状态缺失";
+    return plan;
+  }
+
+  var status = hiveNum(state.status, 0);
+  var honey = hiveNum(state.honey, 0);
+  var freeCD = hiveNum(state.freeCD, 0);
+  var payCD = hiveNum(state.payCD, 0);
+  var stamp = hiveNum(state.stamp, 0);
+  var nowTs = hiveNum(getFarmTime(), 0);
+  var remainCd = 0;
+  if (nowTs > 0 && stamp > 0 && payCD > 0) {
+    var pass = nowTs - stamp;
+    if (pass < payCD) remainCd = payCD - pass;
+  }
+
+  plan.status = status;
+  plan.honey = honey;
+  plan.freeCD = freeCD;
+  plan.payCD = payCD;
+  plan.remainCd = remainCd;
+
+  if (CONFIG.HIVE_AUTO_POLLEN && freeCD > 0) {
+    plan.canPollen = true;
+  } else if (!CONFIG.HIVE_AUTO_POLLEN) {
+    plan.pollenReason = "配置关闭";
+  } else {
+    plan.pollenReason = "花粉可用值不足(" + freeCD + ")";
+  }
+
+  // 已观察到 status=2 通常对应可处理蜂蜜；honey>0 也应收。
+  if (CONFIG.HIVE_AUTO_HARVEST && (honey > 0 || status === 2)) {
+    plan.canHarvest = true;
+  } else if (!CONFIG.HIVE_AUTO_HARVEST) {
+    plan.harvestReason = "配置关闭";
+  } else {
+    plan.harvestReason = "状态显示无可收蜂蜜";
+  }
+
+  // 放蜂先看是否仍有可收蜂蜜，再看冷却/状态。
+  if (!CONFIG.HIVE_AUTO_WORK) {
+    plan.workReason = "配置关闭";
+  } else if (plan.canHarvest) {
+    plan.workReason = "当前可收蜜，先收后放";
+  } else if (status === 0) {
+    plan.workReason = "状态0(疑似无可放蜜蜂)";
+  } else if (remainCd > 0) {
+    plan.workReason = "冷却中(" + remainCd + "s)";
+  } else {
+    plan.canWork = true;
+  }
+
+  plan.summary =
+    "状态" +
+    status +
+    " 蜂蜜" +
+    honey +
+    " 花粉" +
+    freeCD +
+    " 付费值" +
+    payCD +
+    " | 喂粉" +
+    (plan.canPollen ? "是" : "否") +
+    " 收蜜" +
+    (plan.canHarvest ? "是" : "否") +
+    " 放蜂" +
+    (plan.canWork ? "是" : "否");
+  return plan;
+}
+
 function formatHiveState(state) {
   if (!state) return "未知";
-  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level;
+  var freeCd = state.freeCD != null ? Number(state.freeCD) || 0 : 0;
+  var payCd = state.payCD != null ? Number(state.payCD) || 0 : 0;
+  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level + " 花粉" + freeCd + " 付费值" + payCd;
 }
 
 function callHiveApi(cookie, path, params) {
@@ -10694,6 +10829,9 @@ function fetchHiveIndex(cookie, ctx) {
       honey: Number(json.honey || 0) || 0,
       status: Number(json.status || 0) || 0,
       level: Number(json.level || 0) || 0,
+      freeCD: Number(json.freeCD || 0) || 0,
+      payCD: Number(json.payCD || 0) || 0,
+      step: Number(json.step || 0) || 0,
       stamp: Number(json.stamp || 0) || 0,
       raw: json
     };
@@ -10703,6 +10841,7 @@ function fetchHiveIndex(cookie, ctx) {
 function runHive(cookie) {
   if (!hiveEnabled()) return Promise.resolve();
   log("🐝 蜂巢模块: 启动");
+  log("🐝 蜂巢流程: 状态检测→喂花粉(可用才喂)→收蜂蜜(可收才收)→放蜂(可放才放)→复查（禁用卖蜂蜜）");
   HIVE_STATS.start = "";
   HIVE_STATS.end = "";
   var ctx = null;
@@ -10721,24 +10860,65 @@ function runHive(cookie) {
     });
   }
 
-  function doHarvest() {
-    if (!CONFIG.HIVE_AUTO_HARVEST || !current || current.honey <= 0) return Promise.resolve();
-    var num = current.honey;
+  function doPollen() {
+    var plan = buildHiveActionPlan(current);
+    if (!plan.canPollen) {
+      if (CONFIG.DEBUG) logDebug("🌸 喂花粉: " + (plan.pollenReason || "无需执行"));
+      return Promise.resolve();
+    }
+    if (CONFIG.DEBUG) logDebug("🌸 喂花粉: 状态预判通过，执行");
     return callHiveApi(
       cookie,
-      "/cgi-bin/cgi_farm_hive_sale",
+      "/cgi-bin/cgi_farm_hive_restend",
       hiveParams(ctx, {
-        num: num
+        free: 1
       })
     ).then(function (json) {
       if (!isHiveOk(json)) {
+        var msg = hiveErrMsg(json);
+        if (isHiveNoop(json, msg)) {
+          if (CONFIG.DEBUG) logDebug("🌸 喂花粉: 无需执行(" + msg + ")");
+          return;
+        }
         HIVE_STATS.errors += 1;
-        log("⚠️ 蜂巢收蜜失败: " + hiveErrMsg(json));
+        log("⚠️ 喂花粉失败: " + msg);
         return;
       }
-      HIVE_STATS.harvest += num;
-      harvested += num;
-      log("🍯 蜂巢收蜜: +" + num);
+      HIVE_STATS.pollen += 1;
+      log("🌸 喂花粉: 成功");
+      return refresh("喂粉后").then(function (st) {
+        if (st) current = st;
+      });
+    });
+  }
+
+  function doHarvest() {
+    var plan = buildHiveActionPlan(current);
+    if (!plan.canHarvest) {
+      if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: " + (plan.harvestReason || "无需执行"));
+      return Promise.resolve();
+    }
+    if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: 状态预判通过，执行");
+    var fallbackHoney = Number(current.honey || 0) || 0;
+    return callHiveApi(cookie, "/cgi-bin/cgi_farm_hive_harvest", hiveParams(ctx)).then(function (json) {
+      if (!isHiveOk(json)) {
+        var msg = hiveErrMsg(json);
+        if (isHiveNoop(json, msg)) {
+          if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: 无需执行(" + msg + ")");
+          return;
+        }
+        HIVE_STATS.errors += 1;
+        log("⚠️ 收蜂蜜失败: " + msg);
+        return;
+      }
+      var gain = parseHiveHarvestGain(json, fallbackHoney);
+      if (gain > 0) {
+        HIVE_STATS.harvest += gain;
+        harvested += gain;
+        log("🍯 收蜂蜜: +" + gain);
+      } else {
+        log("🍯 收蜂蜜: 已执行(本次+0)");
+      }
       return refresh("收蜜后").then(function (st) {
         if (st) current = st;
       });
@@ -10746,9 +10926,12 @@ function runHive(cookie) {
   }
 
   function doWork() {
-    if (!CONFIG.HIVE_AUTO_WORK || !current) return Promise.resolve();
-    // 仅在明确可放蜂状态触发，避免“当前状态不对”的误操作。
-    if (current.status === 1) return Promise.resolve();
+    var plan = buildHiveActionPlan(current);
+    if (!plan.canWork) {
+      if (CONFIG.DEBUG) logDebug("🐝 放养蜜蜂: " + (plan.workReason || "无需执行"));
+      return Promise.resolve();
+    }
+    if (CONFIG.DEBUG) logDebug("🐝 放养蜜蜂: 状态预判通过，执行");
     return callHiveApi(cookie, "/cgi-bin/cgi_farm_hive_work", hiveParams(ctx)).then(function (json) {
       if (!isHiveOk(json)) {
         var msg = hiveErrMsg(json);
@@ -10784,7 +10967,16 @@ function runHive(cookie) {
       if (!state) return;
       current = state;
       HIVE_STATS.start = formatHiveState(state);
-      return doHarvest().then(doWork);
+      log("🐝 蜂巢预判(开始): " + buildHiveActionPlan(current).summary);
+      return doPollen()
+        .then(function () {
+          return sleep(CONFIG.WAIT_MS);
+        })
+        .then(doHarvest)
+        .then(function () {
+          return sleep(CONFIG.WAIT_MS);
+        })
+        .then(doWork);
     })
     .then(function () {
       if (!ctx) return;
