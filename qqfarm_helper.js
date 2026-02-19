@@ -108,6 +108,7 @@ var CONFIG = {
   FISH_COMPOSE_MAX_PER_ID: 0, // 单个 fid 最多合成次数（0=按接口可合成次数）
   FISH_COMPOSE_MAX_TOTAL: 0, // 单次总合成上限（0=不限制）
   FISH_COMPOSE_PRECHECK: true, // 合成前先结合 piece 状态做门槛预判，减少“碎片不足”空请求
+  FISH_COMPOSE_HINTS_ENABLE: false, // 关闭静态门槛表，优先按接口“能否 compose”判定（近似按钮亮/暗）
   FISH_COMPOSE_NEED_HINTS: {
     // 依据“我的碎片”界面分母门槛，可按实际抓包/界面继续补充
     "108": 5,
@@ -142,6 +143,7 @@ var CONFIG = {
   HIVE_AUTO_HARVEST: true, // 收蜂蜜(非卖蜜)
   HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
+  HIVE_TRY_HARVEST_ON_STATUS1: true, // 状态1但蜂蜜>0时，仍补探测一次收蜜
 
   // 节气/活动（状态检测 + 每日领取）
   FARM_EVENT_BASE: "https://nc.qzone.qq.com",
@@ -149,8 +151,8 @@ var CONFIG = {
   FARM_EVENT_SEEDHB_ENABLE: true, // /cgi_farm_seedhb act=9/10
   FARM_EVENT_SEEDHB_AUTO_CLAIM: true, // 有可领时自动 act=10
   FARM_EVENT_WISH_ENABLE: true, // /cgi_farm_wish_*
-  FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
-  FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help（有余量时）
+  FARM_EVENT_WISH_AUTO_STAR: false, // 自动领取 starlist 中可领星奖（默认关闭）
+  FARM_EVENT_WISH_AUTO_HELP: false, // 自动执行一次 wish_help（默认关闭）
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
   FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
 
@@ -166,6 +168,12 @@ var CONFIG = {
   TIME_FARM_PREFER_SPECIAL_SEED: true, // 优先时光农场专用种子（若背包有）
   TIME_FARM_FERTILIZE_ENABLE: false, // 默认关闭，避免日常误消耗化肥
   TIME_FARM_FERT_TOOLID: "1",
+  TIME_FARM_TASK_AUTO_CLAIM: true, // 时光任务达成后自动领奖（taskid）
+  TIME_FARM_TASK_TARGET_HINTS: {
+    // 仅用于“状态仍为进行中但进度已达标”的补判，门槛可按个人任务面板补齐
+    "3": 10,
+    "4": 10
+  },
 
   // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
@@ -228,7 +236,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.19-r8";
+var SCRIPT_REV = "2026.02.19-r16";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1241,6 +1249,10 @@ var TIME_FARM_STATS = {
   dig: 0,
   plant: 0,
   fertilize: 0,
+  taskClaim: 0,
+  taskReward: "",
+  taskStart: "",
+  taskEnd: "",
   errors: 0,
   start: "",
   end: "",
@@ -2964,6 +2976,7 @@ function saveFishComposeNeedMap() {
 }
 
 function fishComposeNeedHint(fid) {
+  if (!CONFIG.FISH_COMPOSE_HINTS_ENABLE) return 0;
   var key = String(Number(fid || 0) || 0);
   if (!key || key === "0") return 0;
   var hints = (CONFIG && CONFIG.FISH_COMPOSE_NEED_HINTS) || {};
@@ -3120,7 +3133,7 @@ function fetchFishComposeCandidates(cookie) {
           for (var j = 0; j < out.length; j++) {
             parts.push(out[j].name + "×" + out[j].num);
           }
-          logDebug("🧬 可合成鱼苗: " + parts.join("；"));
+          logDebug("🧬 碎片候选(历史): " + parts.join("；"));
         }
         return { uIdx: uIdx, uinY: uinY, list: out };
       });
@@ -5832,7 +5845,7 @@ function hiveSummaryLine() {
 }
 
 function timeFarmSummaryLine() {
-  return (
+  var line =
     "收获=" +
     TIME_FARM_STATS.harvest +
     " 铲地=" +
@@ -5841,9 +5854,12 @@ function timeFarmSummaryLine() {
     TIME_FARM_STATS.plant +
     " 施肥=" +
     TIME_FARM_STATS.fertilize +
+    " 领奖=" +
+    TIME_FARM_STATS.taskClaim +
     " 错误=" +
-    TIME_FARM_STATS.errors
-  );
+    TIME_FARM_STATS.errors;
+  if (TIME_FARM_STATS.taskReward) line += " 奖励[" + TIME_FARM_STATS.taskReward + "]";
+  return line;
 }
 
 function moduleEmoji(name) {
@@ -5936,22 +5952,16 @@ function farmEventStatusLine() {
 function farmEventSummaryLine() {
   var parts = [];
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
-  parts.push("许愿领" + FARM_EVENT_STATS.wishStarClaim);
-  parts.push("许愿助力" + FARM_EVENT_STATS.wishHelp);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动忙" + FARM_EVENT_STATS.busy);
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
-  if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   return parts.join(" ");
 }
 
 function farmEventChangeLine() {
   var parts = [];
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
-  if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
-  if (FARM_EVENT_STATS.wishHelp > 0) parts.push("许愿助力+" + FARM_EVENT_STATS.wishHelp);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动繁忙" + FARM_EVENT_STATS.busy + "次");
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
-  if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   if (!parts.length) return "活动无领取";
   return parts.join("；");
 }
@@ -6026,7 +6036,15 @@ function statusModuleTimeFarmLine() {
   if (!timeFarmEnabled()) return "未启用";
   var start = timeFarmStateText(TIME_FARM_STATS.startSum, TIME_FARM_STATS.start);
   var end = timeFarmStateText(TIME_FARM_STATS.endSum || TIME_FARM_STATS.startSum, TIME_FARM_STATS.end || TIME_FARM_STATS.start);
-  return "开始:" + start + " | 结束:" + end;
+  var line = "开始:" + start + " | 结束:" + end;
+  if (TIME_FARM_STATS.taskStart || TIME_FARM_STATS.taskEnd) {
+    line +=
+      "；任务 开始:" +
+      (TIME_FARM_STATS.taskStart || "无") +
+      " | 结束:" +
+      (TIME_FARM_STATS.taskEnd || TIME_FARM_STATS.taskStart || "无");
+  }
+  return line;
 }
 
 function statusModuleHiveLine() {
@@ -6146,7 +6164,7 @@ function summaryModuleFishLine() {
 
 function summaryModuleTimeFarmLine() {
   if (!timeFarmEnabled()) return "未启用";
-  return (
+  var line =
     "收" +
     TIME_FARM_STATS.harvest +
     " 铲" +
@@ -6155,9 +6173,12 @@ function summaryModuleTimeFarmLine() {
     TIME_FARM_STATS.plant +
     " 肥" +
     TIME_FARM_STATS.fertilize +
+    " 领奖" +
+    TIME_FARM_STATS.taskClaim +
     " 错" +
-    TIME_FARM_STATS.errors
-  );
+    TIME_FARM_STATS.errors;
+  if (TIME_FARM_STATS.taskReward) line += " 奖励[" + TIME_FARM_STATS.taskReward + "]";
+  return line;
 }
 
 function summaryModuleHiveLine() {
@@ -6344,6 +6365,16 @@ function changeModuleTimeFarmLine() {
   var parts = ["状态Δ " + (delta || "无变化")];
   if (emptyHint) parts.push(emptyHint);
   if (TIME_FARM_STATS.plantSkipReason) parts.push("播种说明[" + TIME_FARM_STATS.plantSkipReason + "]");
+  if (TIME_FARM_STATS.taskStart || TIME_FARM_STATS.taskEnd) {
+    parts.push(
+      "任务 开始:" +
+        (TIME_FARM_STATS.taskStart || "无") +
+        " 结束:" +
+        (TIME_FARM_STATS.taskEnd || TIME_FARM_STATS.taskStart || "无")
+    );
+  }
+  if (TIME_FARM_STATS.taskClaim > 0) parts.push("任务领奖+" + TIME_FARM_STATS.taskClaim);
+  if (TIME_FARM_STATS.taskReward) parts.push("任务奖励[" + TIME_FARM_STATS.taskReward + "]");
   return parts.join("；");
 }
 
@@ -11529,6 +11560,7 @@ function buildHiveActionPlan(state) {
   var plan = {
     canPollen: false,
     canHarvest: false,
+    harvestProbe: false,
     canWork: false,
     pollenReason: "",
     harvestReason: "",
@@ -11564,46 +11596,43 @@ function buildHiveActionPlan(state) {
   plan.freeCD = freeCD;
   plan.payCD = payCD;
   plan.remainCd = remainCd;
-  var holdHoneyLocked = status === 1 && honey > 0;
+  // 收蜜优先按蜂蜜值判断，状态仅用于控制是否允许“状态1补探测”。
+  if (!CONFIG.HIVE_AUTO_HARVEST) {
+    plan.harvestReason = "配置关闭";
+  } else if (honey <= 0) {
+    plan.harvestReason = "状态显示无可收蜂蜜";
+  } else if (status === 1) {
+    if (CONFIG.HIVE_TRY_HARVEST_ON_STATUS1) {
+      plan.canHarvest = true;
+      plan.harvestProbe = true;
+      plan.harvestReason = "状态1且蜂蜜>0，补探测收蜜";
+    } else {
+      plan.harvestReason = "状态1且蜂蜜>0(已关闭补探测)";
+    }
+  } else {
+    plan.canHarvest = true;
+  }
 
   if (!CONFIG.HIVE_AUTO_POLLEN) {
     plan.pollenReason = "配置关闭";
-  } else if (holdHoneyLocked) {
-    plan.pollenReason = "状态1且蜂蜜待结算";
-  } else if (status === 2) {
-    plan.pollenReason = "当前可收蜜，先收后喂";
+  } else if (plan.canHarvest) {
+    plan.pollenReason = "当前有蜂蜜可收，先收后喂";
   } else if (freeCD > 0) {
     plan.canPollen = true;
   } else {
     plan.pollenReason = "花粉可用值不足(" + freeCD + ")";
   }
 
-  // 仅在明确可收状态时触发收蜜，避免状态口径不一致导致空调用。
-  if (CONFIG.HIVE_AUTO_HARVEST && status === 2) {
-    plan.canHarvest = true;
-  } else if (!CONFIG.HIVE_AUTO_HARVEST) {
-    plan.harvestReason = "配置关闭";
-  } else if (honey > 0) {
-    plan.harvestReason = "蜂蜜待结算(状态" + status + ")";
-  } else {
-    plan.harvestReason = "状态显示无可收蜂蜜";
-  }
-
-  // 放蜂先看是否仍有可收蜂蜜，再看冷却/状态。
+  // 放蜂只做一轮探测：有可收先收，其余交由接口判定是否冷却/状态不对。
   if (!CONFIG.HIVE_AUTO_WORK) {
     plan.workReason = "配置关闭";
   } else if (plan.canHarvest) {
-    plan.workReason = "当前可收蜜，先收后放";
-  } else if (holdHoneyLocked) {
-    plan.workReason = "状态1且蜂蜜待结算";
+    plan.workReason = "当前有蜂蜜可收，先收后放";
   } else if (status === 0) {
     plan.workReason = "状态0(疑似无可放蜜蜂)";
-  } else if (remainCd > 0) {
-    plan.workReason = "冷却中(" + remainCd + "s)";
-  } else if (status === 2) {
-    plan.workReason = "当前可收蜜，先收后放";
   } else {
     plan.canWork = true;
+    if (remainCd > 0) plan.workReason = "冷却提示" + remainCd + "s(仍尝试一次，以接口为准)";
   }
 
   plan.summary =
@@ -11613,8 +11642,6 @@ function buildHiveActionPlan(state) {
     honey +
     " 花粉" +
     freeCD +
-    " 付费值" +
-    payCD +
     " | 喂粉" +
     (plan.canPollen ? "是" : "否") +
     " 收蜜" +
@@ -11627,8 +11654,7 @@ function buildHiveActionPlan(state) {
 function formatHiveState(state) {
   if (!state) return "未知";
   var freeCd = state.freeCD != null ? Number(state.freeCD) || 0 : 0;
-  var payCd = state.payCD != null ? Number(state.payCD) || 0 : 0;
-  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level + " 花粉" + freeCd + " 付费值" + payCd;
+  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level + " 花粉" + freeCd;
 }
 
 function callHiveApi(cookie, path, params) {
@@ -11669,7 +11695,7 @@ function fetchHiveIndex(cookie, ctx) {
 function runHive(cookie) {
   if (!hiveEnabled()) return Promise.resolve();
   log("🐝 蜂巢模块: 启动");
-  log("🐝 蜂巢流程: 状态检测→喂花粉(可用才喂)→收蜂蜜(可收才收)→放蜂(可放才放)→复查（禁用卖蜂蜜）");
+  log("🐝 蜂巢流程: 状态检测→收蜂蜜(可收才收)→喂花粉(可用才喂)→放蜂(可放才放)→复查（禁用卖蜂蜜）");
   HIVE_STATS.start = "";
   HIVE_STATS.end = "";
   var ctx = null;
@@ -11706,7 +11732,9 @@ function runHive(cookie) {
         var msg = hiveErrMsg(json);
         if (isHiveNoop(json, msg)) {
           if (CONFIG.DEBUG) logDebug("🌸 喂花粉: 无需执行(" + msg + ")");
-          return;
+          return refresh("喂粉noop后").then(function (st) {
+            if (st) current = st;
+          });
         }
         HIVE_STATS.errors += 1;
         log("⚠️ 喂花粉失败: " + msg);
@@ -11726,14 +11754,18 @@ function runHive(cookie) {
       if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: " + (plan.harvestReason || "无需执行"));
       return Promise.resolve();
     }
-    if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: 状态预判通过，执行");
+    if (CONFIG.DEBUG) {
+      logDebug("🍯 收蜂蜜: " + (plan.harvestProbe ? "状态1补探测，执行" : "状态预判通过，执行"));
+    }
     var fallbackHoney = Number(current.honey || 0) || 0;
     return callHiveApi(cookie, "/cgi-bin/cgi_farm_hive_harvest", hiveParams(ctx)).then(function (json) {
       if (!isHiveOk(json)) {
         var msg = hiveErrMsg(json);
         if (isHiveNoop(json, msg)) {
           if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: 无需执行(" + msg + ")");
-          return;
+          return refresh("收蜜noop后").then(function (st) {
+            if (st) current = st;
+          });
         }
         HIVE_STATS.errors += 1;
         log("⚠️ 收蜂蜜失败: " + msg);
@@ -11765,7 +11797,9 @@ function runHive(cookie) {
         var msg = hiveErrMsg(json);
         if (/状态不对|无需|不能|已在工作|冷却/.test(msg)) {
           if (CONFIG.DEBUG) logDebug("🐝 放养蜜蜂: 无需执行(" + msg + ")");
-          return;
+          return refresh("放蜂noop后").then(function (st) {
+            if (st) current = st;
+          });
         }
         HIVE_STATS.errors += 1;
         log("⚠️ 放养蜜蜂失败: " + msg);
@@ -11796,11 +11830,11 @@ function runHive(cookie) {
       current = state;
       HIVE_STATS.start = formatHiveState(state);
       log("🐝 蜂巢预判(开始): " + buildHiveActionPlan(current).summary);
-      return doPollen()
+      return doHarvest()
         .then(function () {
           return sleep(CONFIG.WAIT_MS);
         })
-        .then(doHarvest)
+        .then(doPollen)
         .then(function () {
           return sleep(CONFIG.WAIT_MS);
         })
@@ -11941,6 +11975,67 @@ function summarizeTimeFarmLand(list) {
   }
   out.cropText = formatTimeFarmCropMap(out.crops);
   return out;
+}
+
+function parseTimeFarmTasks(json) {
+  var arr = ensureArray(json && json.res && json.res.tasks);
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    var id = Number(it.id != null ? it.id : it.taskid);
+    if (!id || isNaN(id) || id <= 0) continue;
+    var count = Number(it.count != null ? it.count : it.num);
+    if (isNaN(count) || count < 0) count = 0;
+    var status = Number(it.status);
+    if (isNaN(status) || status < 0) status = 0;
+    out.push({ id: id, count: Math.floor(count), status: Math.floor(status) });
+  }
+  out.sort(function (a, b) {
+    return a.id - b.id;
+  });
+  return out;
+}
+
+function timeFarmTaskNeedHint(taskId) {
+  var key = String(Number(taskId || 0) || 0);
+  if (!key || key === "0") return 0;
+  var hints = (CONFIG && CONFIG.TIME_FARM_TASK_TARGET_HINTS) || {};
+  var n = Number(hints[key] != null ? hints[key] : hints[Number(key)] || 0);
+  if (isNaN(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+function timeFarmTaskStatusText(status) {
+  var s = Number(status || 0);
+  if (s === 1) return "进行中";
+  if (s === 2) return "可领";
+  if (s === 3) return "已领";
+  return "状态" + s;
+}
+
+function formatTimeFarmTasks(tasks) {
+  var arr = ensureArray(tasks);
+  if (!arr.length) return "";
+  var parts = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    var id = Number(it.id || 0);
+    if (!id || isNaN(id) || id <= 0) continue;
+    var count = Number(it.count || 0);
+    if (isNaN(count) || count < 0) count = 0;
+    var need = timeFarmTaskNeedHint(id);
+    var status = Number(it.status || 0);
+    var progress = need > 0 ? count + "/" + need : String(count);
+    parts.push("T" + id + " " + progress + " " + timeFarmTaskStatusText(status));
+  }
+  return parts.join("；");
+}
+
+function isTimeFarmTaskClaimable(task) {
+  if (!task) return false;
+  var status = Number(task.status || 0);
+  // 仅按接口“可领态”判断，等价于按钮可点击（亮）才领。
+  return status === 2;
 }
 
 function formatTimeFarmState(sum) {
@@ -12117,6 +12212,15 @@ function pickTimeFarmCrop(seedList) {
 function runTimeFarm(cookie) {
   if (!timeFarmEnabled()) return Promise.resolve();
   log("🕰️ 时光农场模块: 启动");
+  TIME_FARM_STATS.harvest = 0;
+  TIME_FARM_STATS.dig = 0;
+  TIME_FARM_STATS.plant = 0;
+  TIME_FARM_STATS.fertilize = 0;
+  TIME_FARM_STATS.taskClaim = 0;
+  TIME_FARM_STATS.taskReward = "";
+  TIME_FARM_STATS.taskStart = "";
+  TIME_FARM_STATS.taskEnd = "";
+  TIME_FARM_STATS.errors = 0;
   TIME_FARM_STATS.start = "";
   TIME_FARM_STATS.end = "";
   TIME_FARM_STATS.startSum = null;
@@ -12125,6 +12229,9 @@ function runTimeFarm(cookie) {
   var crop = null;
   var maxPass = Number(CONFIG.TIME_FARM_MAX_PASS || 1);
   if (!maxPass || isNaN(maxPass) || maxPass < 1) maxPass = 1;
+  var transientRetries = Math.max(0, Number(CONFIG.RETRY_TRANSIENT || 0));
+  if (isNaN(transientRetries)) transientRetries = 0;
+  var claimedTaskIds = {};
   var didFertilize = false;
   TIME_FARM_STATS.plantSkipReason = CONFIG.TIME_FARM_PLANT_ENABLE ? "" : "自动种植已关闭";
 
@@ -12140,6 +12247,99 @@ function runTimeFarm(cookie) {
       log("⚠️ 时光" + label + "失败: " + msg);
       return { ok: false, noop: false, json: json };
     });
+  }
+
+  function updateTimeFarmTaskSnapshot(tag, state) {
+    var tasks = parseTimeFarmTasks(state && state.raw);
+    var text = formatTimeFarmTasks(tasks);
+    if (!text) return "";
+    if (tag === "开始") {
+      TIME_FARM_STATS.taskStart = text;
+      log("🕰️ 时光任务(模块开始): " + text);
+    } else if (tag === "结束") {
+      TIME_FARM_STATS.taskEnd = text;
+      log("🕰️ 时光任务(模块结束): " + text);
+    } else if (CONFIG.DEBUG) {
+      logDebug("🕰️ 时光任务(" + tag + "): " + text);
+    }
+    return text;
+  }
+
+  function claimTimeFarmTaskRewards(state) {
+    if (!CONFIG.TIME_FARM_TASK_AUTO_CLAIM) return Promise.resolve(false);
+    var tasks = parseTimeFarmTasks(state && state.raw);
+    if (!tasks.length) return Promise.resolve(false);
+    var candidates = [];
+    for (var i = 0; i < tasks.length; i++) {
+      var task = tasks[i] || {};
+      var id = Number(task.id || 0);
+      if (!id || isNaN(id) || id <= 0) continue;
+      if (claimedTaskIds[id]) continue;
+      if (!isTimeFarmTaskClaimable(task)) continue;
+      candidates.push({ id: id, count: Number(task.count || 0), status: Number(task.status || 0) });
+    }
+    if (!candidates.length) return Promise.resolve(false);
+    if (CONFIG.DEBUG) {
+      var parts = [];
+      for (var p = 0; p < candidates.length; p++) {
+        var task0 = candidates[p];
+        var need0 = timeFarmTaskNeedHint(task0.id);
+        var prog0 = need0 > 0 ? task0.count + "/" + need0 : String(task0.count);
+        parts.push("T" + task0.id + " " + prog0 + " " + timeFarmTaskStatusText(task0.status));
+      }
+      logDebug("🕰️ 时光任务待领奖: " + parts.join("；"));
+    }
+    var claimedAny = false;
+
+    function claimOne(task, retry) {
+      return callTimeFarmApi(
+        cookie,
+        "gettaskaward",
+        timeFarmParams(ctx, {
+          taskid: task.id
+        })
+      ).then(function (json) {
+        if (isTimeFarmOk(json)) {
+          claimedTaskIds[task.id] = true;
+          claimedAny = true;
+          TIME_FARM_STATS.taskClaim += 1;
+          var reward = formatFarmEventPkg(json.pkg);
+          if (reward) {
+            TIME_FARM_STATS.taskReward = mergeRewardText(TIME_FARM_STATS.taskReward, reward);
+            log("🕰️ 时光任务领奖(T" + task.id + "): " + reward);
+          } else {
+            log("🕰️ 时光任务领奖(T" + task.id + "): 成功");
+          }
+          return;
+        }
+        var msg = timeFarmErrMsg(json);
+        if (isTransientFailText(msg) && retry < transientRetries) {
+          log("⚠️ 时光任务领奖繁忙(T" + task.id + ")，第" + (retry + 1) + "次重试");
+          return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+            return claimOne(task, retry + 1);
+          });
+        }
+        if (isTimeFarmNoop(json) || /已领|已领取|领取过|未完成|条件不足|无可领|不可领取|不能领取/.test(msg)) {
+          if (/已领|已领取|领取过/.test(msg)) claimedTaskIds[task.id] = true;
+          if (CONFIG.DEBUG) logDebug("🕰️ 时光任务领奖(T" + task.id + "): 无需执行(" + msg + ")");
+          return;
+        }
+        TIME_FARM_STATS.errors += 1;
+        log("⚠️ 时光任务领奖失败(T" + task.id + "): " + msg);
+      });
+    }
+
+    function runAt(idx) {
+      if (idx >= candidates.length) return Promise.resolve(claimedAny);
+      return claimOne(candidates[idx], 0)
+        .then(function () {
+          return sleep(CONFIG.WAIT_MS);
+        })
+        .then(function () {
+          return runAt(idx + 1);
+        });
+    }
+    return runAt(0);
   }
 
   function plantOne(landid, cropid) {
@@ -12275,6 +12475,7 @@ function runTimeFarm(cookie) {
         TIME_FARM_STATS.startSum = cloneTimeFarmSum(state.sum);
         TIME_FARM_STATS.start = formatTimeFarmState(TIME_FARM_STATS.startSum);
         log("🕰️ 时光状态(模块开始): " + TIME_FARM_STATS.start);
+        updateTimeFarmTaskSnapshot("开始", state);
       }
       var curState = state;
       var hasAction = false;
@@ -12357,11 +12558,23 @@ function runTimeFarm(cookie) {
           return maybeFertilize(stateFinalBase.list).then(function (ferted) {
             if (ferted) hasAction = true;
             return fetchTimeFarmIndex(cookie, ctx).then(function (state4) {
-              if (state4) {
-                TIME_FARM_STATS.endSum = cloneTimeFarmSum(state4.sum);
-                TIME_FARM_STATS.end = formatTimeFarmState(TIME_FARM_STATS.endSum);
-              }
-              return { hasAction: hasAction, sum: state4 ? state4.sum : null };
+              var cur = state4 || stateFinalBase;
+              return claimTimeFarmTaskRewards(cur)
+                .then(function (claimed) {
+                  if (!claimed) return cur;
+                  hasAction = true;
+                  return fetchTimeFarmIndex(cookie, ctx).then(function (state5) {
+                    return state5 || cur;
+                  });
+                })
+                .then(function (lastState) {
+                  if (lastState) {
+                    TIME_FARM_STATS.endSum = cloneTimeFarmSum(lastState.sum);
+                    TIME_FARM_STATS.end = formatTimeFarmState(TIME_FARM_STATS.endSum);
+                    TIME_FARM_STATS.taskEnd = formatTimeFarmTasks(parseTimeFarmTasks(lastState.raw));
+                  }
+                  return { hasAction: hasAction, sum: lastState ? lastState.sum : null };
+                });
             });
           });
         })
@@ -12403,6 +12616,7 @@ function runTimeFarm(cookie) {
               if (finalState && finalState.sum) {
                 TIME_FARM_STATS.endSum = cloneTimeFarmSum(finalState.sum);
                 TIME_FARM_STATS.end = formatTimeFarmState(TIME_FARM_STATS.endSum);
+                updateTimeFarmTaskSnapshot("结束", finalState);
               }
             })
             .catch(function () {
@@ -12412,6 +12626,9 @@ function runTimeFarm(cookie) {
               if (!TIME_FARM_STATS.end && TIME_FARM_STATS.start) {
                 TIME_FARM_STATS.end = TIME_FARM_STATS.start;
                 TIME_FARM_STATS.endSum = cloneTimeFarmSum(TIME_FARM_STATS.startSum);
+              }
+              if (!TIME_FARM_STATS.taskEnd && TIME_FARM_STATS.taskStart) {
+                TIME_FARM_STATS.taskEnd = TIME_FARM_STATS.taskStart;
               }
               if (TIME_FARM_STATS.end) log("🕰️ 时光状态(模块结束): " + TIME_FARM_STATS.end);
             });
