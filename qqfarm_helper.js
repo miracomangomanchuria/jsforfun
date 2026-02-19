@@ -107,6 +107,32 @@ var CONFIG = {
   FISH_COMPOSE_HISTORY_TYPE: "2", // 图鉴分页，默认 2（根据抓包可返回可合成列表）
   FISH_COMPOSE_MAX_PER_ID: 0, // 单个 fid 最多合成次数（0=按接口可合成次数）
   FISH_COMPOSE_MAX_TOTAL: 0, // 单次总合成上限（0=不限制）
+  FISH_COMPOSE_PRECHECK: true, // 合成前先结合 piece 状态做门槛预判，减少“碎片不足”空请求
+  FISH_COMPOSE_NEED_HINTS: {
+    // 依据“我的碎片”界面分母门槛，可按实际抓包/界面继续补充
+    "108": 5,
+    "109": 5,
+    "110": 10,
+    "111": 10,
+    "112": 10,
+    "113": 10,
+    "114": 10,
+    "115": 20,
+    "116": 20,
+    "117": 20,
+    "118": 20,
+    "119": 20,
+    "120": 40,
+    "121": 40,
+    "122": 40,
+    "123": 40,
+    "124": 40,
+    "125": 60,
+    "126": 80,
+    "127": 80,
+    "128": 80,
+    "129": 80
+  },
   FISH_PREFER_RARE_SEED: true, // 放养时优先珍稀鱼苗（非基础鱼苗/高 fid）
   FISH_RARE_FID_PRIORITY: "117,116,119,118,115,114,113,112,111,110,109,108",
 
@@ -126,7 +152,7 @@ var CONFIG = {
   FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
   FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help（有余量时）
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
-  FARM_EVENT_RETRY_TRANSIENT: 2, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
+  FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
 
   // 时光农场（独立于普通农场）
   TIME_FARM_BASE: "https://nc.qzone.qq.com",
@@ -202,7 +228,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.19-r5";
+var SCRIPT_REV = "2026.02.19-r8";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1169,6 +1195,7 @@ var FARM_EVENT_STATS = {
   wishReward: "",
   day7Days: 0,
   day7Flag: 0,
+  busy: 0,
   errors: 0
 };
 
@@ -1276,6 +1303,8 @@ var FISH_FEED_NOOP_SEEN = false;
 var STORE_KEY_FISH_PEARL_DAY = "qqfarm_fish_pearl_day";
 var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
 var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
+var STORE_KEY_FISH_COMPOSE_NEED = "qqfarm_fish_compose_need";
+var FISH_COMPOSE_NEED_MAP = null;
 
 function pad2(n) {
   var x = Number(n || 0);
@@ -2639,6 +2668,16 @@ function parseFishIndexJsonState(json) {
   if (empty < 0) empty = 0;
   var pearl = json.pearl != null ? Number(json.pearl) : null;
   if (pearl !== null && isNaN(pearl)) pearl = null;
+  var pieceMap = {};
+  var pieceArr = ensureArray(json.piece);
+  for (var pi = 0; pi < pieceArr.length; pi++) {
+    var pz = pieceArr[pi] || {};
+    var pfid = Number(pz.fid || pz.id || 0);
+    var pnum = Number(pz.num || 0);
+    if (!pfid || isNaN(pfid) || pfid <= 0) continue;
+    if (isNaN(pnum) || pnum < 0) continue;
+    pieceMap[String(pfid)] = Math.floor(pnum);
+  }
   return {
     occupied: occupied,
     cap: cap,
@@ -2649,6 +2688,7 @@ function parseFishIndexJsonState(json) {
     harvestIndices: harvestIndices,
     stageMap: stageMap,
     pearl: pearl,
+    pieceMap: pieceMap,
     raw: json
   };
 }
@@ -2893,6 +2933,89 @@ function fetchFishPearlNameMap(cookie) {
     });
 }
 
+function loadFishComposeNeedMap() {
+  if (FISH_COMPOSE_NEED_MAP && typeof FISH_COMPOSE_NEED_MAP === "object") return FISH_COMPOSE_NEED_MAP;
+  var out = {};
+  var raw = $.read(STORE_KEY_FISH_COMPOSE_NEED) || "";
+  if (raw) {
+    var obj = tryJson(raw);
+    if (obj && typeof obj === "object") out = obj;
+  }
+  var map = {};
+  for (var k in out) {
+    if (!out.hasOwnProperty(k)) continue;
+    if (!/^\d+$/.test(String(k))) continue;
+    var n = Number(out[k] || 0);
+    if (isNaN(n) || n <= 0) continue;
+    if (n > 999) n = 999;
+    map[String(k)] = Math.floor(n);
+  }
+  FISH_COMPOSE_NEED_MAP = map;
+  return FISH_COMPOSE_NEED_MAP;
+}
+
+function saveFishComposeNeedMap() {
+  var map = loadFishComposeNeedMap();
+  try {
+    $.write(JSON.stringify(map || {}), STORE_KEY_FISH_COMPOSE_NEED);
+  } catch (e) {
+    if (CONFIG.DEBUG) logDebug("🧬 合成门槛缓存写入失败: " + e);
+  }
+}
+
+function fishComposeNeedHint(fid) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return 0;
+  var hints = (CONFIG && CONFIG.FISH_COMPOSE_NEED_HINTS) || {};
+  var n = Number(hints[key] || 0);
+  if (isNaN(n) || n <= 0) return 0;
+  return Math.floor(n);
+}
+
+function fishComposeNeedOf(fid) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return 0;
+  var map = loadFishComposeNeedMap();
+  var n = Number(map[key] || 0);
+  if (isNaN(n) || n <= 0) n = fishComposeNeedHint(key);
+  if (isNaN(n) || n <= 0) return 0;
+  return n;
+}
+
+function updateFishComposeNeed(fid, need, mode) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return false;
+  var n = Number(need || 0);
+  if (isNaN(n) || n <= 0) return false;
+  if (n > 999) n = 999;
+  n = Math.floor(n);
+  var map = loadFishComposeNeedMap();
+  var old = Number(map[key] || 0);
+  if (isNaN(old) || old <= 0) old = fishComposeNeedHint(key);
+  if (isNaN(old) || old < 0) old = 0;
+  var next = old;
+  if (mode === "ceil") {
+    if (old <= 0) return false;
+    next = old > n ? n : old;
+  } else {
+    next = old < n ? n : old;
+  }
+  if (next <= 0 || next === old) return false;
+  map[key] = next;
+  saveFishComposeNeedMap();
+  return true;
+}
+
+function fishPieceCountByFid(state, fid) {
+  if (!state || !state.pieceMap) return null;
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return null;
+  if (!Object.prototype.hasOwnProperty.call(state.pieceMap, key)) return null;
+  var n = Number(state.pieceMap[key]);
+  if (isNaN(n) || n < 0) return null;
+  return n;
+}
+
 function fetchFishComposeCandidates(cookie) {
   if (!CONFIG.FISH_AUTO_COMPOSE) return Promise.resolve(null);
   return ensureFishJsonContext(cookie)
@@ -3052,6 +3175,7 @@ function runFishComposeFromPieces(cookie) {
     var totalDone = 0;
     var doneByName = {};
     var nameOrder = [];
+    var precheckEnabled = !!CONFIG.FISH_COMPOSE_PRECHECK;
 
     function doneHit(name, n) {
       var nm = normalizeSpace(name || "鱼苗");
@@ -3066,67 +3190,101 @@ function runFishComposeFromPieces(cookie) {
       recordFishCompose(nm, cnt);
     }
 
-    function composeItem(item, idx) {
-      if (!item) return Promise.resolve();
-      var fid = Number(item.fid || 0);
-      var name = normalizeSpace(item.name || "") || ("鱼苗#" + fid);
-      var quota = Number(item.num || 0);
-      if (!fid || isNaN(fid) || fid <= 0) return Promise.resolve();
-      if (!quota || isNaN(quota) || quota <= 0) return Promise.resolve();
-      if (maxPerId > 0 && quota > maxPerId) quota = maxPerId;
-      if (maxTotal > 0) {
-        var remainTotal = maxTotal - totalDone;
-        if (remainTotal <= 0) return Promise.resolve();
-        if (quota > remainTotal) quota = remainTotal;
-      }
-      if (quota <= 0) return Promise.resolve();
+    return (precheckEnabled ? fetchFishIndexJsonState(cookie, "碎片合成预判") : Promise.resolve(null))
+      .catch(function () {
+        return null;
+      })
+      .then(function (pieceState) {
+        var hasPieceState = !!(pieceState && pieceState.pieceMap);
+        function composeItem(item, idx) {
+          if (!item) return Promise.resolve();
+          var fid = Number(item.fid || 0);
+          var name = normalizeSpace(item.name || "") || ("鱼苗#" + fid);
+          var quota = Number(item.num || 0);
+          if (!fid || isNaN(fid) || fid <= 0) return Promise.resolve();
+          if (!quota || isNaN(quota) || quota <= 0) return Promise.resolve();
+          if (maxPerId > 0 && quota > maxPerId) quota = maxPerId;
+          if (maxTotal > 0) {
+            var remainTotal = maxTotal - totalDone;
+            if (remainTotal <= 0) return Promise.resolve();
+            if (quota > remainTotal) quota = remainTotal;
+          }
+          if (quota <= 0) return Promise.resolve();
 
-      function loop(remain, retry) {
-        if (remain <= 0) return Promise.resolve();
-        return composeOnce(cookie, meta, fid)
-          .then(function (ret) {
-            if (ret && ret.ok) {
-              doneHit(name, 1);
-              return loop(remain - 1, 0);
+          var pieceCount = hasPieceState ? fishPieceCountByFid(pieceState, fid) : null;
+          var knownNeed = precheckEnabled ? fishComposeNeedOf(fid) : 0;
+          if (hasPieceState && knownNeed > 0) {
+            var current = pieceCount !== null ? pieceCount : 0;
+            if (current < knownNeed) {
+              if (CONFIG.DEBUG) {
+                logDebug("🧬 碎片预判跳过(" + name + "): 持有" + current + " < 门槛" + knownNeed);
+              }
+              return Promise.resolve();
             }
-            if (ret && ret.transient && retry < transientRetries) {
-              log("⚠️ 鱼苗合成: " + name + " 系统繁忙，第" + (retry + 1) + "次重试");
-              return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
-                return loop(remain, retry + 1);
+          }
+          if (hasPieceState && pieceCount !== null && pieceCount <= 0) {
+            if (CONFIG.DEBUG) logDebug("🧬 碎片预判跳过(" + name + "): 持有碎片为0");
+            return Promise.resolve();
+          }
+
+          function loop(remain, retry) {
+            if (remain <= 0) return Promise.resolve();
+            return composeOnce(cookie, meta, fid)
+              .then(function (ret) {
+                if (ret && ret.ok) {
+                  doneHit(name, 1);
+                  if (precheckEnabled && pieceCount !== null && pieceCount > 0) {
+                    updateFishComposeNeed(fid, pieceCount, "ceil");
+                  }
+                  return loop(remain - 1, 0);
+                }
+                if (ret && ret.transient && retry < transientRetries) {
+                  log("⚠️ 鱼苗合成: " + name + " 系统繁忙，第" + (retry + 1) + "次重试");
+                  return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                    return loop(remain, retry + 1);
+                  });
+                }
+                var msg = (ret && ret.msg) || "";
+                var lack = /碎片不足|不足|不满足|不可合成|未达到|没有可合成/.test(msg);
+                if (precheckEnabled && lack && pieceCount !== null) {
+                  var changed = updateFishComposeNeed(fid, pieceCount + 1, "floor");
+                  if (changed && CONFIG.DEBUG) {
+                    logDebug("🧬 合成门槛学习(" + name + "): 当前" + pieceCount + "，门槛至少" + (pieceCount + 1));
+                  }
+                }
+                if (ret && ret.msg && !/碎片不足|不足|不满足|不可合成|未达到|没有可合成|该鱼苗已拥有/.test(ret.msg)) {
+                  log("⚠️ 鱼苗合成失败(" + name + "): " + ret.msg);
+                } else if (CONFIG.DEBUG && ret && ret.msg) {
+                  logDebug("🧬 鱼苗合成停止(" + name + "): " + ret.msg);
+                }
+                return;
+              })
+              .catch(function (e) {
+                log("⚠️ 鱼苗合成异常(" + name + "): " + e);
               });
-            }
-            if (ret && ret.msg && !/碎片不足|不足|不满足|不可合成|未达到|没有可合成|该鱼苗已拥有/.test(ret.msg)) {
-              log("⚠️ 鱼苗合成失败(" + name + "): " + ret.msg);
-            } else if (CONFIG.DEBUG && ret && ret.msg) {
-              logDebug("🧬 鱼苗合成停止(" + name + "): " + ret.msg);
-            }
-            return;
-          })
-          .catch(function (e) {
-            log("⚠️ 鱼苗合成异常(" + name + "): " + e);
+          }
+          return loop(quota, 0);
+        }
+
+        function runAt(i) {
+          if (i >= list.length) return Promise.resolve();
+          return composeItem(list[i], i).then(function () {
+            return runAt(i + 1);
           });
-      }
-      return loop(quota, 0);
-    }
+        }
 
-    function runAt(i) {
-      if (i >= list.length) return Promise.resolve();
-      return composeItem(list[i], i).then(function () {
-        return runAt(i + 1);
+        return runAt(0).then(function () {
+          if (totalDone <= 0) return false;
+          BAG_STATS.fish = { total: 0, items: [] };
+          var parts = [];
+          for (var i = 0; i < nameOrder.length; i++) {
+            var nm = nameOrder[i];
+            parts.push(nm + "×" + doneByName[nm]);
+          }
+          log("🧬 鱼苗合成: " + parts.join("；") + " (合计" + totalDone + ")");
+          return true;
+        });
       });
-    }
-
-    return runAt(0).then(function () {
-      if (totalDone <= 0) return false;
-      BAG_STATS.fish = { total: 0, items: [] };
-      var parts = [];
-      for (var i = 0; i < nameOrder.length; i++) {
-        var nm = nameOrder[i];
-        parts.push(nm + "×" + doneByName[nm]);
-      }
-      log("🧬 鱼苗合成: " + parts.join("；") + " (合计" + totalDone + ")");
-      return true;
-    });
   });
 }
 
@@ -5780,6 +5938,7 @@ function farmEventSummaryLine() {
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
   parts.push("许愿领" + FARM_EVENT_STATS.wishStarClaim);
   parts.push("许愿助力" + FARM_EVENT_STATS.wishHelp);
+  if (FARM_EVENT_STATS.busy > 0) parts.push("活动忙" + FARM_EVENT_STATS.busy);
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
   if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   return parts.join(" ");
@@ -5790,6 +5949,7 @@ function farmEventChangeLine() {
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
   if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
   if (FARM_EVENT_STATS.wishHelp > 0) parts.push("许愿助力+" + FARM_EVENT_STATS.wishHelp);
+  if (FARM_EVENT_STATS.busy > 0) parts.push("活动繁忙" + FARM_EVENT_STATS.busy + "次");
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
   if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   if (!parts.length) return "活动无领取";
@@ -8132,6 +8292,11 @@ function runFarmEvents(cookie) {
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                 return claimOne(sid, attempt + 1);
               });
+            }
+            if (transient) {
+              FARM_EVENT_STATS.busy += 1;
+              log("⚠️ 许愿领奖繁忙(id=" + sid + "): 已重试" + transientRetries + "次，留待下轮");
+              return;
             }
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 许愿领奖失败(id=" + sid + "): " + msg);
