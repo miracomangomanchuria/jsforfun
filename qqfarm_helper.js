@@ -7874,7 +7874,7 @@ function isFarmEventNoop(json, msg) {
   if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
   var m = normalizeSpace(msg || farmEventErrMsg(json));
   if (!m) return false;
-  return /(已领|已领取|无需|不能|未开启|已完成|无可领|次数不足|不满足)/.test(m);
+  return /(已领|已领取|已领取过|已经领取|今日已领|今日已领取|今天已经领取过了|无需|不能|未开启|已完成|无可领|次数不足|不满足)/.test(m);
 }
 
 function mergeRewardText(origin, add) {
@@ -8014,6 +8014,8 @@ function runFarmEvents(cookie) {
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 节气领取失败: " + msg);
+          } else if (/已领|已领取|领取过/.test(msg)) {
+            log("🎁 节气领取: 今日已领，跳过");
           } else if (CONFIG.DEBUG) {
             logDebug("🎁 节气领取: 无需执行(" + msg + ")");
           }
@@ -8100,11 +8102,10 @@ function runFarmEvents(cookie) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_STAR) return Promise.resolve(state);
       var ids = ensureArray(state.starlist);
       if (!ids.length) return Promise.resolve(state);
+      var transientRetries = Math.max(0, Number(CONFIG.RETRY_TRANSIENT || 0));
+      if (isNaN(transientRetries)) transientRetries = 0;
       var idx = 0;
-      function next() {
-        if (idx >= ids.length) return Promise.resolve();
-        var sid = Number(ids[idx++] || 0) || 0;
-        if (!sid) return next();
+      function claimOne(sid, attempt) {
         return callFarmEventApi(
           cookie,
           "/cgi-bin/cgi_farm_wish_star",
@@ -8112,27 +8113,39 @@ function runFarmEvents(cookie) {
             id: sid,
             type: 0
           })
-        )
-          .then(function (json) {
-            if (!isFarmEventOk(json)) {
-              var msg = farmEventErrMsg(json);
-              if (!isFarmEventNoop(json, msg)) {
-                FARM_EVENT_STATS.errors += 1;
-                log("⚠️ 许愿领奖失败(id=" + sid + "): " + msg);
-              } else if (CONFIG.DEBUG) {
-                logDebug("🌠 许愿领奖(id=" + sid + "): 无需执行(" + msg + ")");
-              }
+        ).then(function (json) {
+          if (!isFarmEventOk(json)) {
+            var msg = farmEventErrMsg(json);
+            if (isFarmEventNoop(json, msg)) {
+              if (CONFIG.DEBUG) logDebug("🌠 许愿领奖(id=" + sid + "): 无需执行(" + msg + ")");
               return;
             }
-            FARM_EVENT_STATS.wishStarClaim += 1;
-            var reward = formatFarmEventPkg(json.pkg);
-            if (reward) {
-              FARM_EVENT_STATS.wishReward = mergeRewardText(FARM_EVENT_STATS.wishReward, reward);
-              log("🌠 许愿领奖: " + reward);
-            } else {
-              log("🌠 许愿领奖: 成功");
+            var transient = isTransientFailText(msg || "");
+            if (transient && attempt < transientRetries) {
+              log("⚠️ 许愿领奖繁忙(id=" + sid + ")，第" + (attempt + 1) + "次重试");
+              return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                return claimOne(sid, attempt + 1);
+              });
             }
-          })
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 许愿领奖失败(id=" + sid + "): " + msg);
+            return;
+          }
+          FARM_EVENT_STATS.wishStarClaim += 1;
+          var reward = formatFarmEventPkg(json.pkg);
+          if (reward) {
+            FARM_EVENT_STATS.wishReward = mergeRewardText(FARM_EVENT_STATS.wishReward, reward);
+            log("🌠 许愿领奖: " + reward);
+          } else {
+            log("🌠 许愿领奖: 成功");
+          }
+        });
+      }
+      function next() {
+        if (idx >= ids.length) return Promise.resolve();
+        var sid = Number(ids[idx++] || 0) || 0;
+        if (!sid) return next();
+        return claimOne(sid, 0)
           .then(function () {
             return sleep(CONFIG.WAIT_MS);
           })
@@ -11380,20 +11393,27 @@ function buildHiveActionPlan(state) {
   plan.freeCD = freeCD;
   plan.payCD = payCD;
   plan.remainCd = remainCd;
+  var holdHoneyLocked = status === 1 && honey > 0;
 
-  if (CONFIG.HIVE_AUTO_POLLEN && freeCD > 0) {
-    plan.canPollen = true;
-  } else if (!CONFIG.HIVE_AUTO_POLLEN) {
+  if (!CONFIG.HIVE_AUTO_POLLEN) {
     plan.pollenReason = "配置关闭";
+  } else if (holdHoneyLocked) {
+    plan.pollenReason = "状态1且蜂蜜待结算";
+  } else if (status === 2) {
+    plan.pollenReason = "当前可收蜜，先收后喂";
+  } else if (freeCD > 0) {
+    plan.canPollen = true;
   } else {
     plan.pollenReason = "花粉可用值不足(" + freeCD + ")";
   }
 
-  // 已观察到 status=2 通常对应可处理蜂蜜；honey>0 也应收。
-  if (CONFIG.HIVE_AUTO_HARVEST && (honey > 0 || status === 2)) {
+  // 仅在明确可收状态时触发收蜜，避免状态口径不一致导致空调用。
+  if (CONFIG.HIVE_AUTO_HARVEST && status === 2) {
     plan.canHarvest = true;
   } else if (!CONFIG.HIVE_AUTO_HARVEST) {
     plan.harvestReason = "配置关闭";
+  } else if (honey > 0) {
+    plan.harvestReason = "蜂蜜待结算(状态" + status + ")";
   } else {
     plan.harvestReason = "状态显示无可收蜂蜜";
   }
@@ -11403,10 +11423,14 @@ function buildHiveActionPlan(state) {
     plan.workReason = "配置关闭";
   } else if (plan.canHarvest) {
     plan.workReason = "当前可收蜜，先收后放";
+  } else if (holdHoneyLocked) {
+    plan.workReason = "状态1且蜂蜜待结算";
   } else if (status === 0) {
     plan.workReason = "状态0(疑似无可放蜜蜂)";
   } else if (remainCd > 0) {
     plan.workReason = "冷却中(" + remainCd + "s)";
+  } else if (status === 2) {
+    plan.workReason = "当前可收蜜，先收后放";
   } else {
     plan.canWork = true;
   }
@@ -11675,12 +11699,23 @@ function parseTimeFarmLandList(json) {
 
 function timeFarmLandCropId(land) {
   if (!land) return "";
-  var keys = ["cId", "cropid", "cropId", "k", "m", "c", "a"];
+  var keys = ["cId", "cropid", "cropId", "c", "a"];
   for (var i = 0; i < keys.length; i++) {
     var key = keys[i];
     if (land[key] === undefined || land[key] === null || land[key] === "") continue;
     var n = Number(land[key]);
     if (!isNaN(n) && n > 0) return String(Math.floor(n));
+  }
+  // k/m 在部分返回里并非作物ID，仅在本地有名称映射时才作为兜底。
+  var fallbackKeys = ["k", "m"];
+  for (var j = 0; j < fallbackKeys.length; j++) {
+    var fk = fallbackKeys[j];
+    if (land[fk] === undefined || land[fk] === null || land[fk] === "") continue;
+    var fn = Number(land[fk]);
+    if (isNaN(fn) || fn <= 0) continue;
+    var key2 = String(Math.floor(fn));
+    var mapped = normalizeSpace(CROP_NAME_MAP[key2] || TIME_FARM_SPECIAL_SEED_MAP[key2] || "");
+    if (mapped && !/^cId\d+$/i.test(mapped)) return key2;
   }
   return "";
 }
@@ -11690,7 +11725,7 @@ function getTimeFarmCropName(cid) {
   var key = String(cid);
   var name = CROP_NAME_MAP[key] || TIME_FARM_SPECIAL_SEED_MAP[key] || "";
   name = normalizeSpace(name);
-  if (!name || /^cId\d+$/i.test(name)) return "作物#" + key;
+  if (!name || /^cId\d+$/i.test(name)) return "";
   return name;
 }
 
@@ -11729,7 +11764,7 @@ function summarizeTimeFarmLand(list) {
       var cid = timeFarmLandCropId(land);
       if (cid) {
         var name = getTimeFarmCropName(cid);
-        out.crops[name] = (out.crops[name] || 0) + 1;
+        if (name) out.crops[name] = (out.crops[name] || 0) + 1;
       }
     }
   }
