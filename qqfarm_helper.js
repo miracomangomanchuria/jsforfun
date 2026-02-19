@@ -4849,6 +4849,49 @@ function getBagItemCount(name) {
   return 0;
 }
 
+function seedCidFromBagItem(it) {
+  if (!it) return "";
+  var raw =
+    it.cid !== undefined && it.cid !== null && it.cid !== ""
+      ? it.cid
+      : it.cId !== undefined && it.cId !== null && it.cId !== ""
+        ? it.cId
+        : it.id !== undefined && it.id !== null && it.id !== ""
+          ? it.id
+          : "";
+  if (raw !== "") {
+    var n = Number(raw);
+    if (!isNaN(n) && n > 0) return String(Math.floor(n));
+  }
+  var name = normalizeSpace(it.name || "");
+  if (name) {
+    var m = name.match(/cId\s*([0-9]+)/i);
+    if (m) return String(m[1]);
+  }
+  return "";
+}
+
+function pickPlantSeedCidFromBag(excludeCid) {
+  var items = (BAG_STATS.seed && BAG_STATS.seed.items) || [];
+  var ex = excludeCid ? String(excludeCid) : "";
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i] || {};
+    var cnt = Number(it.count || it.amount || 0);
+    if (!cnt || cnt <= 0) continue;
+    var cid = seedCidFromBagItem(it);
+    if (!cid) continue;
+    if (ex && cid === ex) continue;
+    return cid;
+  }
+  return "";
+}
+
+function isSeedLackMsg(msg) {
+  var text = normalizeSpace(msg || "");
+  if (!text) return false;
+  return /(没有足够的种子|种子不足|没有种子|请先购买种子|可种植种子不足|种子数量不足)/.test(text);
+}
+
 function markGrassLow(grassCount, stage) {
   var threshold = CONFIG.GRASS_THRESHOLD;
   if (grassCount === null || grassCount === undefined) return false;
@@ -6344,14 +6387,15 @@ function parseSeedJsonItems(arr) {
     var it = arr[i] || {};
     var amount = Number(it.amount || it.num || it.count || 0);
     if (!amount) continue;
+    var cid = it.cId != null ? String(it.cId) : "";
     var isLock = Number(it.isLock || it.locked || it.isLocked || it.is_lock || 0) === 1;
     if (isLock) {
       locked += amount;
       continue;
     }
-    var name = it.cName || (it.cId != null ? "cId" + it.cId : "种子");
-    if (it.cId != null) recordCropName(String(it.cId), name);
-    items.push({ name: name, count: amount });
+    var name = it.cName || (cid ? "cId" + cid : "种子");
+    if (cid) recordCropName(cid, name);
+    items.push({ name: name, count: amount, cid: cid });
     total += amount;
   }
   return { items: sortBagItems(items), total: total, locked: locked };
@@ -6667,12 +6711,18 @@ function execFarmJsonActions(base, cookie, actions) {
   var uin = getFarmUin(cookie);
   if (!uin) log("⚠️ 未获取 uIdx，JSON 动作可能失败");
   var skipAfter = {};
+  var plantBlocked = false;
 
   function runList(list) {
     var idx = 0;
     function next() {
       if (idx >= list.length) return Promise.resolve();
       var a = list[idx++];
+      if (a.type === "plant" && plantBlocked) {
+        if (CONFIG.DEBUG) logDebug("JSON 动作跳过(plant) 全局种子不足，place=" + a.place);
+        recordActionNoop("plant", 1);
+        return next();
+      }
       if ((a.type === "scarify" || a.type === "plant") && skipAfter[a.place]) {
         logDebug("JSON 动作跳过(" + a.type + ") place=" + a.place);
         return next();
@@ -6691,7 +6741,24 @@ function execFarmJsonActions(base, cookie, actions) {
         farmTime: farmTime,
         farmKey: farmKey
       };
-      if (a.type === "plant") params.cId = CONFIG.PLANT_CID;
+      if (a.type === "plant") {
+        var useCid = String(CONFIG.PLANT_CID || "");
+        if (!useCid || Number(useCid) <= 0) {
+          var pickedCid = pickPlantSeedCidFromBag("");
+          if (pickedCid) {
+            CONFIG.PLANT_CID = pickedCid;
+            useCid = pickedCid;
+            if (CONFIG.DEBUG) logDebug("🌱 JSON播种自动选种: cId=" + useCid);
+          } else {
+            plantBlocked = true;
+            recordPlantFail("seedLack", 1);
+            log("🌱 播种: 未找到可用种子(cId)，本轮停止空地播种");
+            recordActionNoop("plant", 1);
+            return next();
+          }
+        }
+        params.cId = useCid;
+      }
         if (a.type === "scarify" && a.cropStatus !== undefined) params.cropStatus = a.cropStatus;
         recordActionTry(a.type, 1);
         if (a.type === "scarify" && a.withered) recordWitheredTry(1);
@@ -6711,6 +6778,10 @@ function execFarmJsonActions(base, cookie, actions) {
               }
             } else if (isNoActionMsg(ret.msg, a.type)) {
               recordActionNoop(a.type, 1);
+            } else if (a.type === "plant" && isSeedLackMsg(ret.msg)) {
+              recordPlantFail("seedLack", 1);
+              plantBlocked = true;
+              log("🌱 播种: " + (ret.msg || "种子不足") + "，已停止本轮重复尝试");
             } else if (a.type === "harvest") {
               skipAfter[a.place] = true;
               logDebug("JSON 动作: 收获失败，跳过翻地/播种 place=" + a.place);
@@ -6722,6 +6793,8 @@ function execFarmJsonActions(base, cookie, actions) {
             } else if (a.type === "scarify") {
               skipAfter[a.place] = true;
               logDebug("JSON 动作: 翻地失败，跳过播种 place=" + a.place);
+            } else if (a.type === "plant" && /符合种植条件|土地/.test(normalizeSpace(ret.msg || ""))) {
+              recordPlantFail("landLimit", 1);
             }
             return postHook;
         })
@@ -6784,6 +6857,11 @@ function runFarmJson(cookie) {
               formatJsonCoreTodo(core)
           );
           if (CONFIG.DEBUG) logDebug("🧩 JSON核心地块(后验): " + formatJsonCoreTodoPlaceSample(farm2, 10));
+          var onlyEmptyLeft = core.harvestable <= 0 && core.withered <= 0 && core.empty > 0;
+          if (onlyEmptyLeft && PLANT_FAIL.seedLack > 0) {
+            log("🌱 新接口后验: 空地仍有" + core.empty + "块，但检测到种子不足，停止本轮续跑");
+            return farm2;
+          }
           if (round + 1 < maxPass && hasJsonCoreTodo(core)) {
             log("🧪 新接口后验: 仍有可处理地块(" + formatJsonCoreTodo(core) + ")，继续下一轮");
             return runPass(farm2, round + 1);
@@ -6951,7 +7029,17 @@ function execModernActions(base, cookie, gtk, uin, actions, deadPlaces) {
         uinY: uin,
         place: a.place
       };
-      if (a.type === "plant") params.cId = CONFIG.PLANT_CID;
+      if (a.type === "plant") {
+        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidFromBag("") || "");
+        if (!plantCid || Number(plantCid) <= 0) {
+          recordPlantFail("seedLack", 1);
+          recordActionNoop("plant", 1);
+          if (CONFIG.DEBUG) logDebug("现代动作跳过(plant): 未找到可用种子 cId");
+          return next();
+        }
+        CONFIG.PLANT_CID = plantCid;
+        params.cId = plantCid;
+      }
       recordActionTry(a.type, 1);
       if (a.type === "scarify" && a.withered) recordWitheredTry(1);
       return callModernAction(base, cookie, gtk, actMap[a.type], params)
@@ -7120,7 +7208,15 @@ function execLegacyActions(base, cookie, uin, actions, deadPlaces) {
       if (a.type === "scarify") path = "/api.php?mod=farmlandstatus&act=scarify";
       if (a.type === "plant") {
         path = "/api.php?mod=farmlandstatus&act=planting";
-        params.cId = CONFIG.PLANT_CID;
+        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidFromBag("") || "");
+        if (!plantCid || Number(plantCid) <= 0) {
+          recordPlantFail("seedLack", 1);
+          recordActionNoop("plant", 1);
+          if (CONFIG.DEBUG) logDebug("旧版动作跳过(plant): 未找到可用种子 cId");
+          return next();
+        }
+        CONFIG.PLANT_CID = plantCid;
+        params.cId = plantCid;
       }
       return callLegacyAction(base, cookie, path, params)
         .then(function (res) {
@@ -8943,35 +9039,42 @@ function decidePlantSeed(cookie, grassCount) {
     return Promise.resolve(CONFIG.FARM_GRASS_SEED_ID);
   }
   if (PLANT_SEED_LOCKED) {
-    return Promise.resolve(CONFIG.PLANT_CID);
+    return Promise.resolve(CONFIG.PLANT_CID || null);
   }
   if (markGrassLow(grassCount, "")) return Promise.resolve(CONFIG.FARM_GRASS_SEED_ID);
   var seedTotal = BAG_STATS.seed ? BAG_STATS.seed.total : 0;
   if (seedTotal >= CONFIG.FARM_SEED_MIN_TOTAL) {
-    log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，一键播种按背包顺序");
+    var picked = pickPlantSeedCidFromBag("");
+    var pickedName = picked ? getCropNameByCid(picked) : "";
+    if (picked) {
+      if (pickedName && !/^cId\d+$/i.test(pickedName)) {
+        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，优先使用 " + pickedName + "(cId=" + picked + ")");
+      } else {
+        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，优先使用 cId=" + picked);
+      }
+    } else {
+      log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，但未解析到可用 cId，保留当前播种配置");
+    }
     PLANT_SEED_LOCKED = true;
-    return Promise.resolve("");
+    return Promise.resolve(picked || null);
   }
   log("🌱 种植策略: 背包种子偏少(" + seedTotal + "<" + CONFIG.FARM_SEED_MIN_TOTAL + ")，购买商店首个种子 x" + CONFIG.FARM_SEED_BUY_NUM);
   return buyFirstSeed(cookie, CONFIG.FARM_SEED_BUY_NUM)
     .then(function (cid) {
-      if (cid) return true;
+      if (cid) return cid;
       if (NO_MONEY.farmSeed && CONFIG.ENABLE.farm_sell_all) {
         log("🧺 买种子: 金币不足，尝试先售卖补金币");
         return farmSellAll(cookie)
           .then(function () {
             NO_MONEY.farmSeed = false;
             return buyFirstSeed(cookie, CONFIG.FARM_SEED_BUY_NUM);
-          })
-          .then(function (cid2) {
-            return !!cid2;
           });
       }
-      return false;
-    })
-    .then(function () {
-      PLANT_SEED_LOCKED = true;
       return "";
+    })
+    .then(function (cidFinal) {
+      PLANT_SEED_LOCKED = true;
+      return cidFinal || null;
     });
 }
 
