@@ -126,6 +126,7 @@ var CONFIG = {
   FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
   FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help（有余量时）
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
+  FARM_EVENT_RETRY_TRANSIENT: 2, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
 
   // 时光农场（独立于普通农场）
   TIME_FARM_BASE: "https://nc.qzone.qq.com",
@@ -200,6 +201,8 @@ var CONFIG = {
   // 是否输出背包/仓库统计
   LOG_BAG_STATS: false
 };
+
+var SCRIPT_REV = "2026.02.19-r5";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1312,6 +1315,7 @@ function formatRunClockLine(d) {
 function bannerStart() {
   log(LINE);
   log("🌾 QQ 农牧场助手");
+  log("🧩 脚本修订 " + SCRIPT_REV);
   var meta = "🧭 环境 " + ENV_NAME;
   if (CONFIG.DEBUG) meta += " | DEBUG";
   log("🕒 开始时间 | " + formatRunClockLine(new Date()));
@@ -3598,6 +3602,7 @@ function recordCropName(cid, name) {
   var key = String(cid);
   var nm = normalizeSpace(name);
   if (!nm) return;
+  if (/^作物#?\d+$/i.test(nm)) return;
   if (!CROP_NAME_MAP[key] || /^cId\d+/.test(CROP_NAME_MAP[key])) CROP_NAME_MAP[key] = nm;
 }
 
@@ -7874,7 +7879,7 @@ function isFarmEventNoop(json, msg) {
   if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
   var m = normalizeSpace(msg || farmEventErrMsg(json));
   if (!m) return false;
-  return /(已领|已领取|已领取过|已经领取|今日已领|今日已领取|今天已经领取过了|无需|不能|未开启|已完成|无可领|次数不足|不满足)/.test(m);
+  return /(已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取|无需|不能|未开启|已完成|无可领|次数不足|不满足)/.test(m);
 }
 
 function mergeRewardText(origin, add) {
@@ -8014,7 +8019,7 @@ function runFarmEvents(cookie) {
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 节气领取失败: " + msg);
-          } else if (/已领|已领取|领取过/.test(msg)) {
+          } else if (/已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取/.test(msg || "")) {
             log("🎁 节气领取: 今日已领，跳过");
           } else if (CONFIG.DEBUG) {
             logDebug("🎁 节气领取: 无需执行(" + msg + ")");
@@ -8102,8 +8107,9 @@ function runFarmEvents(cookie) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_STAR) return Promise.resolve(state);
       var ids = ensureArray(state.starlist);
       if (!ids.length) return Promise.resolve(state);
-      var transientRetries = Math.max(0, Number(CONFIG.RETRY_TRANSIENT || 0));
-      if (isNaN(transientRetries)) transientRetries = 0;
+      var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
+      if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+      if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
       var idx = 0;
       function claimOne(sid, attempt) {
         return callFarmEventApi(
@@ -11725,7 +11731,7 @@ function getTimeFarmCropName(cid) {
   var key = String(cid);
   var name = CROP_NAME_MAP[key] || TIME_FARM_SPECIAL_SEED_MAP[key] || "";
   name = normalizeSpace(name);
-  if (!name || /^cId\d+$/i.test(name)) return "";
+  if (!name || /^cId\d+$/i.test(name) || /^作物#?\d+$/i.test(name)) return "";
   return name;
 }
 
