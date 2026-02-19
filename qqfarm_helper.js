@@ -236,7 +236,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.19-r16";
+var SCRIPT_REV = "2026.02.19-r17";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1316,7 +1316,9 @@ var STORE_KEY_FISH_PEARL_DAY = "qqfarm_fish_pearl_day";
 var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
 var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
 var STORE_KEY_FISH_COMPOSE_NEED = "qqfarm_fish_compose_need";
+var STORE_KEY_FISH_COMPOSE_FREEZE = "qqfarm_fish_compose_freeze";
 var FISH_COMPOSE_NEED_MAP = null;
+var FISH_COMPOSE_FREEZE_MAP = null;
 
 function pad2(n) {
   var x = Number(n || 0);
@@ -2975,6 +2977,70 @@ function saveFishComposeNeedMap() {
   }
 }
 
+function loadFishComposeFreezeMap() {
+  if (FISH_COMPOSE_FREEZE_MAP && typeof FISH_COMPOSE_FREEZE_MAP === "object") return FISH_COMPOSE_FREEZE_MAP;
+  var out = {};
+  var raw = $.read(STORE_KEY_FISH_COMPOSE_FREEZE) || "";
+  if (raw) {
+    var obj = tryJson(raw);
+    if (obj && typeof obj === "object") out = obj;
+  }
+  var map = {};
+  for (var k in out) {
+    if (!out.hasOwnProperty(k)) continue;
+    if (!/^\d+$/.test(String(k))) continue;
+    var n = Number(out[k]);
+    if (isNaN(n) || n < 0) continue;
+    if (n > 99999) n = 99999;
+    map[String(k)] = Math.floor(n);
+  }
+  FISH_COMPOSE_FREEZE_MAP = map;
+  return FISH_COMPOSE_FREEZE_MAP;
+}
+
+function saveFishComposeFreezeMap() {
+  var map = loadFishComposeFreezeMap();
+  try {
+    $.write(JSON.stringify(map || {}), STORE_KEY_FISH_COMPOSE_FREEZE);
+  } catch (e) {
+    if (CONFIG.DEBUG) logDebug("🧬 合成冻结缓存写入失败: " + e);
+  }
+}
+
+function fishComposeFreezeCountOf(fid) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return null;
+  var map = loadFishComposeFreezeMap();
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return null;
+  var n = Number(map[key]);
+  if (isNaN(n) || n < 0) return null;
+  return Math.floor(n);
+}
+
+function setFishComposeFreeze(fid, pieceCount) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return false;
+  var n = Number(pieceCount);
+  if (isNaN(n) || n < 0) return false;
+  n = Math.floor(n);
+  var map = loadFishComposeFreezeMap();
+  var old = fishComposeFreezeCountOf(key);
+  if (old !== null && old === n) return false;
+  map[key] = n;
+  saveFishComposeFreezeMap();
+  return true;
+}
+
+function clearFishComposeFreeze(fid) {
+  var key = String(Number(fid || 0) || 0);
+  if (!key || key === "0") return false;
+  var map = loadFishComposeFreezeMap();
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return false;
+  delete map[key];
+  saveFishComposeFreezeMap();
+  return true;
+}
+
 function fishComposeNeedHint(fid) {
   if (!CONFIG.FISH_COMPOSE_HINTS_ENABLE) return 0;
   var key = String(Number(fid || 0) || 0);
@@ -3226,6 +3292,15 @@ function runFishComposeFromPieces(cookie) {
 
           var pieceCount = hasPieceState ? fishPieceCountByFid(pieceState, fid) : null;
           var knownNeed = precheckEnabled ? fishComposeNeedOf(fid) : 0;
+          var frozenAt = hasPieceState ? fishComposeFreezeCountOf(fid) : null;
+          if (hasPieceState && pieceCount !== null && frozenAt !== null) {
+            if (pieceCount === frozenAt) {
+              if (CONFIG.DEBUG) logDebug("🧬 碎片冻结跳过(" + name + "): 持有" + pieceCount + "未变化");
+              return Promise.resolve();
+            }
+            clearFishComposeFreeze(fid);
+            if (CONFIG.DEBUG) logDebug("🧬 碎片冻结解除(" + name + "): " + frozenAt + "→" + pieceCount);
+          }
           if (hasPieceState && knownNeed > 0) {
             var current = pieceCount !== null ? pieceCount : 0;
             if (current < knownNeed) {
@@ -3246,6 +3321,7 @@ function runFishComposeFromPieces(cookie) {
               .then(function (ret) {
                 if (ret && ret.ok) {
                   doneHit(name, 1);
+                  clearFishComposeFreeze(fid);
                   if (precheckEnabled && pieceCount !== null && pieceCount > 0) {
                     updateFishComposeNeed(fid, pieceCount, "ceil");
                   }
@@ -3260,6 +3336,7 @@ function runFishComposeFromPieces(cookie) {
                 var msg = (ret && ret.msg) || "";
                 var lack = /碎片不足|不足|不满足|不可合成|未达到|没有可合成/.test(msg);
                 if (precheckEnabled && lack && pieceCount !== null) {
+                  setFishComposeFreeze(fid, pieceCount);
                   var changed = updateFishComposeNeed(fid, pieceCount + 1, "floor");
                   if (changed && CONFIG.DEBUG) {
                     logDebug("🧬 合成门槛学习(" + name + "): 当前" + pieceCount + "，门槛至少" + (pieceCount + 1));
@@ -6533,8 +6610,8 @@ function buildQQOpenUrl(url) {
   return "mqqapi://forward/url?version=1&src_type=web&url_prefix=" + base64Encode(url);
 }
 
-var LINE = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━";
-var SUBLINE = "────────────────────────────────────";
+var LINE = "";
+var SUBLINE = "";
 
 function ranchEnabled() {
   return (
@@ -11556,7 +11633,7 @@ function hiveNum(v, dft) {
   return n;
 }
 
-function buildHiveActionPlan(state) {
+function buildHiveActionPlan(state, opts) {
   var plan = {
     canPollen: false,
     canHarvest: false,
@@ -11596,11 +11673,14 @@ function buildHiveActionPlan(state) {
   plan.freeCD = freeCD;
   plan.payCD = payCD;
   plan.remainCd = remainCd;
+  var skipHarvest = !!(opts && opts.skipHarvest);
   // 收蜜优先按蜂蜜值判断，状态仅用于控制是否允许“状态1补探测”。
   if (!CONFIG.HIVE_AUTO_HARVEST) {
     plan.harvestReason = "配置关闭";
   } else if (honey <= 0) {
     plan.harvestReason = "状态显示无可收蜂蜜";
+  } else if (skipHarvest) {
+    plan.harvestReason = "本轮已判定不可收";
   } else if (status === 1) {
     if (CONFIG.HIVE_TRY_HARVEST_ON_STATUS1) {
       plan.canHarvest = true;
@@ -11701,6 +11781,7 @@ function runHive(cookie) {
   var ctx = null;
   var current = null;
   var harvested = 0;
+  var harvestBlockedThisRound = false;
 
   function refresh(tag) {
     return fetchHiveIndex(cookie, ctx).then(function (state) {
@@ -11715,7 +11796,7 @@ function runHive(cookie) {
   }
 
   function doPollen() {
-    var plan = buildHiveActionPlan(current);
+    var plan = buildHiveActionPlan(current, { skipHarvest: harvestBlockedThisRound });
     if (!plan.canPollen) {
       if (CONFIG.DEBUG) logDebug("🌸 喂花粉: " + (plan.pollenReason || "无需执行"));
       return Promise.resolve();
@@ -11749,7 +11830,7 @@ function runHive(cookie) {
   }
 
   function doHarvest() {
-    var plan = buildHiveActionPlan(current);
+    var plan = buildHiveActionPlan(current, { skipHarvest: harvestBlockedThisRound });
     if (!plan.canHarvest) {
       if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: " + (plan.harvestReason || "无需执行"));
       return Promise.resolve();
@@ -11762,6 +11843,7 @@ function runHive(cookie) {
       if (!isHiveOk(json)) {
         var msg = hiveErrMsg(json);
         if (isHiveNoop(json, msg)) {
+          if (/状态不对|无可收|未达到|不能|无需/.test(msg || "")) harvestBlockedThisRound = true;
           if (CONFIG.DEBUG) logDebug("🍯 收蜂蜜: 无需执行(" + msg + ")");
           return refresh("收蜜noop后").then(function (st) {
             if (st) current = st;
@@ -11772,6 +11854,7 @@ function runHive(cookie) {
         return;
       }
       var gain = parseHiveHarvestGain(json, fallbackHoney);
+      harvestBlockedThisRound = false;
       if (gain > 0) {
         HIVE_STATS.harvest += gain;
         harvested += gain;
@@ -11786,7 +11869,7 @@ function runHive(cookie) {
   }
 
   function doWork() {
-    var plan = buildHiveActionPlan(current);
+    var plan = buildHiveActionPlan(current, { skipHarvest: harvestBlockedThisRound });
     if (!plan.canWork) {
       if (CONFIG.DEBUG) logDebug("🐝 放养蜜蜂: " + (plan.workReason || "无需执行"));
       return Promise.resolve();
