@@ -181,6 +181,40 @@ var CONFIG = {
   // 播种作物（兼容旧版/现代接口时使用）
   PLANT_CID: "40",
   GRASS_THRESHOLD: 10000, // 牧草果实库存低于此值，优先种牧草
+  // 农场售卖保护：优先保护时光/节气等特殊果实，避免一键售卖误卖
+  FARM_SELL_PROTECT_ENABLE: true,
+  FARM_SELL_PROTECT_LOCK_ENABLE: true, // 先在 WAP 仓库执行加锁，再走售卖
+  FARM_SELL_PROTECT_STRICT: true, // 保护模式下若 JSON 售卖失败，不回退 WAP 一键售卖，避免误卖
+  FARM_SELL_PROTECT_NAMES: ["占城稻"], // 精确名称保护（可按需追加）
+  FARM_SELL_PROTECT_PREFIXES: [
+    "立春",
+    "雨水",
+    "惊蛰",
+    "春分",
+    "清明",
+    "谷雨",
+    "立夏",
+    "小满",
+    "芒种",
+    "夏至",
+    "小暑",
+    "大暑",
+    "立秋",
+    "处暑",
+    "白露",
+    "秋分",
+    "寒露",
+    "霜降",
+    "立冬",
+    "小雪",
+    "大雪",
+    "冬至",
+    "小寒",
+    "大寒",
+    "除夕",
+    "元宵"
+  ], // 前缀命中保护（如“雨水-银柳”）
+  FARM_SELL_PROTECT_TIME_KEYWORDS: "时光|占城|吴中|关陇|滇西|南蛮|龟兹|南阳",
 
   // 农场买种子（牧草）
   FARM_SEED_HOST: "https://farm.qzone.qq.com",
@@ -239,7 +273,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.20-r24";
+var SCRIPT_REV = "2026.02.20-r26";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -3895,6 +3929,124 @@ function getCropNameByCid(cid) {
   return CROP_NAME_MAP[key] || ("cId" + key);
 }
 
+function normalizeCropName(name) {
+  var nm = normalizeSpace(name || "");
+  if (!nm) return "";
+  nm = nm.replace(/^【\s*锁\s*】\s*/g, "");
+  return normalizeSpace(nm);
+}
+
+function buildCropNameSet(raw) {
+  var set = {};
+  var arr = ensureArray(raw);
+  for (var i = 0; i < arr.length; i++) {
+    var nm = normalizeCropName(arr[i]);
+    if (nm) set[nm] = true;
+  }
+  return set;
+}
+
+function buildCropPrefixList(raw) {
+  var arr = ensureArray(raw);
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < arr.length; i++) {
+    var p = normalizeCropName(arr[i]);
+    if (!p || seen[p]) continue;
+    seen[p] = true;
+    out.push(p);
+  }
+  return out;
+}
+
+function cropNameHitPrefix(name, prefixes) {
+  var nm = normalizeCropName(name);
+  if (!nm) return "";
+  var arr = ensureArray(prefixes);
+  for (var i = 0; i < arr.length; i++) {
+    var p = normalizeCropName(arr[i]);
+    if (!p) continue;
+    if (nm === p) return p;
+    if (nm.indexOf(p + "-") === 0) return p;
+    if (nm.indexOf(p + "－") === 0) return p;
+    if (nm.indexOf(p + "—") === 0) return p;
+    if (nm.indexOf(p) === 0) return p;
+  }
+  return "";
+}
+
+function isTimeFarmKeywordCrop(name) {
+  var nm = normalizeCropName(name);
+  if (!nm) return false;
+  var kw = String(CONFIG.FARM_SELL_PROTECT_TIME_KEYWORDS || "");
+  if (!kw) return false;
+  var re = null;
+  try {
+    re = new RegExp(kw);
+  } catch (_) {
+    return false;
+  }
+  return re.test(nm);
+}
+
+function isFarmProtectedCropForSell(name, cid) {
+  if (!CONFIG.FARM_SELL_PROTECT_ENABLE) return "";
+  var key = cid != null && cid !== "" ? String(cid) : "";
+  var names = [];
+  var seen = {};
+  function addName(v) {
+    var nm = normalizeCropName(v);
+    if (!nm || seen[nm]) return;
+    seen[nm] = true;
+    names.push(nm);
+  }
+  addName(name);
+  if (key) {
+    addName(CROP_NAME_MAP[key] || "");
+    addName(TIME_FARM_SPECIAL_SEED_MAP[key] || "");
+    addName(getCropNameByCid(key));
+  }
+
+  var exactSet = buildCropNameSet(CONFIG.FARM_SELL_PROTECT_NAMES);
+  for (var i = 0; i < names.length; i++) {
+    if (exactSet[names[i]]) return "名单";
+  }
+
+  var prefixes = buildCropPrefixList(CONFIG.FARM_SELL_PROTECT_PREFIXES);
+  for (var j = 0; j < names.length; j++) {
+    var hit = cropNameHitPrefix(names[j], prefixes);
+    if (hit) return "节气前缀(" + hit + ")";
+  }
+
+  if (key && TIME_FARM_SPECIAL_SEED_MAP[key]) return "时光映射";
+  for (var k = 0; k < names.length; k++) {
+    if (isTimeFarmKeywordCrop(names[k])) return "时光关键字";
+  }
+  return "";
+}
+
+function formatProtectedCropList(items, limit) {
+  var arr = ensureArray(items);
+  if (!arr.length) return "";
+  var max = Number(limit || 4);
+  if (isNaN(max) || max <= 0) max = 4;
+  var out = [];
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    var nm = normalizeCropName(it.name || (it.cid ? getCropNameByCid(it.cid) : ""));
+    var cid = it.cid != null && it.cid !== "" ? String(it.cid) : "";
+    var reason = normalizeSpace(it.reason || "");
+    if (!nm) nm = cid ? "cId" + cid : "作物";
+    var part = nm;
+    if (cid) part += "(cId=" + cid + ")";
+    if (reason) part += ":" + reason;
+    out.push(part);
+    if (out.length >= max) break;
+  }
+  if (arr.length > out.length) out.push("+" + (arr.length - out.length));
+  return out.join("；");
+}
+
 function setFarmPlaceNameFromStatus(list) {
   if (!list || !list.length) return;
   for (var i = 0; i < list.length; i++) {
@@ -5159,6 +5311,48 @@ function seedCidFromBagItem(it) {
   return "";
 }
 
+function normalizeSeedPickName(name) {
+  var nm = normalizeCropName(name || "");
+  if (!nm) return "";
+  nm = nm.replace(/种子$/i, "");
+  return normalizeCropName(nm);
+}
+
+function isSeasonalSeedName(name) {
+  var nm = normalizeSeedPickName(name);
+  if (!nm) return false;
+  if (nm.indexOf("节气") >= 0) return true;
+  return !!cropNameHitPrefix(nm, CONFIG.FARM_SELL_PROTECT_PREFIXES);
+}
+
+function isSeasonalSeedCid(cid) {
+  if (!cid) return false;
+  var key = String(cid);
+  var names = [];
+  if (CROP_NAME_MAP[key]) names.push(CROP_NAME_MAP[key]);
+  names.push(getCropNameByCid(key));
+  for (var i = 0; i < names.length; i++) {
+    if (isSeasonalSeedName(names[i])) return true;
+  }
+  return false;
+}
+
+function pickSeasonalSeedCidFromBag(excludeCid) {
+  var items = (BAG_STATS.seed && BAG_STATS.seed.items) || [];
+  var ex = excludeCid ? String(excludeCid) : "";
+  for (var i = 0; i < items.length; i++) {
+    var it = items[i] || {};
+    var cnt = Number(it.count || it.amount || 0);
+    if (!cnt || cnt <= 0) continue;
+    var cid = seedCidFromBagItem(it);
+    if (!cid) continue;
+    if (ex && cid === ex) continue;
+    var name = it.name || it.cName || "";
+    if (isSeasonalSeedName(name) || isSeasonalSeedCid(cid)) return cid;
+  }
+  return "";
+}
+
 function pickPlantSeedCidFromBag(excludeCid) {
   var items = (BAG_STATS.seed && BAG_STATS.seed.items) || [];
   var ex = excludeCid ? String(excludeCid) : "";
@@ -5185,6 +5379,8 @@ function pickPlantSeedCidByPolicy(grassCountHint) {
   var preferNonGrass =
     isGrassEnoughForDiversify(grassCountHint) || isGrassEnoughForDiversify(LAST_GRASS_COUNT);
   if (preferNonGrass) {
+    var seasonal = pickSeasonalSeedCidFromBag(grassCid);
+    if (seasonal) return seasonal;
     var nonGrass = pickPlantSeedCidFromBag(grassCid);
     if (nonGrass) return nonGrass;
   }
@@ -6783,11 +6979,25 @@ function parseCropJsonItems(arr) {
   var items = [];
   for (var i = 0; i < arr.length; i++) {
     var it = arr[i] || {};
-    var amount = Number(it.amount || it.num || it.count || 0);
-    var cid = it.cId != null ? String(it.cId) : "";
-    var name = it.cName || (cid ? "cId" + cid : "作物");
+    var amount = 0;
+    var cid = "";
+    var name = "";
+    var isLock = false;
+    if (Object.prototype.toString.call(it) === "[object Array]") {
+      // 兼容 cgi_farm_getusercrop?f=1 的数组结构：
+      // [cId, cName, amount, price, high_price, level, ext, type, isLock]
+      cid = it[0] != null ? String(it[0]) : "";
+      name = normalizeCropName(it[1] || "");
+      amount = Number(it[2] || 0);
+      isLock = Number(it[8] || 0) === 1;
+    } else {
+      amount = Number(it.amount || it.num || it.count || 0);
+      cid = it.cId != null ? String(it.cId) : "";
+      name = normalizeCropName(it.cName || "");
+      isLock = Number(it.isLock || it.locked || it.isLocked || it.is_lock || 0) === 1;
+    }
+    if (!name) name = cid ? getCropNameByCid(cid) : "作物";
     if (cid) recordCropName(cid, name);
-    var isLock = Number(it.isLock || it.locked || it.isLocked || it.is_lock || 0) === 1;
     items.push({ cid: cid, name: name, amount: amount, isLock: isLock });
   }
   return items;
@@ -8042,6 +8252,216 @@ function farmSellAllWap(cookie) {
   });
 }
 
+function parseFarmRepLockRows(html) {
+  var h = (html || "").replace(/&amp;/g, "&").replace(/&nbsp;/g, " ");
+  var rows = [];
+  var re =
+    /(?:^|<br\s*\/?>)\s*(?:\d+\)\s*)?(【\s*锁\s*】\s*)?([^<\r\n]*?)\(([0-9]+)金币\/个\)\s*[:：]\s*([0-9]+)个[\s\S]{0,260}?<a[^>]+href="([^"]*wap_farm_rep_lock\?[^"]+)"[^>]*>([^<]*)<\/a>/gi;
+  var m;
+  while ((m = re.exec(h))) {
+    var name = normalizeCropName(m[2] || "");
+    var amount = Number(m[4] || 0);
+    var link = (m[5] || "").replace(/&amp;/g, "&");
+    var opText = normalizeSpace(m[6] || "");
+    var cid = firstMatch(link, /[?&]cId=([0-9]+)/i);
+    var status = Number(firstMatch(link, /[?&]status=([0-9]+)/i) || 0);
+    var locked = status === 2 || /解锁/.test(opText || "");
+    rows.push({
+      cid: cid ? String(cid) : "",
+      name: name,
+      amount: amount > 0 ? amount : 0,
+      status: status,
+      locked: !!locked,
+      opText: opText,
+      lockUrl: status === 1 ? link : "",
+      rawUrl: link
+    });
+  }
+  if (rows.length > 0) return rows;
+
+  // 兜底：仅解析锁链接（名称缺失时由 cId 映射补齐）
+  var re2 = /href="([^"]*wap_farm_rep_lock\?[^"]+)"/gi;
+  while ((m = re2.exec(h))) {
+    var link2 = (m[1] || "").replace(/&amp;/g, "&");
+    var cid2 = firstMatch(link2, /[?&]cId=([0-9]+)/i);
+    var status2 = Number(firstMatch(link2, /[?&]status=([0-9]+)/i) || 0);
+    if (!cid2) continue;
+    rows.push({
+      cid: String(cid2),
+      name: normalizeCropName(getCropNameByCid(cid2)),
+      amount: 0,
+      status: status2,
+      locked: status2 === 2,
+      opText: "",
+      lockUrl: status2 === 1 ? link2 : "",
+      rawUrl: link2
+    });
+  }
+  return rows;
+}
+
+function getFarmRepLockStateByCid(html, cid) {
+  if (!html || !cid) return null;
+  var h = (html || "").replace(/&amp;/g, "&");
+  var re = new RegExp("wap_farm_rep_lock\\?[^\"'\\s<]*cId=" + String(cid) + "[^\"'\\s<]*status=([0-9]+)", "i");
+  var m = h.match(re);
+  if (!m) return null;
+  var status = Number(m[1] || 0);
+  if (status === 2) return true;
+  if (status === 1) return false;
+  return null;
+}
+
+function farmRepLockUrl(base, link) {
+  var u = String(link || "").replace(/&amp;/g, "&");
+  if (!u) return "";
+  if (u.indexOf("http://") === 0 || u.indexOf("https://") === 0) return u;
+  if (u.indexOf("/nc/cgi-bin/") === 0) return base + u;
+  return base + "/nc/cgi-bin/" + u.replace(/^\.?\//, "");
+}
+
+function ensureFarmProtectedLocks(cookie) {
+  if (!CONFIG.ENABLE.farm_sell_all) return Promise.resolve(cookie);
+  if (!CONFIG.FARM_SELL_PROTECT_ENABLE || !CONFIG.FARM_SELL_PROTECT_LOCK_ENABLE) return Promise.resolve(cookie);
+  var base = CONFIG.FARM_WAP_BASE || "https://mcapp.z.qq.com";
+  var sid = CONFIG.RANCH_SID;
+  var g_ut = getFarmGut();
+  var listBase = base + "/nc/cgi-bin/wap_farm_rep_list?sid=" + sid + "&g_ut=" + g_ut + "&buyway=0";
+  var curCookie = cookie;
+  var protectedHits = 0;
+  var alreadyLocked = 0;
+  var lockDone = 0;
+  var lockFail = 0;
+  var transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+  if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
+
+  function lockOneCrop(row, attempt) {
+    var cid = row && row.cid ? String(row.cid) : "";
+    var name = normalizeCropName((row && row.name) || (cid ? getCropNameByCid(cid) : "")) || (cid ? "cId" + cid : "作物");
+    var reason = normalizeSpace((row && row.reason) || "");
+    var url = farmRepLockUrl(base, row && row.lockUrl);
+    if (!url || !cid) return Promise.resolve(false);
+    return getHtmlFollow(url, curCookie, defaultMcappReferer(), "仓库加锁", 0)
+      .then(function (ret) {
+        if (ret.cookie) curCookie = ret.cookie;
+        var html = (ret && ret.body) || "";
+        var lockState = getFarmRepLockStateByCid(html, cid);
+        if (lockState === true) {
+          lockDone += 1;
+          log("🔒 农场保护锁定: " + name + "(cId=" + cid + ")" + (reason ? " [" + reason + "]" : ""));
+          return true;
+        }
+        var text = normalizeSpace(stripTags(html || ""));
+        if (isTransientFailText(text) && attempt < transientRetries) {
+          if (CONFIG.DEBUG) logDebug("🔒 农场保护锁定繁忙(cId=" + cid + ")，第" + (attempt + 1) + "次重试");
+          return sleep(CONFIG.RETRY_WAIT_MS || 600).then(function () {
+            return lockOneCrop(row, attempt + 1);
+          });
+        }
+        if (/锁定成功|加锁成功|设置成功|操作成功/.test(text)) {
+          lockDone += 1;
+          log("🔒 农场保护锁定: " + name + "(cId=" + cid + ")" + (reason ? " [" + reason + "]" : ""));
+          return true;
+        }
+        lockFail += 1;
+        log("⚠️ 农场保护锁定失败(cId=" + cid + "): " + (extractMessage(html) || text || "状态未变化"));
+        return false;
+      })
+      .catch(function (e) {
+        lockFail += 1;
+        log("⚠️ 农场保护锁定异常(cId=" + cid + "): " + errText(e));
+        return false;
+      });
+  }
+
+  function processRows(rows) {
+    var arr = ensureArray(rows);
+    var targets = [];
+    for (var i = 0; i < arr.length; i++) {
+      var row = arr[i] || {};
+      var cid = row.cid != null && row.cid !== "" ? String(row.cid) : "";
+      var nm = normalizeCropName(row.name || (cid ? getCropNameByCid(cid) : ""));
+      var reason = isFarmProtectedCropForSell(nm, cid);
+      if (!reason) continue;
+      row.cid = cid;
+      row.name = nm;
+      row.reason = reason;
+      targets.push(row);
+    }
+    if (!targets.length) return Promise.resolve();
+    protectedHits += targets.length;
+    if (CONFIG.DEBUG) logDebug("🔒 农场保护命中: " + formatProtectedCropList(targets, 6));
+
+    var chain = Promise.resolve();
+    for (var j = 0; j < targets.length; j++) {
+      (function (item) {
+        chain = chain.then(function () {
+          if (item.locked || item.status === 2) {
+            alreadyLocked += 1;
+            return;
+          }
+          if (item.status !== 1 || !item.lockUrl) {
+            lockFail += 1;
+            log("⚠️ 农场保护锁定跳过(cId=" + item.cid + "): 页面无加锁入口");
+            return;
+          }
+          return lockOneCrop(item, 0);
+        });
+      })(targets[j]);
+    }
+    return chain;
+  }
+
+  function scanPage(pageNo) {
+    var url = listBase + (pageNo > 1 ? "&page=" + pageNo : "");
+    return getHtmlFollow(url, curCookie, defaultMcappReferer(), "仓库保护", 0)
+      .then(function (ret) {
+        if (ret.cookie) curCookie = ret.cookie;
+        var html = (ret && ret.body) || "";
+        var rows = parseFarmRepLockRows(html);
+        var info = parseBagPageInfo(html) || {};
+        var total = Number(info.total || 1);
+        if (isNaN(total) || total < 1) total = 1;
+        return processRows(rows).then(function () {
+          return { total: total };
+        });
+      })
+      .catch(function (e) {
+        log("⚠️ 农场保护扫描失败(page=" + pageNo + "): " + errText(e));
+        return { total: 1 };
+      });
+  }
+
+  return scanPage(1).then(function (first) {
+    var total = Number((first && first.total) || 1);
+    if (isNaN(total) || total < 1) total = 1;
+    var p = Promise.resolve();
+    for (var page = 2; page <= total; page++) {
+      (function (pno) {
+        p = p.then(function () {
+          return sleep(CONFIG.WAIT_MS || 0);
+        }).then(function () {
+          return scanPage(pno);
+        });
+      })(page);
+    }
+    return p.then(function () {
+      if (protectedHits > 0 || lockDone > 0 || lockFail > 0) {
+        log(
+          "🔒 农场保护: 命中" +
+            protectedHits +
+            " 已锁" +
+            alreadyLocked +
+            " 新增锁定" +
+            lockDone +
+            (lockFail > 0 ? " 失败" + lockFail : "")
+        );
+      }
+      return curCookie;
+    });
+  });
+}
+
 function farmSellAllJson(cookie) {
   if (!CONFIG.ENABLE.farm_sell_all) return Promise.resolve(false);
   if (!CONFIG.FARM_JSON_ENABLE || !CONFIG.FARM_JSON_SALE_ENABLE) return Promise.resolve(false);
@@ -8049,13 +8469,24 @@ function farmSellAllJson(cookie) {
     if (!crop || !crop.ok) return false;
     var list = crop.items || [];
     var ids = [];
+    var protectedItems = [];
     for (var i = 0; i < list.length; i++) {
       var it = list[i] || {};
       if (!it.cid || !it.amount || it.amount <= 0) continue;
+      var cid = String(it.cid);
+      var name = normalizeCropName(it.name || getCropNameByCid(cid) || ("cId" + cid));
+      var reason = isFarmProtectedCropForSell(name, cid);
+      if (reason) {
+        protectedItems.push({ cid: cid, name: name, reason: reason, amount: it.amount });
+        continue;
+      }
       var locked = !!it.isLock;
-      if (!locked && !("isLock" in it) && String(it.cid) === "40") locked = true;
+      if (!locked && !("isLock" in it) && cid === "40") locked = true;
       if (locked) continue;
-      ids.push(it.cid);
+      ids.push(cid);
+    }
+    if (protectedItems.length > 0) {
+      log("🧺 农场售卖(JSON): 保护跳过" + protectedItems.length + "项[" + formatProtectedCropList(protectedItems, 4) + "]");
     }
     if (ids.length === 0) {
       log("🧺 农场售卖(JSON): 仓库无可卖作物");
@@ -8100,10 +8531,17 @@ function farmSellAllJson(cookie) {
 
 function farmSellAll(cookie) {
   if (!CONFIG.ENABLE.farm_sell_all) return Promise.resolve();
-  return farmSellAllJson(cookie).then(function (ok) {
-    if (ok) return;
-    if (!CONFIG.FARM_JSON_FALLBACK_WAP) return;
-    return farmSellAllWap(cookie);
+  return ensureFarmProtectedLocks(cookie).then(function (safeCookie) {
+    var ck = safeCookie || cookie;
+    return farmSellAllJson(ck).then(function (ok) {
+      if (ok) return;
+      if (!CONFIG.FARM_JSON_FALLBACK_WAP) return;
+      if (CONFIG.FARM_SELL_PROTECT_ENABLE && CONFIG.FARM_SELL_PROTECT_STRICT) {
+        log("🧺 农场售卖: 保护严格模式生效，JSON售卖失败时跳过WAP回退");
+        return;
+      }
+      return farmSellAllWap(ck);
+    });
   });
 }
 
@@ -8989,6 +9427,14 @@ function farmOneKeySow(cookie, seedCid) {
         if (parseCid(ordered[k]) !== grass) filtered.push(ordered[k]);
       }
       if (filtered.length > 0) ordered = filtered;
+      var seasonal = [];
+      var other = [];
+      for (var s = 0; s < ordered.length; s++) {
+        var cid = parseCid(ordered[s]);
+        if (cid && isSeasonalSeedCid(cid)) seasonal.push(ordered[s]);
+        else other.push(ordered[s]);
+      }
+      if (seasonal.length > 0) ordered = seasonal.concat(other);
     }
     return ordered;
   }
@@ -9670,7 +10116,8 @@ function decidePlantSeed(cookie, grassCount) {
     var picked = pickPlantSeedCidByPolicy(grassCount);
     var pickedName = picked ? getCropNameByCid(picked) : "";
     var preferNonGrass = isGrassEnoughForDiversify(grassCount) || isGrassEnoughForDiversify(LAST_GRASS_COUNT);
-    var prefix = preferNonGrass ? "优先使用非牧草" : "优先使用";
+    var seasonalPicked = !!(preferNonGrass && picked && isSeasonalSeedCid(picked));
+    var prefix = seasonalPicked ? "优先使用节气种子" : preferNonGrass ? "优先使用非牧草" : "优先使用";
     if (picked) {
       if (pickedName && !/^cId\d+$/i.test(pickedName)) {
         log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，" + prefix + " " + pickedName + "(cId=" + picked + ")");
