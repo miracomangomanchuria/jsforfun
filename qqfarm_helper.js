@@ -239,7 +239,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.20-r23";
+var SCRIPT_REV = "2026.02.20-r24";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -5174,6 +5174,23 @@ function pickPlantSeedCidFromBag(excludeCid) {
   return "";
 }
 
+function isGrassEnoughForDiversify(grassCount) {
+  var n = Number(grassCount);
+  if (isNaN(n)) return false;
+  return n >= Number(CONFIG.GRASS_THRESHOLD || 0);
+}
+
+function pickPlantSeedCidByPolicy(grassCountHint) {
+  var grassCid = String(CONFIG.FARM_GRASS_SEED_ID || "40");
+  var preferNonGrass =
+    isGrassEnoughForDiversify(grassCountHint) || isGrassEnoughForDiversify(LAST_GRASS_COUNT);
+  if (preferNonGrass) {
+    var nonGrass = pickPlantSeedCidFromBag(grassCid);
+    if (nonGrass) return nonGrass;
+  }
+  return pickPlantSeedCidFromBag("");
+}
+
 function isSeedLackMsg(msg) {
   var text = normalizeSpace(msg || "");
   if (!text) return false;
@@ -7077,7 +7094,7 @@ function execFarmJsonActions(base, cookie, actions) {
       if (a.type === "plant") {
         var useCid = String(CONFIG.PLANT_CID || "");
         if (!useCid || Number(useCid) <= 0) {
-          var pickedCid = pickPlantSeedCidFromBag("");
+          var pickedCid = pickPlantSeedCidByPolicy(LAST_GRASS_COUNT);
           if (pickedCid) {
             CONFIG.PLANT_CID = pickedCid;
             useCid = pickedCid;
@@ -7363,7 +7380,7 @@ function execModernActions(base, cookie, gtk, uin, actions, deadPlaces) {
         place: a.place
       };
       if (a.type === "plant") {
-        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidFromBag("") || "");
+        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidByPolicy(LAST_GRASS_COUNT) || "");
         if (!plantCid || Number(plantCid) <= 0) {
           recordPlantFail("seedLack", 1);
           recordActionNoop("plant", 1);
@@ -7541,7 +7558,7 @@ function execLegacyActions(base, cookie, uin, actions, deadPlaces) {
       if (a.type === "scarify") path = "/api.php?mod=farmlandstatus&act=scarify";
       if (a.type === "plant") {
         path = "/api.php?mod=farmlandstatus&act=planting";
-        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidFromBag("") || "");
+        var plantCid = String(CONFIG.PLANT_CID || pickPlantSeedCidByPolicy(LAST_GRASS_COUNT) || "");
         if (!plantCid || Number(plantCid) <= 0) {
           recordPlantFail("seedLack", 1);
           recordActionNoop("plant", 1);
@@ -9650,13 +9667,15 @@ function decidePlantSeed(cookie, grassCount) {
   if (markGrassLow(grassCount, "")) return Promise.resolve(CONFIG.FARM_GRASS_SEED_ID);
   var seedTotal = BAG_STATS.seed ? BAG_STATS.seed.total : 0;
   if (seedTotal >= CONFIG.FARM_SEED_MIN_TOTAL) {
-    var picked = pickPlantSeedCidFromBag("");
+    var picked = pickPlantSeedCidByPolicy(grassCount);
     var pickedName = picked ? getCropNameByCid(picked) : "";
+    var preferNonGrass = isGrassEnoughForDiversify(grassCount) || isGrassEnoughForDiversify(LAST_GRASS_COUNT);
+    var prefix = preferNonGrass ? "优先使用非牧草" : "优先使用";
     if (picked) {
       if (pickedName && !/^cId\d+$/i.test(pickedName)) {
-        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，优先使用 " + pickedName + "(cId=" + picked + ")");
+        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，" + prefix + " " + pickedName + "(cId=" + picked + ")");
       } else {
-        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，优先使用 cId=" + picked);
+        log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，" + prefix + " cId=" + picked);
       }
     } else {
       log("🌱 种植策略: 背包种子充足(" + seedTotal + ")，但未解析到可用 cId，保留当前播种配置");
