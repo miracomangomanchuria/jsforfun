@@ -239,7 +239,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.20-r20";
+var SCRIPT_REV = "2026.02.20-r23";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -8207,7 +8207,7 @@ function isFarmEventNoop(json, msg) {
   if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
   var m = normalizeSpace(msg || farmEventErrMsg(json));
   if (!m) return false;
-  return /(已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取|无需|不能|未开启|已完成|无可领|次数不足|不满足)/.test(m);
+  return /(已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取|无需|不能|未开启|已完成|无可领|没有可领|没有可奖|可领奖励|次数不足|不满足)/.test(m);
 }
 
 function mergeRewardText(origin, add) {
@@ -8291,8 +8291,18 @@ function parseBulingGiftSlots(gift) {
     for (var k in row) {
       if (!row.hasOwnProperty(k)) continue;
       var raw = row[k];
-      var items = ensureArray(raw);
-      if (!items.length && raw && typeof raw === "object") items = [raw];
+      var isArr = Object.prototype.toString.call(raw) === "[object Array]";
+      var items = isArr ? raw : ensureArray(raw);
+      if (!items.length && !isArr && raw && typeof raw === "object") {
+        var hasOwn = false;
+        for (var rk in raw) {
+          if (raw.hasOwnProperty(rk)) {
+            hasOwn = true;
+            break;
+          }
+        }
+        if (hasOwn) items = [raw];
+      }
       if (!items.length) continue;
       slots.push({ id: String(k), items: items });
     }
@@ -8401,6 +8411,11 @@ function runFarmEvents(cookie) {
               return claimOnce(attempt + 1);
             });
           }
+          if (isTransientFailText(msg || "")) {
+            FARM_EVENT_STATS.busy += 1;
+            log("⚠️ 节气领取繁忙: 已重试" + transientRetries + "次，留待下轮");
+            return "busy";
+          }
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 节气领取失败: " + msg);
@@ -8436,32 +8451,29 @@ function runFarmEvents(cookie) {
     return readStatus("开始").then(function (st) {
       if (!st) return;
       if (!CONFIG.FARM_EVENT_SEEDHB_AUTO_CLAIM) return;
-      if (FARM_EVENT_STATS.seedCanClaim <= 0) {
-        if (CONFIG.DEBUG) logDebug("🎁 节气领取: 今日无可领，跳过");
-        return;
-      }
-      if (FARM_EVENT_STATS.seedTodayClaimed > 0) {
-        log("🎁 节气领取: 今日已达上限，剩余可领" + FARM_EVENT_STATS.seedCanClaim + "，留待次日");
-        return;
-      }
       var loops = 0;
       var maxLoops = 5;
+      var claimed = 0;
       function nextClaim() {
-        if (FARM_EVENT_STATS.seedCanClaim <= 0) return Promise.resolve();
-        if (FARM_EVENT_STATS.seedTodayClaimed > 0) {
-          if (FARM_EVENT_STATS.seedCanClaim > 0) {
-            log("🎁 节气领取: 今日已达上限，剩余可领" + FARM_EVENT_STATS.seedCanClaim + "，留待次日");
-          }
-          return Promise.resolve();
-        }
         if (loops >= maxLoops) {
           if (CONFIG.DEBUG) logDebug("🎁 节气领取: 达到单轮上限" + maxLoops + "次，停止本轮");
           return Promise.resolve();
         }
         loops += 1;
+        if (loops === 1 && FARM_EVENT_STATS.seedCanClaim <= 0 && CONFIG.DEBUG) {
+          logDebug("🎁 节气领取: 状态可领=0，执行一次探测领取");
+        }
         return claimOnce(0).then(function (flag) {
-          if (flag !== "continue") return;
-          return nextClaim();
+          if (flag === "continue") {
+            claimed += 1;
+            return nextClaim();
+          }
+          if (flag === "busy") return;
+          if (flag === "day-limit") return;
+          if (flag === "stop" && claimed <= 0 && FARM_EVENT_STATS.seedCanClaim > 0 && CONFIG.DEBUG) {
+            logDebug("🎁 节气领取: 状态提示可领，但领取返回无变化");
+          }
+          return;
         });
       }
       return nextClaim();
@@ -8477,6 +8489,21 @@ function runFarmEvents(cookie) {
     if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
     var maxLoops = Number(CONFIG.FARM_EVENT_BULING_MAX_LOOP || 5);
     if (isNaN(maxLoops) || maxLoops < 1) maxLoops = 5;
+    var doneIds = {};
+    var noopIds = {};
+    var busyIds = {};
+
+    function isSlotLikelyClaimable(slot) {
+      if (!slot) return false;
+      var arr = ensureArray(slot.items);
+      if (!arr.length) return false;
+      for (var i = 0; i < arr.length; i++) {
+        var it = arr[i] || {};
+        var n = Number(it.num || it.count || it.amount || 0);
+        if (!isNaN(n) && n > 0) return true;
+      }
+      return false;
+    }
 
     function readIndex(tag) {
       return callFarmEventApi(cookie, statusPath, farmEventParams(ctx)).then(function (json) {
@@ -8490,15 +8517,24 @@ function runFarmEvents(cookie) {
           }
           return null;
         }
-        var slots = parseBulingGiftSlots(json.gift);
-        FARM_EVENT_STATS.bulingCanClaim = slots.length;
+        var rawSlots = parseBulingGiftSlots(json.gift);
+        var slots = [];
         var detail = [];
         var ids = [];
-        for (var i = 0; i < slots.length; i++) {
-          ids.push(slots[i].id);
-          detail.push(formatBulingSlotPreview(slots[i]));
+        for (var i = 0; i < rawSlots.length; i++) {
+          var s = rawSlots[i];
+          ids.push(s.id);
+          detail.push(formatBulingSlotPreview(s));
+          if (doneIds[s.id] || noopIds[s.id] || busyIds[s.id]) continue;
+          if (!isSlotLikelyClaimable(s)) {
+            if (CONFIG.DEBUG) logDebug("🎁 奖励补领预判跳过(id=" + s.id + "): 列表状态不可领");
+            continue;
+          }
+          slots.push(s);
         }
+        FARM_EVENT_STATS.bulingCanClaim = slots.length;
         var line = "可领" + slots.length;
+        if (CONFIG.DEBUG && rawSlots.length !== slots.length) line += "（槽位" + rawSlots.length + "）";
         if (ids.length) line += " id[" + ids.join(",") + "]";
         if (detail.length) line += " 奖励[" + detail.join("；") + "]";
         log("🎁 奖励补领状态(" + tag + "): " + line);
@@ -8516,16 +8552,24 @@ function runFarmEvents(cookie) {
               return claimById(id, attempt + 1);
             });
           }
+          if (isTransientFailText(msg || "")) {
+            FARM_EVENT_STATS.busy += 1;
+            busyIds[id] = true;
+            log("⚠️ 奖励补领繁忙(id=" + id + "): 已重试" + transientRetries + "次，留待下轮");
+            return false;
+          }
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 奖励补领失败(id=" + id + "): " + msg);
-          } else if (CONFIG.DEBUG) {
-            logDebug("🎁 奖励补领无变化(id=" + id + "): " + msg);
+          } else {
+            noopIds[id] = true;
+            if (CONFIG.DEBUG) logDebug("🎁 奖励补领无变化(id=" + id + "): " + msg);
           }
           return false;
         }
         FARM_EVENT_STATS.bulingClaim += 1;
         FARM_EXTRA.signin += 1;
+        doneIds[id] = true;
         var reward = formatBulingReward(json, id);
         if (reward) {
           FARM_EVENT_STATS.bulingReward = mergeRewardText(FARM_EVENT_STATS.bulingReward, reward);
@@ -8552,14 +8596,21 @@ function runFarmEvents(cookie) {
       return readIndex(tag).then(function (slots) {
         if (!slots || !slots.length) return;
         var p = Promise.resolve();
+        var gained = 0;
         for (var i = 0; i < slots.length; i++) {
           (function (sid) {
             p = p.then(function () {
-              return claimById(sid, 0);
+              return claimById(sid, 0).then(function (ok) {
+                if (ok) gained += 1;
+              });
             });
           })(slots[i].id);
         }
         return p.then(function () {
+          if (gained <= 0) {
+            if (CONFIG.DEBUG) logDebug("🎁 奖励补领: 本轮无新增领取，停止复查");
+            return;
+          }
           return pass(loopNo + 1);
         });
       });
