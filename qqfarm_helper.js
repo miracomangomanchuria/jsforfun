@@ -236,7 +236,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.19-r17";
+var SCRIPT_REV = "2026.02.19-r18";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1190,6 +1190,7 @@ var FARM_EVENT_STATS = {
   seedTerm: 0,
   seedRound: 0,
   seedCanClaim: 0,
+  seedTodayClaimed: -1,
   seedClaim: 0,
   seedReward: "",
   wishOpen: 0,
@@ -5997,14 +5998,15 @@ function appendTextPart(base, addon, sep) {
 function farmEventStatusLine() {
   var parts = [];
   if (FARM_EVENT_STATS.seedTerm > 0) {
-    parts.push(
+    var seedLine =
       "节气 第" +
         FARM_EVENT_STATS.seedTerm +
         "节气 第" +
         FARM_EVENT_STATS.seedRound +
         "轮 可领" +
-        FARM_EVENT_STATS.seedCanClaim
-    );
+        FARM_EVENT_STATS.seedCanClaim;
+    if (FARM_EVENT_STATS.seedTodayClaimed > 0) seedLine += " 今日已领";
+    parts.push(seedLine);
   }
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     var selfStart = FARM_EVENT_STATS.wishSelfStart >= 0 ? FARM_EVENT_STATS.wishSelfStart : 0;
@@ -8245,6 +8247,10 @@ function runFarmEvents(cookie) {
     if (!CONFIG.FARM_EVENT_SEEDHB_ENABLE) return Promise.resolve();
     var statusPath = "/cgi-bin/cgi_farm_seedhb?act=9";
     var claimPath = "/cgi-bin/cgi_farm_seedhb?act=10";
+    var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+
     function readStatus(tag) {
       return callFarmEventApi(cookie, statusPath, farmEventParams(ctx)).then(function (json) {
         if (!isFarmEventOk(json)) {
@@ -8260,6 +8266,8 @@ function runFarmEvents(cookie) {
         FARM_EVENT_STATS.seedTerm = Number(json.currentTerm || 0) || 0;
         FARM_EVENT_STATS.seedRound = Number(json.round || 0) || 0;
         FARM_EVENT_STATS.seedCanClaim = Number(json.l_seed_ex || 0) || 0;
+        FARM_EVENT_STATS.seedTodayClaimed =
+          json && json.isGet !== undefined && json.isGet !== null ? Number(json.isGet || 0) || 0 : -1;
         var pool = formatSeedHbPool(json.seedList, 4);
         var statusLine =
           "第" +
@@ -8268,31 +8276,39 @@ function runFarmEvents(cookie) {
           FARM_EVENT_STATS.seedRound +
           "轮 可领" +
           FARM_EVENT_STATS.seedCanClaim;
+        if (FARM_EVENT_STATS.seedTodayClaimed > 0) statusLine += " 今日已领";
         if (pool) statusLine += " 奖励池[" + pool + "]";
         log("🎐 节气状态: " + statusLine);
         return json;
       });
     }
 
-    return readStatus("开始").then(function (st) {
-      if (!st) return;
-      if (!CONFIG.FARM_EVENT_SEEDHB_AUTO_CLAIM) return;
-      if (FARM_EVENT_STATS.seedCanClaim <= 0) {
-        if (CONFIG.DEBUG) logDebug("🎁 节气领取: 今日无可领，跳过");
-        return;
-      }
+    function claimOnce(attempt) {
       return callFarmEventApi(cookie, claimPath, farmEventParams(ctx)).then(function (json) {
         if (!isFarmEventOk(json)) {
           var msg = farmEventErrMsg(json);
+          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+            log("⚠️ 节气领取繁忙，第" + (attempt + 1) + "次重试");
+            return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+              return claimOnce(attempt + 1);
+            });
+          }
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 节气领取失败: " + msg);
-          } else if (/已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取/.test(msg || "")) {
-            log("🎁 节气领取: 今日已领，跳过");
-          } else if (CONFIG.DEBUG) {
-            logDebug("🎁 节气领取: 无需执行(" + msg + ")");
+            return "stop";
           }
-          return;
+          if (/已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取/.test(msg || "")) {
+            FARM_EVENT_STATS.seedTodayClaimed = 1;
+            if (FARM_EVENT_STATS.seedCanClaim > 0) {
+              log("🎁 节气领取: 今日已达上限，剩余可领" + FARM_EVENT_STATS.seedCanClaim + "，留待次日");
+            } else {
+              log("🎁 节气领取: 今日已领，跳过");
+            }
+            return "day-limit";
+          }
+          if (CONFIG.DEBUG) logDebug("🎁 节气领取: 无需执行(" + msg + ")");
+          return "stop";
         }
         FARM_EVENT_STATS.seedClaim += 1;
         FARM_EXTRA.signin += 1;
@@ -8303,8 +8319,44 @@ function runFarmEvents(cookie) {
         } else {
           log("🎁 节气领取: 成功");
         }
-        return readStatus("领取后");
+        return readStatus("领取后").then(function () {
+          return "continue";
+        });
       });
+    }
+
+    return readStatus("开始").then(function (st) {
+      if (!st) return;
+      if (!CONFIG.FARM_EVENT_SEEDHB_AUTO_CLAIM) return;
+      if (FARM_EVENT_STATS.seedCanClaim <= 0) {
+        if (CONFIG.DEBUG) logDebug("🎁 节气领取: 今日无可领，跳过");
+        return;
+      }
+      if (FARM_EVENT_STATS.seedTodayClaimed > 0) {
+        log("🎁 节气领取: 今日已达上限，剩余可领" + FARM_EVENT_STATS.seedCanClaim + "，留待次日");
+        return;
+      }
+      var loops = 0;
+      var maxLoops = 5;
+      function nextClaim() {
+        if (FARM_EVENT_STATS.seedCanClaim <= 0) return Promise.resolve();
+        if (FARM_EVENT_STATS.seedTodayClaimed > 0) {
+          if (FARM_EVENT_STATS.seedCanClaim > 0) {
+            log("🎁 节气领取: 今日已达上限，剩余可领" + FARM_EVENT_STATS.seedCanClaim + "，留待次日");
+          }
+          return Promise.resolve();
+        }
+        if (loops >= maxLoops) {
+          if (CONFIG.DEBUG) logDebug("🎁 节气领取: 达到单轮上限" + maxLoops + "次，停止本轮");
+          return Promise.resolve();
+        }
+        loops += 1;
+        return claimOnce(0).then(function (flag) {
+          if (flag !== "continue") return;
+          return nextClaim();
+        });
+      }
+      return nextClaim();
     });
   }
 
