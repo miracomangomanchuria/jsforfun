@@ -280,7 +280,10 @@ async function runAccount(cookie, index, total) {
 
   const pointRes = await post(API.queryUserPoint, runtimeBody.queryUserPoint, headers)
   if (pointRes?.code === '0000') {
-    const point = pointRes?.data?.userPoint ?? pointRes?.data?.point
+    const pointData = pointRes?.data
+    const point = (pointData && typeof pointData === 'object')
+      ? (pointData.userPoint ?? pointData.point)
+      : pointData
     pointText = point === 0 || point ? String(point) : '未知'
     $.log(`💰 当前积分: ${pointText}`)
   } else {
