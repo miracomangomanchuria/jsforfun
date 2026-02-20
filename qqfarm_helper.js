@@ -150,6 +150,9 @@ var CONFIG = {
   FARM_EVENT_ENABLE: true,
   FARM_EVENT_SEEDHB_ENABLE: true, // /cgi_farm_seedhb act=9/10
   FARM_EVENT_SEEDHB_AUTO_CLAIM: true, // 有可领时自动 act=10
+  FARM_EVENT_BULING_ENABLE: true, // /cgi_farm_buling act=index/get
+  FARM_EVENT_BULING_AUTO_CLAIM: true, // 奖励补领有可领时自动领取
+  FARM_EVENT_BULING_MAX_LOOP: 5, // 奖励补领复查轮次上限
   FARM_EVENT_WISH_ENABLE: true, // /cgi_farm_wish_*
   FARM_EVENT_WISH_AUTO_STAR: false, // 自动领取 starlist 中可领星奖（默认关闭）
   FARM_EVENT_WISH_AUTO_HELP: false, // 自动执行一次 wish_help（默认关闭）
@@ -236,7 +239,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.19-r18";
+var SCRIPT_REV = "2026.02.20-r20";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -354,6 +357,31 @@ function log(msg) {
 
 function notify(title, subtitle, body, opts) {
   $.notify(title, subtitle || "", body || "", opts || {});
+}
+
+function clipText(text, maxLen) {
+  var s = text === null || text === undefined ? "" : String(text);
+  var max = Number(maxLen || 0);
+  if (!max || max <= 0 || s.length <= max) return s;
+  return s.slice(0, max) + "...";
+}
+
+function errText(e) {
+  if (e === null || e === undefined) return String(e);
+  if (typeof e === "string") return e;
+  if (e && e.stack) return clipText(String(e.stack), 800);
+  var parts = [];
+  if (e.name) parts.push(String(e.name));
+  if (e.code !== undefined && e.code !== null) parts.push("code=" + String(e.code));
+  if (e.status !== undefined && e.status !== null) parts.push("status=" + String(e.status));
+  if (e.message) parts.push(String(e.message));
+  if (e.error && String(e.error) !== String(e.message || "")) parts.push(String(e.error));
+  if (parts.length) return clipText(parts.join(" | "), 800);
+  try {
+    return clipText(JSON.stringify(e), 800);
+  } catch (_) {
+    return clipText(String(e), 800);
+  }
 }
 
 function sleep(ms) {
@@ -652,6 +680,9 @@ function qxRequest(opts) {
       headers: resp.headers,
       body: resp.body
     };
+  }).catch(function (e) {
+    var target = opts && opts.url ? " " + opts.url : "";
+    throw new Error("QX请求失败" + target + " | " + errText(e));
   });
 }
 
@@ -665,7 +696,7 @@ function surgeRequest(opts) {
     };
     var fn = method === "GET" ? $httpClient.get : $httpClient.post;
     fn(req, function (err, resp, data) {
-      if (err) return reject(err);
+      if (err) return reject(new Error("HTTP请求失败 | " + errText(err)));
       resolve({
         status: resp.status || resp.statusCode,
         headers: resp.headers,
@@ -775,7 +806,7 @@ function getWithRetry(opts, label) {
       })
       .catch(function (e) {
         if (attempt <= tries) {
-          logDebug((label || "请求") + " 异常重试 " + attempt + "/" + tries + " " + e);
+          logDebug((label || "请求") + " 异常重试 " + attempt + "/" + tries + " " + errText(e));
           return sleep(waitMs).then(run);
         }
         throw e;
@@ -1193,6 +1224,9 @@ var FARM_EVENT_STATS = {
   seedTodayClaimed: -1,
   seedClaim: 0,
   seedReward: "",
+  bulingCanClaim: 0,
+  bulingClaim: 0,
+  bulingReward: "",
   wishOpen: 0,
   wishStatus: -1,
   wishSelfStart: -1,
@@ -5453,6 +5487,10 @@ function refreshBagStats(cookie) {
       if (CONFIG.LOG_BAG_STATS) {
         log("🎒 背包·鱼苗: " + buildBagTag(fish.items, 4));
       }
+    })
+    .catch(function (e) {
+      log("⚠️ 背包统计异常: " + errText(e));
+      return;
     });
 }
 
@@ -6008,6 +6046,9 @@ function farmEventStatusLine() {
     if (FARM_EVENT_STATS.seedTodayClaimed > 0) seedLine += " 今日已领";
     parts.push(seedLine);
   }
+  if (FARM_EVENT_STATS.bulingCanClaim > 0 || FARM_EVENT_STATS.bulingClaim > 0) {
+    parts.push("补领 可领" + FARM_EVENT_STATS.bulingCanClaim + " 已领" + FARM_EVENT_STATS.bulingClaim);
+  }
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     var selfStart = FARM_EVENT_STATS.wishSelfStart >= 0 ? FARM_EVENT_STATS.wishSelfStart : 0;
     var selfEnd = FARM_EVENT_STATS.wishSelfEnd >= 0 ? FARM_EVENT_STATS.wishSelfEnd : selfStart;
@@ -6031,16 +6072,20 @@ function farmEventStatusLine() {
 function farmEventSummaryLine() {
   var parts = [];
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
+  parts.push("补领" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动忙" + FARM_EVENT_STATS.busy);
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
+  if (FARM_EVENT_STATS.bulingReward) parts.push("补领奖励[" + FARM_EVENT_STATS.bulingReward + "]");
   return parts.join(" ");
 }
 
 function farmEventChangeLine() {
   var parts = [];
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
+  if (FARM_EVENT_STATS.bulingClaim > 0) parts.push("补领+" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动繁忙" + FARM_EVENT_STATS.busy + "次");
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
+  if (FARM_EVENT_STATS.bulingReward) parts.push("补领奖励[" + FARM_EVENT_STATS.bulingReward + "]");
   if (!parts.length) return "活动无领取";
   return parts.join("；");
 }
@@ -6647,10 +6692,15 @@ function ensureFarmJsonContext(cookie) {
   if (FARM_CTX.uIdx && FARM_CTX.uinY) return Promise.resolve(FARM_CTX);
   var base = CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
   var uin = getFarmUinFromCookie(cookie) || "";
-  return fetchFarmJson(base, cookie, uin).then(function (farm) {
-    if (isFarmJson(farm)) return FARM_CTX;
-    return null;
-  });
+  return fetchFarmJson(base, cookie, uin)
+    .then(function (farm) {
+      if (isFarmJson(farm)) return FARM_CTX;
+      return null;
+    })
+    .catch(function (e) {
+      if (CONFIG.DEBUG) logDebug("JSON 上下文获取失败: " + errText(e));
+      return null;
+    });
 }
 
 function parseSeedJsonItems(arr) {
@@ -6678,32 +6728,37 @@ function parseSeedJsonItems(arr) {
 
 function fetchFarmSeedJson(cookie) {
   if (!CONFIG.FARM_JSON_ENABLE || !CONFIG.FARM_JSON_SEED_ENABLE) return Promise.resolve(null);
-  return ensureFarmJsonContext(cookie).then(function () {
-    var uIdx = getFarmUin(cookie);
-    if (!uIdx) {
-      log("⚠️ JSON 种子: 缺少 uIdx");
-      return null;
-    }
-    var farmTime = getFarmTime();
-    var farmKey = legacyFarmKey(farmTime);
-    if (!farmKey) return null;
-    var base = CONFIG.FARM_SEED_JSON_BASE || "https://farm.qzone.qq.com";
-    var url = base + "/cgi-bin/cgi_farm_getuserseed?mod=repertory&act=getUserSeed";
-    var headers = buildFarmSeedJsonHeaders(cookie);
-    var body = buildLegacyBody({ uIdx: uIdx, farmTime: farmTime, farmKey: farmKey });
-    return httpRequest({ method: "POST", url: url, headers: headers, body: body })
-      .then(function (resp) {
-        var json = tryJson(resp.body);
-        var parsed = parseSeedJsonItems(json);
-        if (!parsed) return null;
-        parsed.ok = true;
-        return parsed;
-      })
+  return ensureFarmJsonContext(cookie)
+    .then(function () {
+      var uIdx = getFarmUin(cookie);
+      if (!uIdx) {
+        log("⚠️ JSON 种子: 缺少 uIdx");
+        return null;
+      }
+      var farmTime = getFarmTime();
+      var farmKey = legacyFarmKey(farmTime);
+      if (!farmKey) return null;
+      var base = CONFIG.FARM_SEED_JSON_BASE || "https://farm.qzone.qq.com";
+      var url = base + "/cgi-bin/cgi_farm_getuserseed?mod=repertory&act=getUserSeed";
+      var headers = buildFarmSeedJsonHeaders(cookie);
+      var body = buildLegacyBody({ uIdx: uIdx, farmTime: farmTime, farmKey: farmKey });
+      return httpRequest({ method: "POST", url: url, headers: headers, body: body })
+        .then(function (resp) {
+          var json = tryJson(resp.body);
+          var parsed = parseSeedJsonItems(json);
+          if (!parsed) return null;
+          parsed.ok = true;
+          return parsed;
+        })
+        .catch(function (e) {
+          if (CONFIG.LOG_BAG_STATS || CONFIG.DEBUG) log("🎒 JSON 种子读取失败: " + errText(e));
+          return null;
+        });
+    })
     .catch(function (e) {
-      if (CONFIG.LOG_BAG_STATS) log("🎒 JSON 种子读取失败: " + e);
+      if (CONFIG.LOG_BAG_STATS || CONFIG.DEBUG) log("🎒 JSON 种子上下文失败: " + errText(e));
       return null;
     });
-  });
 }
 
 function parseCropJsonItems(arr) {
@@ -6745,9 +6800,12 @@ function fetchFarmCropJson(cookie) {
         return { ok: true, items: items };
       })
     .catch(function (e) {
-      if (CONFIG.LOG_BAG_STATS) log("🎒 JSON 仓库读取失败: " + e);
+      if (CONFIG.LOG_BAG_STATS || CONFIG.DEBUG) log("🎒 JSON 仓库读取失败: " + errText(e));
       return null;
     });
+  }).catch(function (e) {
+    if (CONFIG.LOG_BAG_STATS || CONFIG.DEBUG) log("🎒 JSON 仓库上下文失败: " + errText(e));
+    return null;
   });
 }
 
@@ -8224,6 +8282,56 @@ function formatSeedHbPool(seedList, maxShow) {
   return parts.join("；");
 }
 
+function parseBulingGiftSlots(gift) {
+  var arr = ensureArray(gift);
+  var slots = [];
+  for (var i = 0; i < arr.length; i++) {
+    var row = arr[i];
+    if (!row || typeof row !== "object") continue;
+    for (var k in row) {
+      if (!row.hasOwnProperty(k)) continue;
+      var raw = row[k];
+      var items = ensureArray(raw);
+      if (!items.length && raw && typeof raw === "object") items = [raw];
+      if (!items.length) continue;
+      slots.push({ id: String(k), items: items });
+    }
+  }
+  slots.sort(function (a, b) {
+    var an = Number(a.id);
+    var bn = Number(b.id);
+    if (!isNaN(an) && !isNaN(bn)) return an - bn;
+    return String(a.id).localeCompare(String(b.id));
+  });
+  return slots;
+}
+
+function formatBulingSlotPreview(slot) {
+  if (!slot) return "";
+  var id = String(slot.id || "");
+  var arr = ensureArray(slot.items);
+  if (id === "2") {
+    var total = 0;
+    for (var i = 0; i < arr.length; i++) {
+      total += Number((arr[i] || {}).num || 0) || 0;
+    }
+    if (total > 0) return "晶石×" + total;
+    return "晶石";
+  }
+  if (id === "3") return "礼包(" + arr.length + "项)";
+  return "ID" + id + "(" + arr.length + "项)";
+}
+
+function formatBulingReward(json, id) {
+  var pkg = formatFarmEventPkg(json && json.pkg);
+  if (pkg) return pkg;
+  var jingshi = Number((json && json.jingshi) || 0) || 0;
+  if (jingshi > 0) return "晶石×" + jingshi;
+  var gain = Number((json && (json.num || json.count || json.amount || json.add)) || 0) || 0;
+  if (gain > 0) return "补领奖励(ID" + String(id || "?") + ")×" + gain;
+  return "";
+}
+
 function parseWishState(json) {
   if (!isFarmEventOk(json)) return null;
   var starlist = ensureArray(json.starlist);
@@ -8358,6 +8466,106 @@ function runFarmEvents(cookie) {
       }
       return nextClaim();
     });
+  }
+
+  function runBuling() {
+    if (!CONFIG.FARM_EVENT_BULING_ENABLE) return Promise.resolve();
+    var statusPath = "/cgi-bin/cgi_farm_buling?act=index";
+    var claimPath = "/cgi-bin/cgi_farm_buling?act=get";
+    var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    var maxLoops = Number(CONFIG.FARM_EVENT_BULING_MAX_LOOP || 5);
+    if (isNaN(maxLoops) || maxLoops < 1) maxLoops = 5;
+
+    function readIndex(tag) {
+      return callFarmEventApi(cookie, statusPath, farmEventParams(ctx)).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 奖励补领状态读取失败(" + tag + "): " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🎁 奖励补领状态(" + tag + "): 无需执行(" + msg + ")");
+          }
+          return null;
+        }
+        var slots = parseBulingGiftSlots(json.gift);
+        FARM_EVENT_STATS.bulingCanClaim = slots.length;
+        var detail = [];
+        var ids = [];
+        for (var i = 0; i < slots.length; i++) {
+          ids.push(slots[i].id);
+          detail.push(formatBulingSlotPreview(slots[i]));
+        }
+        var line = "可领" + slots.length;
+        if (ids.length) line += " id[" + ids.join(",") + "]";
+        if (detail.length) line += " 奖励[" + detail.join("；") + "]";
+        log("🎁 奖励补领状态(" + tag + "): " + line);
+        return slots;
+      });
+    }
+
+    function claimById(id, attempt) {
+      return callFarmEventApi(cookie, claimPath, farmEventParams(ctx, { id: id })).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+            log("⚠️ 奖励补领繁忙(id=" + id + ")，第" + (attempt + 1) + "次重试");
+            return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+              return claimById(id, attempt + 1);
+            });
+          }
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 奖励补领失败(id=" + id + "): " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🎁 奖励补领无变化(id=" + id + "): " + msg);
+          }
+          return false;
+        }
+        FARM_EVENT_STATS.bulingClaim += 1;
+        FARM_EXTRA.signin += 1;
+        var reward = formatBulingReward(json, id);
+        if (reward) {
+          FARM_EVENT_STATS.bulingReward = mergeRewardText(FARM_EVENT_STATS.bulingReward, reward);
+          log("🎁 奖励补领领取(id=" + id + "): " + reward);
+        } else {
+          log("🎁 奖励补领领取(id=" + id + "): 成功");
+        }
+        return true;
+      });
+    }
+
+    if (!CONFIG.FARM_EVENT_BULING_AUTO_CLAIM) {
+      return readIndex("开始").then(function () {
+        return;
+      });
+    }
+
+    function pass(loopNo) {
+      if (loopNo > maxLoops) {
+        if (CONFIG.DEBUG) logDebug("🎁 奖励补领: 达到复查上限" + maxLoops + "，停止本轮");
+        return Promise.resolve();
+      }
+      var tag = loopNo === 1 ? "开始" : "复查" + (loopNo - 1);
+      return readIndex(tag).then(function (slots) {
+        if (!slots || !slots.length) return;
+        var p = Promise.resolve();
+        for (var i = 0; i < slots.length; i++) {
+          (function (sid) {
+            p = p.then(function () {
+              return claimById(sid, 0);
+            });
+          })(slots[i].id);
+        }
+        return p.then(function () {
+          return pass(loopNo + 1);
+        });
+      });
+    }
+
+    return pass(1);
   }
 
   function runWish() {
@@ -8566,6 +8774,9 @@ function runFarmEvents(cookie) {
         return;
       }
       return runSeedHb()
+        .then(function () {
+          return runBuling();
+        })
         .then(function () {
           return runWish();
         })
@@ -12825,6 +13036,10 @@ function main() {
             return decidePlantSeed(cookie, grassCount).then(function (seedId) {
               if (seedId !== null && seedId !== undefined) CONFIG.PLANT_CID = seedId;
             });
+          })
+          .catch(function (e) {
+            log("⚠️ 启动阶段种植策略失败: " + errText(e));
+            return;
           });
       });
     })
@@ -12836,6 +13051,9 @@ function main() {
           return decidePlantSeed(cookie, grassCount).then(function (seedId) {
             if (seedId !== null && seedId !== undefined) CONFIG.PLANT_CID = seedId;
           });
+        }).catch(function (e) {
+          log("⚠️ 牧场后复查种植策略失败: " + errText(e));
+          return;
         });
       });
     })
@@ -12906,8 +13124,9 @@ function main() {
     })
     .catch(function (e) {
       if (e === STOP_SIGNAL) return;
-      log("❌ 异常: " + e);
-      notify("🌾 QQ 农牧场助手", "❌ 运行失败", String(e));
+      var msg = errText(e);
+      log("❌ 异常: " + msg);
+      notify("🌾 QQ 农牧场助手", "❌ 运行失败", msg);
       bannerEnd();
     });
 }
