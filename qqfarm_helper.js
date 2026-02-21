@@ -47,6 +47,11 @@ var CONFIG = {
   FARM_JSON_BASE: "https://nc.qzone.qq.com",
   FARM_JSON_ENABLE: true,
   FARM_JSON_FALLBACK_WAP: true,
+  // JSON 成功后仍跑一次 WAP 维护(除草/除虫/浇水)做对账，修正 JSON 与端游状态口径差异
+  FARM_JSON_WAP_MAINT_RECHECK: true,
+  // 清理后执行 JSON+WAP 双口径复查；仍有残留时可触发一次补打
+  FARM_JSON_WAP_MAINT_POSTCHECK: true,
+  FARM_JSON_WAP_MAINT_POSTCHECK_RETRY: 1,
   FARM_JSON_MAX_PASS: 2,
   // 仅观察(新接口判定)：只拉取/输出 JSON 状态与任务计划，不执行任何农场动作（含 WAP 维护）
   // 用于排查“手游显示待收获，但脚本不动/状态不一致”等问题。
@@ -286,7 +291,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.20-r31";
+var SCRIPT_REV = "2026.02.21-r32";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -10371,7 +10376,7 @@ function extractFarmOptParams(html) {
 
 function buildFarmOptFallback(html) {
   var params = extractFarmOptParams(html);
-  if (!params || !params.places || params.places.length === 0) return {};
+  if (!params) return {};
   var B_UID = params.B_UID;
   if ((!B_UID || B_UID === "0") && LAST_RANCH && LAST_RANCH.B_UID) {
     B_UID = LAST_RANCH.B_UID;
@@ -10379,7 +10384,14 @@ function buildFarmOptFallback(html) {
   if (!B_UID) return {};
   var money = params.money || "0";
   var time = params.time || "-2147483648";
-  var placeStr = params.places.join(",");
+  var places = (params.places || []).slice(0);
+  if (!places.length) {
+    var cnt = getFarmLandCount();
+    if (cnt <= 0) cnt = 24;
+    for (var i = 0; i < cnt; i++) places.push(String(i));
+  }
+  if (!places.length) return {};
+  var placeStr = places.join(",");
   var sid = CONFIG.RANCH_SID;
   var g_ut = getFarmGut();
   return {
@@ -10778,6 +10790,186 @@ function runFarmWap(cookie, opts) {
   return loop(0, "");
 }
 
+function summarizeFarmJsonMaintTodo(farm) {
+  var out = {
+    total: 0,
+    locked: 0,
+    clearWeed: 0,
+    spraying: 0,
+    water: 0,
+    places: { clearWeed: [], spraying: [], water: [] }
+  };
+  if (!isFarmJson(farm)) return out;
+  var list = ensureArray(farm.farmlandStatus);
+  for (var i = 0; i < list.length; i++) {
+    var land = list[i];
+    if (!land) continue;
+    out.total += 1;
+    var lockReason = landLockReason(land);
+    if (lockReason) {
+      out.locked += 1;
+      continue;
+    }
+    var idx = String(i);
+    if (CONFIG.ENABLE.clearWeed && Number(land.f || 0) > 0) {
+      out.clearWeed += 1;
+      out.places.clearWeed.push(idx);
+    }
+    if (CONFIG.ENABLE.spraying && Number(land.g || 0) > 0) {
+      out.spraying += 1;
+      out.places.spraying.push(idx);
+    }
+    if (CONFIG.ENABLE.water && Number(land.h || 0) === 0) {
+      out.water += 1;
+      out.places.water.push(idx);
+    }
+  }
+  return out;
+}
+
+function countFarmWapMaintPlaces(links, key) {
+  var list = (links && links[key]) || [];
+  var total = 0;
+  for (var i = 0; i < list.length; i++) {
+    var n = countParamList(list[i], "place") || countParamList(list[i], "landid") || 1;
+    total += n;
+  }
+  return total;
+}
+
+function fetchFarmWapMaintTodo(cookie) {
+  var base = CONFIG.FARM_WAP_BASE;
+  var sid = CONFIG.RANCH_SID;
+  var g_ut = getFarmGut();
+  var statusUrl = base + "/nc/cgi-bin/wap_farm_status_list?sid=" + sid + "&g_ut=" + g_ut + "&page=0";
+  var indexUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut;
+  var merged = { clearWeed: [], spraying: [], water: [] };
+  var touched = false;
+
+  function mergeFromHtml(html) {
+    if (!html) return;
+    touched = true;
+    var links = extractFarmWapLinks(html);
+    merged.clearWeed = uniqLinks(merged.clearWeed.concat(links.clearWeed || []));
+    merged.spraying = uniqLinks(merged.spraying.concat(links.spraying || []));
+    merged.water = uniqLinks(merged.water.concat(links.water || []));
+  }
+
+  return ranchGet(statusUrl, cookie)
+    .then(function (html) {
+      mergeFromHtml(html);
+    })
+    .catch(function () {})
+    .then(function () {
+      return ranchGet(indexUrl, cookie)
+        .then(function (html2) {
+          mergeFromHtml(html2);
+        })
+        .catch(function () {});
+    })
+    .then(function () {
+      return {
+        ok: touched,
+        clearWeed: countFarmWapMaintPlaces(merged, "clearWeed"),
+        spraying: countFarmWapMaintPlaces(merged, "spraying"),
+        water: countFarmWapMaintPlaces(merged, "water"),
+        links: merged
+      };
+    });
+}
+
+function formatFarmMaintTriplet(todo) {
+  if (!todo) return "草? 虫? 水?";
+  return "草" + Number(todo.clearWeed || 0) + " 虫" + Number(todo.spraying || 0) + " 水" + Number(todo.water || 0);
+}
+
+function formatFarmMaintPlaces(places) {
+  if (!places || !places.length) return "-";
+  var show = places.slice(0, 10).map(function (it) {
+    return String(Number(it) + 1);
+  });
+  if (places.length > 10) show.push("...+" + (places.length - 10));
+  return show.join(",");
+}
+
+function probeFarmMaintDual(cookie, tag) {
+  var jsonBase = CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
+  var uin = getFarmUin(cookie);
+  var jsonP = fetchFarmJson(jsonBase, cookie, uin)
+    .then(function (farm) {
+      if (!isFarmJson(farm)) return { ok: false, todo: null };
+      applyFarmLockHeuristicGuard(farm, "maint-recheck-" + tag);
+      return { ok: true, todo: summarizeFarmJsonMaintTodo(farm) };
+    })
+    .catch(function () {
+      return { ok: false, todo: null };
+    });
+  var wapP = fetchFarmWapMaintTodo(cookie).catch(function () {
+    return { ok: false, clearWeed: 0, spraying: 0, water: 0, links: { clearWeed: [], spraying: [], water: [] } };
+  });
+  return Promise.all([jsonP, wapP]).then(function (arr) {
+    var jsonRet = arr[0] || { ok: false, todo: null };
+    var wapRet = arr[1] || { ok: false, clearWeed: 0, spraying: 0, water: 0 };
+    var jsonMsg = jsonRet.ok ? formatFarmMaintTriplet(jsonRet.todo) : "探测失败";
+    var wapMsg = wapRet.ok ? formatFarmMaintTriplet(wapRet) : "探测失败";
+    log("🧪 维护复查(" + tag + "): JSON " + jsonMsg + " | WAP " + wapMsg);
+    if (CONFIG.DEBUG && jsonRet.ok && jsonRet.todo && jsonRet.todo.places) {
+      logDebug(
+        "🧪 维护复查(JSON地块): 草[" +
+          formatFarmMaintPlaces(jsonRet.todo.places.clearWeed) +
+          "] 虫[" +
+          formatFarmMaintPlaces(jsonRet.todo.places.spraying) +
+          "] 水[" +
+          formatFarmMaintPlaces(jsonRet.todo.places.water) +
+          "]"
+      );
+    }
+    var jsonPending =
+      !!(jsonRet.ok && jsonRet.todo && (jsonRet.todo.clearWeed > 0 || jsonRet.todo.spraying > 0 || jsonRet.todo.water > 0));
+    var wapPending = !!(wapRet.ok && (wapRet.clearWeed > 0 || wapRet.spraying > 0 || wapRet.water > 0));
+    return {
+      jsonOk: !!jsonRet.ok,
+      wapOk: !!wapRet.ok,
+      jsonPending: jsonPending,
+      wapPending: wapPending,
+      pending: jsonPending || wapPending
+    };
+  });
+}
+
+function runFarmMaintPostcheck(cookie) {
+  if (CONFIG.FARM_JSON_WAP_MAINT_POSTCHECK === false) return Promise.resolve();
+  var maxRetry = Number(CONFIG.FARM_JSON_WAP_MAINT_POSTCHECK_RETRY || 0);
+  if (isNaN(maxRetry) || maxRetry < 0) maxRetry = 0;
+
+  function loop(round) {
+    var tag = round === 0 ? "首轮" : "补打" + round;
+    return probeFarmMaintDual(cookie, tag).then(function (probe) {
+      if (!probe || !probe.pending) return;
+      if (round >= maxRetry) {
+        logDebug("🧪 维护复查: 达到补打上限" + maxRetry + "，停止");
+        return;
+      }
+      log(
+        "⚠️ 维护复查: 仍有待处理(JSON" +
+          (probe.jsonPending ? "有" : "无") +
+          "/WAP" +
+          (probe.wapPending ? "有" : "无") +
+          ")，执行WAP补打"
+      );
+      return runFarmWap(cookie, { skipHarvest: true, skipScarify: true, skipPlant: true })
+        .catch(function (e) {
+          log("⚠️ 维护复查补打失败: " + e);
+        })
+        .then(function () {
+          return loop(round + 1);
+        });
+    });
+  }
+
+  return loop(0);
+}
+
 function runFarmAuto(cookie) {
   if (!CONFIG.FARM_JSON_ENABLE) return runFarmWap(cookie);
   return runFarmJson(cookie)
@@ -10785,28 +10977,53 @@ function runFarmAuto(cookie) {
       var jsonOk = res && res.ok;
       if (jsonOk) {
         if (CONFIG.FARM_JSON_OBSERVE_ONLY) return res;
-        // JSON 已精确处理地块动作，WAP 仅用于页面级同步，不再重复维护动作。
-        return runFarmWap(cookie, {
-          skipHarvest: true,
-          skipScarify: true,
-          skipPlant: true,
-          skipClearWeed: true,
-          skipSpraying: true,
-          skipWater: true
-        }).then(
+        var keepWapMaint = CONFIG.FARM_JSON_WAP_MAINT_RECHECK !== false;
+        // JSON 与端游口径偶发不一致；默认保留一次 WAP 维护对账。
+        return runFarmWap(
+          cookie,
+          keepWapMaint
+            ? {
+                skipHarvest: true,
+                skipScarify: true,
+                skipPlant: true
+              }
+            : {
+                skipHarvest: true,
+                skipScarify: true,
+                skipPlant: true,
+                skipClearWeed: true,
+                skipSpraying: true,
+                skipWater: true
+              }
+        ).then(
           function () {
-            return res;
+            if (!keepWapMaint) return;
+            return runFarmMaintPostcheck(cookie);
           }
-        );
+        ).then(function () {
+          return res;
+        });
       }
       if (!CONFIG.FARM_JSON_FALLBACK_WAP) return res;
       log("⚠️ JSON 模式失败，仅回退 WAP 维护(除草/除虫/浇水)，跳过收获/铲除/播种");
-      return runFarmWap(cookie, { skipHarvest: true, skipScarify: true, skipPlant: true });
+      return runFarmWap(cookie, { skipHarvest: true, skipScarify: true, skipPlant: true })
+        .then(function () {
+          return runFarmMaintPostcheck(cookie);
+        })
+        .then(function () {
+          return res;
+        });
     })
     .catch(function (e) {
       if (!CONFIG.FARM_JSON_FALLBACK_WAP) return Promise.reject(e);
       log("⚠️ JSON 模式异常，仅回退 WAP 维护(除草/除虫/浇水)，跳过收获/铲除/播种");
-      return runFarmWap(cookie, { skipHarvest: true, skipScarify: true, skipPlant: true });
+      return runFarmWap(cookie, { skipHarvest: true, skipScarify: true, skipPlant: true })
+        .then(function () {
+          return runFarmMaintPostcheck(cookie);
+        })
+        .then(function () {
+          return { ok: false, reason: "farm json exception", error: String(e || "") };
+        });
     });
 }
 
