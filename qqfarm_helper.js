@@ -162,8 +162,8 @@ var CONFIG = {
   FARM_EVENT_BULING_AUTO_CLAIM: true, // 奖励补领有可领时自动领取
   FARM_EVENT_BULING_MAX_LOOP: 5, // 奖励补领复查轮次上限
   FARM_EVENT_WISH_ENABLE: true, // /cgi_farm_wish_*
-  FARM_EVENT_WISH_AUTO_STAR: false, // 自动领取 starlist 中可领星奖（默认关闭）
-  FARM_EVENT_WISH_AUTO_HELP: false, // 自动执行一次 wish_help（默认关闭）
+  FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
+  FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
   FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
 
@@ -180,6 +180,11 @@ var CONFIG = {
   TIME_FARM_FERTILIZE_ENABLE: false, // 默认关闭，避免日常误消耗化肥
   TIME_FARM_FERT_TOOLID: "1",
   TIME_FARM_TASK_AUTO_CLAIM: true, // 时光任务达成后自动领奖（taskid）
+  TIME_FARM_TASK_NAME_MAP: {
+    // 时光任务名称映射（按任务面板可见文案自行维护，key=taskid）
+    // "4": "收获时光作物",
+    // "7": "连续签到"
+  },
   TIME_FARM_TASK_TARGET_HINTS: {
     // 仅用于“状态仍为进行中但进度已达标”的补判，门槛可按个人任务面板补齐
     "3": 10,
@@ -6970,9 +6975,14 @@ function farmEventSummaryLine() {
   var parts = [];
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
   parts.push("补领" + FARM_EVENT_STATS.bulingClaim);
+  if (FARM_EVENT_STATS.wishStatus >= 0) {
+    parts.push("许愿领奖" + FARM_EVENT_STATS.wishStarClaim);
+    parts.push("许愿助力" + FARM_EVENT_STATS.wishHelp);
+  }
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动忙" + FARM_EVENT_STATS.busy);
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
   if (FARM_EVENT_STATS.bulingReward) parts.push("补领奖励[" + FARM_EVENT_STATS.bulingReward + "]");
+  if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   return parts.join(" ");
 }
 
@@ -6980,9 +6990,12 @@ function farmEventChangeLine() {
   var parts = [];
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
   if (FARM_EVENT_STATS.bulingClaim > 0) parts.push("补领+" + FARM_EVENT_STATS.bulingClaim);
+  if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
+  if (FARM_EVENT_STATS.wishHelp > 0) parts.push("许愿助力+" + FARM_EVENT_STATS.wishHelp);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动繁忙" + FARM_EVENT_STATS.busy + "次");
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
   if (FARM_EVENT_STATS.bulingReward) parts.push("补领奖励[" + FARM_EVENT_STATS.bulingReward + "]");
+  if (FARM_EVENT_STATS.wishReward) parts.push("许愿奖励[" + FARM_EVENT_STATS.wishReward + "]");
   if (!parts.length) return "活动无领取";
   return parts.join("；");
 }
@@ -9481,16 +9494,44 @@ function formatBulingReward(json, id) {
   return "";
 }
 
+function wishRemainingSec(ts) {
+  var n = Number(ts || 0);
+  if (!n || isNaN(n) || n < 1000000000) return 0;
+  var wait = n - getFarmTime();
+  return wait > 0 ? wait : 0;
+}
+
+function formatWishCooldown(state) {
+  if (!state) return "";
+  var parts = [];
+  if (state.freeWaitSec > 0) parts.push("免费星" + formatWaitSec(state.freeWaitSec));
+  if (state.selfWaitSec > 0) parts.push("自助" + formatWaitSec(state.selfWaitSec));
+  if (state.starWaitSec > 0) parts.push("点星" + formatWaitSec(state.starWaitSec));
+  if (!parts.length) return "冷却无";
+  return "冷却[" + parts.join("；") + "]";
+}
+
 function parseWishState(json) {
   if (!isFarmEventOk(json)) return null;
   var starlist = ensureArray(json.starlist);
+  var freeStarTime = Number(json.freeStarTime || json.free_star_time || 0) || 0;
+  var selfLastTime = Number(json.self_lasttime || json.selfLastTime || 0) || 0;
+  var starTs = Number(json.star_ts || json.starTs || 0) || 0;
   return {
     open: Number(json.open || 0) || 0,
     status: Number(json.status || 0) || 0,
     self: Number(json.self || 0) || 0,
     vstar: Number(json.vstar || 0) || 0,
+    costStar: Number(json.cost_star || json.costStar || 0) || 0,
+    allStarsTimes: Number(json.allStarsTimes || 0) || 0,
     wNum: Number(json.w_num || 0) || 0,
     grow: Number(json.grow || 0) || 0,
+    freeStarTime: freeStarTime,
+    selfLastTime: selfLastTime,
+    starTs: starTs,
+    freeWaitSec: wishRemainingSec(freeStarTime),
+    selfWaitSec: wishRemainingSec(selfLastTime),
+    starWaitSec: wishRemainingSec(starTs),
     starlist: starlist
   };
 }
@@ -9795,8 +9836,12 @@ function runFarmEvents(cookie) {
               state.self +
               " 星值" +
               state.vstar +
+              " 单次耗星" +
+              state.costStar +
               " 待领奖" +
-              state.starlist.length
+              state.starlist.length +
+              " " +
+              formatWishCooldown(state)
           );
         } else {
           FARM_EVENT_STATS.wishStatus = state.status;
@@ -9812,8 +9857,12 @@ function runFarmEvents(cookie) {
                 state.self +
                 " 星值" +
                 state.vstar +
+                " 单次耗星" +
+                state.costStar +
                 " 待领奖" +
-                state.starlist.length
+                state.starlist.length +
+                " " +
+                formatWishCooldown(state)
             );
           }
         }
@@ -13630,7 +13679,8 @@ function parseTimeFarmTasks(json) {
     if (isNaN(count) || count < 0) count = 0;
     var status = Number(it.status);
     if (isNaN(status) || status < 0) status = 0;
-    out.push({ id: id, count: Math.floor(count), status: Math.floor(status) });
+    var name = normalizeSpace(it.name || it.task_name || it.taskName || it.title || it.desc || "");
+    out.push({ id: id, count: Math.floor(count), status: Math.floor(status), name: name });
   }
   out.sort(function (a, b) {
     return a.id - b.id;
@@ -13655,20 +13705,42 @@ function timeFarmTaskStatusText(status) {
   return "状态" + s;
 }
 
+function getTimeFarmTaskName(taskOrId) {
+  var id = 0;
+  var rawName = "";
+  if (taskOrId && typeof taskOrId === "object") {
+    id = Number(taskOrId.id || taskOrId.taskid || 0);
+    rawName = normalizeSpace(taskOrId.name || taskOrId.task_name || taskOrId.taskName || taskOrId.title || "");
+  } else {
+    id = Number(taskOrId || 0);
+  }
+  if (rawName) return rawName;
+  var hints = (CONFIG && CONFIG.TIME_FARM_TASK_NAME_MAP) || {};
+  var key = String(id || 0);
+  var mapped = normalizeSpace(hints[key] != null ? hints[key] : hints[id]);
+  if (mapped) return mapped;
+  return id > 0 ? "任务#" + id : "任务";
+}
+
+function formatTimeFarmTaskItem(task) {
+  var it = task || {};
+  var id = Number(it.id || it.taskid || 0);
+  if (!id || isNaN(id) || id <= 0) return "";
+  var count = Number(it.count || it.num || 0);
+  if (isNaN(count) || count < 0) count = 0;
+  var need = timeFarmTaskNeedHint(id);
+  var status = Number(it.status || 0);
+  var progress = need > 0 ? count + "/" + need : String(count);
+  return getTimeFarmTaskName(it) + "(T" + id + ") " + progress + " " + timeFarmTaskStatusText(status);
+}
+
 function formatTimeFarmTasks(tasks) {
   var arr = ensureArray(tasks);
   if (!arr.length) return "";
   var parts = [];
   for (var i = 0; i < arr.length; i++) {
-    var it = arr[i] || {};
-    var id = Number(it.id || 0);
-    if (!id || isNaN(id) || id <= 0) continue;
-    var count = Number(it.count || 0);
-    if (isNaN(count) || count < 0) count = 0;
-    var need = timeFarmTaskNeedHint(id);
-    var status = Number(it.status || 0);
-    var progress = need > 0 ? count + "/" + need : String(count);
-    parts.push("T" + id + " " + progress + " " + timeFarmTaskStatusText(status));
+    var text = formatTimeFarmTaskItem(arr[i]);
+    if (text) parts.push(text);
   }
   return parts.join("；");
 }
@@ -13918,16 +13990,19 @@ function runTimeFarm(cookie) {
       if (!id || isNaN(id) || id <= 0) continue;
       if (claimedTaskIds[id]) continue;
       if (!isTimeFarmTaskClaimable(task)) continue;
-      candidates.push({ id: id, count: Number(task.count || 0), status: Number(task.status || 0) });
+      candidates.push({
+        id: id,
+        count: Number(task.count || 0),
+        status: Number(task.status || 0),
+        name: normalizeSpace(task.name || "")
+      });
     }
     if (!candidates.length) return Promise.resolve(false);
     if (CONFIG.DEBUG) {
       var parts = [];
       for (var p = 0; p < candidates.length; p++) {
         var task0 = candidates[p];
-        var need0 = timeFarmTaskNeedHint(task0.id);
-        var prog0 = need0 > 0 ? task0.count + "/" + need0 : String(task0.count);
-        parts.push("T" + task0.id + " " + prog0 + " " + timeFarmTaskStatusText(task0.status));
+        parts.push(formatTimeFarmTaskItem(task0));
       }
       logDebug("🕰️ 时光任务待领奖: " + parts.join("；"));
     }
@@ -13946,28 +14021,29 @@ function runTimeFarm(cookie) {
           claimedAny = true;
           TIME_FARM_STATS.taskClaim += 1;
           var reward = formatFarmEventPkg(json.pkg);
+          var taskTag = getTimeFarmTaskName(task) + "(T" + task.id + ")";
           if (reward) {
             TIME_FARM_STATS.taskReward = mergeRewardText(TIME_FARM_STATS.taskReward, reward);
-            log("🕰️ 时光任务领奖(T" + task.id + "): " + reward);
+            log("🕰️ 时光任务领奖(" + taskTag + "): " + reward);
           } else {
-            log("🕰️ 时光任务领奖(T" + task.id + "): 成功");
+            log("🕰️ 时光任务领奖(" + taskTag + "): 成功");
           }
           return;
         }
         var msg = timeFarmErrMsg(json);
         if (isTransientFailText(msg) && retry < transientRetries) {
-          log("⚠️ 时光任务领奖繁忙(T" + task.id + ")，第" + (retry + 1) + "次重试");
+          log("⚠️ 时光任务领奖繁忙(" + getTimeFarmTaskName(task) + "/T" + task.id + ")，第" + (retry + 1) + "次重试");
           return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
             return claimOne(task, retry + 1);
           });
         }
         if (isTimeFarmNoop(json) || /已领|已领取|领取过|未完成|条件不足|无可领|不可领取|不能领取/.test(msg)) {
           if (/已领|已领取|领取过/.test(msg)) claimedTaskIds[task.id] = true;
-          if (CONFIG.DEBUG) logDebug("🕰️ 时光任务领奖(T" + task.id + "): 无需执行(" + msg + ")");
+          if (CONFIG.DEBUG) logDebug("🕰️ 时光任务领奖(" + getTimeFarmTaskName(task) + "/T" + task.id + "): 无需执行(" + msg + ")");
           return;
         }
         TIME_FARM_STATS.errors += 1;
-        log("⚠️ 时光任务领奖失败(T" + task.id + "): " + msg);
+        log("⚠️ 时光任务领奖失败(" + getTimeFarmTaskName(task) + "/T" + task.id + "): " + msg);
       });
     }
 
