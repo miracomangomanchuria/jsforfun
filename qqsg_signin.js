@@ -586,22 +586,167 @@ function checkLoginField(cookie) {
   };
 }
 
+function parseRoleProfile(roleRes) {
+  const data =
+    (roleRes &&
+      roleRes.modRet &&
+      roleRes.modRet.jData &&
+      roleRes.modRet.jData.data &&
+      typeof roleRes.modRet.jData.data === 'object' &&
+      roleRes.modRet.jData.data) ||
+    {};
+  return {
+    openid: '',
+    openId: '',
+    uin: normalizeUin(decodeMaybe(data.Fuin || '', 2)),
+    nickName: decodeMaybe(data.FnickName || '', 2),
+    areaId: decodeMaybe(data.Farea || data.FPartition || '', 2),
+    areaName: decodeMaybe(data.FareaName || '', 2),
+    roleId: decodeMaybe(data.FroleId || '', 2),
+    roleName: decodeMaybe(data.FroleName || '', 2),
+    roleLevel: decodeMaybe(data.FroleLevel || '', 2),
+    partition: decodeMaybe(data.FPartition || '', 2),
+    platId: decodeMaybe(data.FplatId || '', 2),
+  };
+}
+
+function buildProfileFromCookie(cookie) {
+  const map = parseCookieMap(cookie);
+  const iedRaw = map.IED_LOG_INFO_NEW || '';
+  const ied = parseIEDLogInfo(iedRaw);
+  return {
+    openid: map.openid || ied.openid || '',
+    openId: map.openId || '',
+    uin: normalizeUin(map.uin || map.newuin || ied.uin || ''),
+    nickName: decodeMaybe(map.nickName || ied.nickName || '', 2),
+    areaId: '',
+    areaName: '',
+    roleId: '',
+    roleName: '',
+    roleLevel: '',
+    partition: '',
+    platId: '',
+  };
+}
+
+function parseIEDLogInfo(raw) {
+  const out = {};
+  if (!raw) return out;
+  const text = decodeMaybe(raw, 2);
+  const obj = parseFormBody(text);
+  if (obj.openid) out.openid = decodeMaybe(obj.openid, 2);
+  if (obj.uin) out.uin = normalizeUin(decodeMaybe(obj.uin, 2));
+  if (obj.nickName) out.nickName = decodeMaybe(obj.nickName, 2);
+  return out;
+}
+
+function decodeMaybe(value, maxDepth) {
+  let out = String(value || '').trim();
+  if (!out) return '';
+  const depth = typeof maxDepth === 'number' ? maxDepth : 2;
+  for (let i = 0; i < depth; i++) {
+    const decoded = safeDecode(out.replace(/\+/g, '%20'));
+    if (!decoded || decoded === out) break;
+    out = decoded;
+  }
+  return out;
+}
+
+function normalizeUin(v) {
+  const x = String(v || '').trim();
+  if (!x) return '';
+  return x.replace(/^o0*/i, '');
+}
+
+function mergeProfile(base, next) {
+  const b = base || {};
+  const n = next || {};
+  const keys = [
+    'openid',
+    'openId',
+    'uin',
+    'nickName',
+    'areaId',
+    'areaName',
+    'roleId',
+    'roleName',
+    'roleLevel',
+    'partition',
+    'platId',
+  ];
+  const out = {};
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    out[k] = n[k] || b[k] || '';
+  }
+  return out;
+}
+
+function formatAccountLine(profile, fallbackId) {
+  const p = profile || {};
+  const account = p.uin || p.openid || p.openId || fallbackId || '未知';
+  const nick = p.nickName || '未获取';
+  const parts = ['账号=' + account, '昵称=' + nick];
+  if (p.openid) parts.push('openid=' + shortId(p.openid));
+  return parts.join(' | ');
+}
+
+function formatRoleLine(profile) {
+  const p = profile || {};
+  const area = p.areaName || p.areaId || '未获取';
+  const role = p.roleName || p.roleId || '未获取';
+  const parts = ['大区=' + area, '角色=' + role];
+  if (p.roleLevel) parts.push('等级=' + p.roleLevel);
+  return parts.join(' | ');
+}
+
+function buildSummaryAccountPrefix(index, profile, fallbackId) {
+  const p = profile || {};
+  const account = p.uin || p.openid || p.openId || fallbackId || '未知';
+  const nick = p.nickName || '未知昵称';
+  const area = p.areaName || p.areaId || '未知大区';
+  const role = p.roleName || p.roleId || '未知角色';
+  return (
+    '账号' +
+    index +
+    '(账号:' +
+    account +
+    ' 昵称:' +
+    nick +
+    ' 大区:' +
+    area +
+    ' 角色:' +
+    role +
+    ')'
+  );
+}
+
+function shortId(v) {
+  const s = String(v || '');
+  if (s.length <= 12) return s;
+  return s.slice(0, 8) + '...' + s.slice(-4);
+}
+
 async function runAccount(cookie, index, total) {
   const normalizedCookie = normalizeQQSGCookie(cookie);
   const ua = $.getdata(CFG.uaKey) || CFG.userAgent;
   const rcfg = getRuntimeCfg();
   const openid = getCookieVal(normalizedCookie, 'openid');
   const uin = getCookieVal(normalizedCookie, 'uin');
-  const showId = openid ? openid.slice(0, 8) + '...' : uin || '未知';
+  const showId = uin || (openid ? openid.slice(0, 8) + '...' : '未知');
   const headers = buildHeaders(normalizedCookie, ua);
+  let profile = mergeProfile(buildProfileFromCookie(normalizedCookie), {});
 
   $.log('\n🧾 ===== 账号 ' + index + '/' + total + ' =====');
-  $.log('👤 账号标识: ' + showId);
+  $.log('👤 账号信息: ' + formatAccountLine(profile, showId));
+  $.log('🎮 角色信息: ' + formatRoleLine(profile));
 
   const loginCheck = checkLoginField(normalizedCookie);
   if (!loginCheck.ok) {
     $.log('❌ Cookie 登录字段不足: ' + loginCheck.msg);
-    summaries.push('账号' + index + '(' + showId + '): ❌ Cookie字段不足 - ' + loginCheck.msg);
+    summaries.push(
+      buildSummaryAccountPrefix(index, profile, showId) + ': ❌ Cookie字段不足 - ' + loginCheck.msg
+    );
     return;
   }
   const gtk = getGtk(normalizedCookie);
@@ -617,8 +762,12 @@ async function runAccount(cookie, index, total) {
     if (!isRoleOk(roleRes)) {
       const roleMsg = getRespMsg(roleRes) || '角色查询失败';
       $.log('⚠️ 角色查询异常: ' + roleMsg);
-    } else if (CFG.debug) {
+    } else {
+      const roleProfile = parseRoleProfile(roleRes);
+      profile = mergeProfile(profile, roleProfile);
       $.log('✅ 角色查询成功');
+      $.log('👤 账号信息: ' + formatAccountLine(profile, showId));
+      $.log('🎮 角色信息: ' + formatRoleLine(profile));
     }
   } else {
     $.log('⚠️ 缺少 skey/p_skey，跳过角色预查询，直接尝试状态查询');
@@ -630,7 +779,7 @@ async function runAccount(cookie, index, total) {
   if (queryIRet !== 0) {
     const qMsg = getRespMsg(queryRes) || '查询状态失败';
     $.log('❌ 签到状态查询失败: ' + qMsg);
-    summaries.push('账号' + index + '(' + showId + '): ❌ 状态查询失败 - ' + qMsg);
+    summaries.push(buildSummaryAccountPrefix(index, profile, showId) + ': ❌ 状态查询失败 - ' + qMsg);
     return;
   }
 
@@ -642,11 +791,8 @@ async function runAccount(cookie, index, total) {
   if (signState === null) {
     $.log('⚠️ 状态字段不足：未发现 hold.sign 的有效字段，停止执行以避免误签到');
     summaries.push(
-      '账号' +
-        index +
-        '(' +
-        showId +
-        '): ⚠️ 状态不可判定，已停止执行（避免盲目签到）' +
+      buildSummaryAccountPrefix(index, profile, showId) +
+        ': ⚠️ 状态不可判定，已停止执行（避免盲目签到）' +
         (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
     );
     return;
@@ -674,17 +820,15 @@ async function runAccount(cookie, index, total) {
       byQuery: true,
       queryRes: queryRes,
     });
+    const notifyRewardText = formatRewardForNotify(rewardText);
     $.log('✅ 今日已签到');
     $.log('🎁 今日奖励: ' + rewardText);
     summaries.push(
-      '账号' +
-        index +
-        '(' +
-        showId +
-        '): ✅ 已签到 | 累签' +
+      buildSummaryAccountPrefix(index, profile, showId) +
+        ': ✅ 已签到 | 累签' +
         (queryDays >= 0 ? queryDays : '?') +
-        '天 | 奖励:' +
-        rewardText
+        '天' +
+        (notifyRewardText ? ' | 奖励:' + notifyRewardText : '')
     );
     return;
   }
@@ -715,29 +859,24 @@ async function runAccount(cookie, index, total) {
       byQuery: false,
       queryRes: queryRes,
     });
+    const notifyRewardText = formatRewardForNotify(rewardText);
     $.log('✅ 签到成功: ' + signMsg);
     if (finalDays >= 0) $.log('📅 本月累计签到: ' + finalDays + ' 天');
     $.log('🎁 今日奖励: ' + rewardText);
     summaries.push(
-      '账号' +
-        index +
-        '(' +
-        showId +
-        '): ✅ 签到成功 | 累签' +
+      buildSummaryAccountPrefix(index, profile, showId) +
+        ': ✅ 签到成功 | 累签' +
         (finalDays >= 0 ? finalDays : '?') +
-        '天 | 奖励:' +
-        rewardText +
+        '天' +
+        (notifyRewardText ? ' | 奖励:' + notifyRewardText : '') +
         ' | ' +
         signMsg
     );
   } else {
     $.log('❌ 签到失败: ' + signMsg);
     summaries.push(
-      '账号' +
-        index +
-        '(' +
-        showId +
-        '): ❌ 签到失败 - ' +
+      buildSummaryAccountPrefix(index, profile, showId) +
+        ': ❌ 签到失败 - ' +
         signMsg +
         (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
     );
@@ -911,6 +1050,52 @@ function hasMilestoneDay(hold, day) {
   return !!(hold && Object.prototype.hasOwnProperty.call(hold, 'day' + day));
 }
 
+function hasNameHintKey(key) {
+  return /(name|package|reward|award|prize|gift|item|goods|title|desc|礼包|奖励|奖品|道具)/i.test(
+    String(key || '')
+  );
+}
+
+function isUsefulRewardText(v) {
+  const s = String(v || '').trim();
+  if (!s) return false;
+  if (/^(succ|ok|null|undefined|none)$/i.test(s)) return false;
+  if (/^\d+$/.test(s)) return false;
+  if (/^https?:\/\//i.test(s)) return false;
+  if (s.length > 96) return false;
+  return true;
+}
+
+function collectRewardNameCandidates(node, out, depth) {
+  if (!node || depth > 4) return;
+  if (Array.isArray(node)) {
+    for (let i = 0; i < node.length; i++) {
+      collectRewardNameCandidates(node[i], out, depth + 1);
+    }
+    return;
+  }
+  if (typeof node !== 'object') return;
+  const keys = Object.keys(node);
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const val = node[k];
+    if (typeof val === 'string' && hasNameHintKey(k)) {
+      const txt = decodeMaybe(val, 2);
+      if (isUsefulRewardText(txt)) out.push(txt);
+    }
+    if (val && typeof val === 'object') {
+      collectRewardNameCandidates(val, out, depth + 1);
+    }
+  }
+}
+
+function getMilestoneRewardName(item) {
+  const candidates = [];
+  collectRewardNameCandidates(item || {}, candidates, 0);
+  if (!candidates.length) return '';
+  return candidates[0];
+}
+
 function getMilestoneStateText(obj) {
   const hold = getHoldMap(obj);
   const days = getMilestoneDaysFromHold(hold);
@@ -921,7 +1106,8 @@ function getMilestoneStateText(obj) {
     const day = days[i];
     const item = hold['day' + day] || {};
     const used = toInt(item.iUsedNum, 0);
-    out.push(day + '天' + (used > 0 ? '已领' : '未领'));
+    const rewardName = getMilestoneRewardName(item) || '奖励名未返回';
+    out.push(day + '天' + (used > 0 ? '已领' : '未领') + '(奖励:' + rewardName + ')');
   }
   return out.join(' ');
 }
@@ -945,12 +1131,38 @@ function buildRewardText(opts) {
   if (signDays > 0 && hasMilestoneDay(hold, signDays)) {
     const item = hold['day' + signDays] || {};
     const used = toInt(item.iUsedNum, 0);
-    if (byQuery) return '第' + signDays + '天奖励' + (used > 0 ? '（已领取）' : '（待领取）');
-    return '第' + signDays + '天奖励';
+    const rewardName = getMilestoneRewardName(item) || '奖励名未返回';
+    if (byQuery) {
+      return (
+        '第' + signDays + '天奖励:' + rewardName + (used > 0 ? '（已领取）' : '（待领取）')
+      );
+    }
+    return '第' + signDays + '天奖励:' + rewardName;
   }
 
   if (signDays > 0 && hasMilestoneInfo) return '无（非奖励日）';
   return byQuery ? '已签到（奖励信息未返回）' : '无（未返回奖励信息）';
+}
+
+function formatRewardForNotify(rewardText) {
+  const raw = String(rewardText || '').trim();
+  if (!raw) return '';
+  if (raw === '无（非奖励日）') return raw;
+  if (!/奖励名未返回|未返回奖励信息|名称未返回/.test(raw)) return raw;
+
+  let concise = raw
+    .replace(/奖励名未返回/g, '')
+    .replace(/（名称未返回）/g, '')
+    .replace(/（未返回奖励信息）/g, '')
+    .replace(/未返回奖励信息/g, '')
+    .replace(/:\s*$/g, '')
+    .replace(/：\s*$/g, '')
+    .replace(/（\s*）/g, '')
+    .trim();
+
+  if (!concise) return '';
+  if (concise === '已签到' || concise === '无') return '';
+  return concise;
 }
 
 function getRespMsg(obj) {
