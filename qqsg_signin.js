@@ -684,41 +684,40 @@ function mergeProfile(base, next) {
 
 function formatAccountLine(profile, fallbackId) {
   const p = profile || {};
-  const account = p.uin || p.openid || p.openId || fallbackId || '未知';
-  const nick = p.nickName || '未获取';
-  const parts = ['账号=' + account, '昵称=' + nick];
-  if (p.openid) parts.push('openid=' + shortId(p.openid));
+  const account = p.uin || p.openid || p.openId || fallbackId || '';
+  const parts = [];
+  if (account) parts.push('👤账号=' + account);
+  if (p.nickName) parts.push('📝昵称=' + p.nickName);
+  if (p.openid) parts.push('🪪openid=' + shortId(p.openid));
+  if (!parts.length) return '账号信息未返回';
   return parts.join(' | ');
 }
 
 function formatRoleLine(profile) {
   const p = profile || {};
-  const area = p.areaName || p.areaId || '未获取';
-  const role = p.roleName || p.roleId || '未获取';
-  const parts = ['大区=' + area, '角色=' + role];
-  if (p.roleLevel) parts.push('等级=' + p.roleLevel);
+  const area = p.areaName || p.areaId || '';
+  const role = p.roleName || p.roleId || '';
+  const parts = [];
+  if (area) parts.push('🗺️大区=' + area);
+  if (role) parts.push('🎭角色=' + role);
+  if (p.roleLevel) parts.push('📈等级=' + p.roleLevel);
+  if (!parts.length) return '';
   return parts.join(' | ');
 }
 
 function buildSummaryAccountPrefix(index, profile, fallbackId) {
   const p = profile || {};
-  const account = p.uin || p.openid || p.openId || fallbackId || '未知';
-  const nick = p.nickName || '未知昵称';
-  const area = p.areaName || p.areaId || '未知大区';
-  const role = p.roleName || p.roleId || '未知角色';
-  return (
-    '账号' +
-    index +
-    '(账号:' +
-    account +
-    ' 昵称:' +
-    nick +
-    ' 大区:' +
-    area +
-    ' 角色:' +
-    role +
-    ')'
-  );
+  const account = p.uin || p.openid || p.openId || fallbackId || '';
+  const nick = p.nickName || '';
+  const area = p.areaName || p.areaId || '';
+  const role = p.roleName || p.roleId || '';
+  const tags = [];
+  if (account) tags.push('👤' + account);
+  if (nick) tags.push('📝' + nick);
+  if (area) tags.push('🗺️' + area);
+  if (role) tags.push('🎭' + role);
+  if (!tags.length) return '🧾账号' + index;
+  return '🧾账号' + index + '(' + tags.join(' | ') + ')';
 }
 
 function shortId(v) {
@@ -739,7 +738,8 @@ async function runAccount(cookie, index, total) {
 
   $.log('\n🧾 ===== 账号 ' + index + '/' + total + ' =====');
   $.log('👤 账号信息: ' + formatAccountLine(profile, showId));
-  $.log('🎮 角色信息: ' + formatRoleLine(profile));
+  const preRoleLine = formatRoleLine(profile);
+  if (preRoleLine) $.log('🎮 角色信息: ' + preRoleLine);
 
   const loginCheck = checkLoginField(normalizedCookie);
   if (!loginCheck.ok) {
@@ -767,7 +767,8 @@ async function runAccount(cookie, index, total) {
       profile = mergeProfile(profile, roleProfile);
       $.log('✅ 角色查询成功');
       $.log('👤 账号信息: ' + formatAccountLine(profile, showId));
-      $.log('🎮 角色信息: ' + formatRoleLine(profile));
+      const roleLine = formatRoleLine(profile);
+      if (roleLine) $.log('🎮 角色信息: ' + roleLine);
     }
   } else {
     $.log('⚠️ 缺少 skey/p_skey，跳过角色预查询，直接尝试状态查询');
@@ -793,7 +794,7 @@ async function runAccount(cookie, index, total) {
     summaries.push(
       buildSummaryAccountPrefix(index, profile, showId) +
         ': ⚠️ 状态不可判定，已停止执行（避免盲目签到）' +
-        (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
+        (queryDays >= 0 ? ' | 📅当前累签' + queryDays + '天' : '')
     );
     return;
   }
@@ -825,10 +826,10 @@ async function runAccount(cookie, index, total) {
     $.log('🎁 今日奖励: ' + rewardText);
     summaries.push(
       buildSummaryAccountPrefix(index, profile, showId) +
-        ': ✅ 已签到 | 累签' +
+        ': ✅ 已签到 | 📅累签' +
         (queryDays >= 0 ? queryDays : '?') +
         '天' +
-        (notifyRewardText ? ' | 奖励:' + notifyRewardText : '')
+        (notifyRewardText ? ' | 🎁奖励:' + notifyRewardText : '')
     );
     return;
   }
@@ -865,10 +866,10 @@ async function runAccount(cookie, index, total) {
     $.log('🎁 今日奖励: ' + rewardText);
     summaries.push(
       buildSummaryAccountPrefix(index, profile, showId) +
-        ': ✅ 签到成功 | 累签' +
+        ': ✅ 签到成功 | 📅累签' +
         (finalDays >= 0 ? finalDays : '?') +
         '天' +
-        (notifyRewardText ? ' | 奖励:' + notifyRewardText : '') +
+        (notifyRewardText ? ' | 🎁奖励:' + notifyRewardText : '') +
         ' | ' +
         signMsg
     );
@@ -878,7 +879,7 @@ async function runAccount(cookie, index, total) {
       buildSummaryAccountPrefix(index, profile, showId) +
         ': ❌ 签到失败 - ' +
         signMsg +
-        (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
+        (queryDays >= 0 ? ' | 📅当前累签' + queryDays + '天' : '')
     );
   }
 }
@@ -1102,12 +1103,22 @@ function getMilestoneStateText(obj) {
   if (!days.length) return '';
 
   const out = [];
+  let unknownRewardCount = 0;
   for (let i = 0; i < days.length; i++) {
     const day = days[i];
     const item = hold['day' + day] || {};
     const used = toInt(item.iUsedNum, 0);
-    const rewardName = getMilestoneRewardName(item) || '奖励名未返回';
-    out.push(day + '天' + (used > 0 ? '已领' : '未领') + '(奖励:' + rewardName + ')');
+    const rewardName = getMilestoneRewardName(item);
+    const state = day + '天' + (used > 0 ? '已领' : '未领');
+    if (rewardName) {
+      out.push(state + '(奖励:' + rewardName + ')');
+    } else {
+      out.push(state);
+      unknownRewardCount += 1;
+    }
+  }
+  if (unknownRewardCount > 0) {
+    out.push('奖励名未返回:' + unknownRewardCount + '项');
   }
   return out.join(' ');
 }
@@ -1147,13 +1158,15 @@ function buildRewardText(opts) {
 function formatRewardForNotify(rewardText) {
   const raw = String(rewardText || '').trim();
   if (!raw) return '';
-  if (raw === '无（非奖励日）') return raw;
+  if (raw === '无（非奖励日）') return '';
   if (!/奖励名未返回|未返回奖励信息|名称未返回/.test(raw)) return raw;
 
   let concise = raw
     .replace(/奖励名未返回/g, '')
     .replace(/（名称未返回）/g, '')
     .replace(/（未返回奖励信息）/g, '')
+    .replace(/[:：]\s*（已领取）/g, '')
+    .replace(/[:：]\s*（待领取）/g, '')
     .replace(/未返回奖励信息/g, '')
     .replace(/:\s*$/g, '')
     .replace(/：\s*$/g, '')
