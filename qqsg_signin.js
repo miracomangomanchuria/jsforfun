@@ -22,6 +22,8 @@ const CFG = {
   uaKey: 'qqsg_signin_ua_v1',
   paramsKey: 'qqsg_signin_params_v1',
   roleUrlKey: 'qqsg_signin_role_url_v1',
+  rewardMapKey: 'qqsg_signin_reward_map_v1',
+  rewardMapTsKey: 'qqsg_signin_reward_map_ts_v1',
   legacy: {
     cookieKey: 'qqsg_cookie',
     uaKey: 'qqsg_ua',
@@ -52,6 +54,9 @@ const CFG = {
 };
 
 const summaries = [];
+let runtimeRewardMap = null;
+let rewardMapSource = '';
+let rewardMapLogged = false;
 
 const CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
 ^https:\/\/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr.* url script-request-body qqsg_signin.js
@@ -726,6 +731,198 @@ function shortId(v) {
   return s.slice(0, 8) + '...' + s.slice(-4);
 }
 
+function getObjKeys(obj) {
+  return Object.keys(obj || {});
+}
+
+function hasRewardMap(map) {
+  return getObjKeys(map).length > 0;
+}
+
+function resolveActivityPageUrl(rcfg) {
+  const easUrl = decodeMaybe((rcfg && rcfg.easUrl) || '', 2);
+  if (/^https?:\/\//i.test(easUrl)) return ensureSlash(easUrl);
+  if (/^https?:\/\//i.test(CFG.referer)) return ensureSlash(CFG.referer);
+  return 'https://sg.qq.com/cp/a20240429gzhqd/';
+}
+
+function ensureSlash(url) {
+  const u = String(url || '').trim();
+  if (!u) return u;
+  return /\/$/.test(u) ? u : u + '/';
+}
+
+function toAbsoluteUrl(raw, base) {
+  const u = String(raw || '').trim();
+  if (!u) return '';
+  if (/^https?:\/\//i.test(u)) return u;
+  if (/^\/\//.test(u)) return 'https:' + u;
+  const b = String(base || '').replace(/[#?].*$/, '');
+  const m = b.match(/^(https?:\/\/[^/]+)/i);
+  const origin = m ? m[1] : '';
+  if (/^\//.test(u)) return origin + u;
+  const baseDir = b.replace(/\/[^/]*$/, '/');
+  return baseDir + u.replace(/^\.\//, '');
+}
+
+function parseGiftMapFromText(text) {
+  const out = {};
+  const src = String(text || '');
+  if (!src) return out;
+  const block = src.match(/giftMap\s*=\s*\{([\s\S]*?)\}/i);
+  if (!block || !block[1]) return out;
+  const body = block[1];
+  const reg = /(\d+)\s*:\s*(\d+)/g;
+  let m;
+  while ((m = reg.exec(body))) {
+    const day = String(m[1] || '').trim();
+    const idx = parseInt(String(m[2] || '').trim(), 10);
+    if (day && !isNaN(idx) && idx > 0) out[day] = idx;
+  }
+  return out;
+}
+
+function stripHtmlToText(html) {
+  return String(html || '')
+    .replace(/<br\s*\/?>/gi, ' ')
+    .replace(/<\/?[^>]+>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractRewardNamesFromHtml(html) {
+  const out = [];
+  const src = String(html || '');
+  if (!src) return out;
+  const reg = /<div[^>]*class=["'][^"']*reward-name[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi;
+  let m;
+  while ((m = reg.exec(src))) {
+    const text = stripHtmlToText(m[1]);
+    if (text) out.push(text);
+  }
+  return out;
+}
+
+function extractActJsUrlFromHtml(html, pageUrl) {
+  const src = String(html || '');
+  const m = src.match(/<script[^>]+src=["']([^"']*\/js\/act\.js[^"']*)["']/i);
+  if (!m || !m[1]) return '';
+  return toAbsoluteUrl(m[1], pageUrl);
+}
+
+function defaultGiftMapByNames(rewardNames) {
+  const days = [1, 3, 5, 7, 10, 15];
+  const out = {};
+  for (let i = 0; i < rewardNames.length && i < days.length; i++) {
+    out[String(days[i])] = i + 1;
+  }
+  return out;
+}
+
+function buildRewardMapByGiftMap(rewardNames, giftMap) {
+  const out = {};
+  const names = Array.isArray(rewardNames) ? rewardNames : [];
+  const gm = giftMap || {};
+  const days = getObjKeys(gm);
+  for (let i = 0; i < days.length; i++) {
+    const day = days[i];
+    const idx = parseInt(String(gm[day] || ''), 10);
+    if (isNaN(idx) || idx <= 0) continue;
+    const name = names[idx - 1] || '';
+    if (name) out['day' + day] = name;
+  }
+  return out;
+}
+
+function loadCachedRewardMap() {
+  const raw = $.getdata(CFG.rewardMapKey) || '';
+  const obj = toJSON(raw);
+  if (!obj || typeof obj !== 'object') return {};
+  const keys = getObjKeys(obj);
+  const out = {};
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    if (!/^day\d+$/.test(k)) continue;
+    const v = String(obj[k] || '').trim();
+    if (v) out[k] = v;
+  }
+  return out;
+}
+
+function saveCachedRewardMap(map) {
+  if (!hasRewardMap(map)) return;
+  $.setdata($.toStr(map), CFG.rewardMapKey);
+  $.setdata(String(Date.now()), CFG.rewardMapTsKey);
+}
+
+async function getTextByGet(url, headers) {
+  if (!url) return '';
+  try {
+    const resp = await $.http.get({ url: url, headers: headers || {} });
+    return (resp && resp.body) || '';
+  } catch (e) {
+    return '';
+  }
+}
+
+async function fetchRewardMapLive(headers, rcfg) {
+  const pageUrl = resolveActivityPageUrl(rcfg);
+  const pageHeaders = {
+    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    Referer: CFG.referer,
+    'User-Agent': (headers && headers['User-Agent']) || CFG.userAgent,
+  };
+  const html = await getTextByGet(pageUrl, pageHeaders);
+  if (!html) return {};
+
+  const rewardNames = extractRewardNamesFromHtml(html);
+  if (!rewardNames.length) return {};
+
+  let giftMap = parseGiftMapFromText(html);
+  const actJsUrl = extractActJsUrlFromHtml(html, pageUrl);
+  if (actJsUrl) {
+    const jsText = await getTextByGet(actJsUrl, pageHeaders);
+    const jsGiftMap = parseGiftMapFromText(jsText);
+    if (hasRewardMap(jsGiftMap)) giftMap = jsGiftMap;
+  }
+  if (!hasRewardMap(giftMap)) giftMap = defaultGiftMapByNames(rewardNames);
+
+  return buildRewardMapByGiftMap(rewardNames, giftMap);
+}
+
+async function ensureRewardMap(headers, rcfg) {
+  if (runtimeRewardMap) return runtimeRewardMap;
+
+  const cached = loadCachedRewardMap();
+  if (hasRewardMap(cached)) {
+    runtimeRewardMap = cached;
+    rewardMapSource = 'cache';
+  } else {
+    runtimeRewardMap = {};
+    rewardMapSource = 'none';
+  }
+
+  const live = await fetchRewardMapLive(headers, rcfg);
+  if (hasRewardMap(live)) {
+    runtimeRewardMap = live;
+    rewardMapSource = 'live';
+    saveCachedRewardMap(live);
+  }
+
+  if (!rewardMapLogged) {
+    rewardMapLogged = true;
+    const count = getObjKeys(runtimeRewardMap).length;
+    if (count > 0) {
+      $.log('🧩 里程碑奖励映射: ' + (rewardMapSource === 'live' ? '实时解析' : '本地缓存') + ' ' + count + '项');
+    } else {
+      $.log('⚠️ 里程碑奖励映射: 未获取到，仅显示领取状态');
+    }
+  }
+  return runtimeRewardMap;
+}
+
 async function runAccount(cookie, index, total) {
   const normalizedCookie = normalizeQQSGCookie(cookie);
   const ua = $.getdata(CFG.uaKey) || CFG.userAgent;
@@ -784,9 +981,10 @@ async function runAccount(cookie, index, total) {
     return;
   }
 
+  const rewardMap = await ensureRewardMap(headers, rcfg);
   const queryDays = getSignDays(queryRes);
   const signState = getTodaySignState(queryRes);
-  const milestoneState = getMilestoneStateText(queryRes);
+  const milestoneState = getMilestoneStateText(queryRes, rewardMap);
   if (queryDays >= 0) $.log('📅 本月累计签到: ' + queryDays + ' 天');
   if (milestoneState) $.log('🎯 里程碑状态: ' + milestoneState);
   if (signState === null) {
@@ -820,6 +1018,7 @@ async function runAccount(cookie, index, total) {
       rewardDay: queryRewardDay,
       byQuery: true,
       queryRes: queryRes,
+      rewardNameMap: rewardMap,
     });
     const notifyRewardText = formatRewardForNotify(rewardText);
     $.log('✅ 今日已签到');
@@ -859,6 +1058,7 @@ async function runAccount(cookie, index, total) {
       rewardDay: signRewardDay,
       byQuery: false,
       queryRes: queryRes,
+      rewardNameMap: rewardMap,
     });
     const notifyRewardText = formatRewardForNotify(rewardText);
     $.log('✅ 签到成功: ' + signMsg);
@@ -1090,14 +1290,16 @@ function collectRewardNameCandidates(node, out, depth) {
   }
 }
 
-function getMilestoneRewardName(item) {
+function getMilestoneRewardName(item, day, rewardNameMap) {
   const candidates = [];
   collectRewardNameCandidates(item || {}, candidates, 0);
-  if (!candidates.length) return '';
-  return candidates[0];
+  if (candidates.length) return candidates[0];
+  const key = 'day' + String(day || '');
+  if (rewardNameMap && rewardNameMap[key]) return String(rewardNameMap[key]).trim();
+  return '';
 }
 
-function getMilestoneStateText(obj) {
+function getMilestoneStateText(obj, rewardNameMap) {
   const hold = getHoldMap(obj);
   const days = getMilestoneDaysFromHold(hold);
   if (!days.length) return '';
@@ -1108,7 +1310,7 @@ function getMilestoneStateText(obj) {
     const day = days[i];
     const item = hold['day' + day] || {};
     const used = toInt(item.iUsedNum, 0);
-    const rewardName = getMilestoneRewardName(item);
+    const rewardName = getMilestoneRewardName(item, day, rewardNameMap);
     const state = day + '天' + (used > 0 ? '已领' : '未领');
     if (rewardName) {
       out.push(state + '(奖励:' + rewardName + ')');
@@ -1129,6 +1331,7 @@ function buildRewardText(opts) {
   const rewardDay = opts && typeof opts.rewardDay === 'number' ? opts.rewardDay : -1;
   const byQuery = !!(opts && opts.byQuery);
   const queryRes = (opts && opts.queryRes) || {};
+  const rewardNameMap = (opts && opts.rewardNameMap) || {};
   const hold = getHoldMap(queryRes);
   const hasMilestoneInfo = getMilestoneDaysFromHold(hold).length > 0;
 
@@ -1142,7 +1345,7 @@ function buildRewardText(opts) {
   if (signDays > 0 && hasMilestoneDay(hold, signDays)) {
     const item = hold['day' + signDays] || {};
     const used = toInt(item.iUsedNum, 0);
-    const rewardName = getMilestoneRewardName(item) || '奖励名未返回';
+    const rewardName = getMilestoneRewardName(item, signDays, rewardNameMap) || '奖励名未返回';
     if (byQuery) {
       return (
         '第' + signDays + '天奖励:' + rewardName + (used > 0 ? '（已领取）' : '（待领取）')
@@ -1212,13 +1415,30 @@ function getGtk(cookie) {
   return hash & 2147483647;
 }
 
+function buildNotifySubtitle(lines) {
+  const list = Array.isArray(lines) ? lines : [];
+  if (!list.length) return '📌 签到结果';
+  const first = String(list[0] || '');
+  const status = first.indexOf('✅') >= 0 ? '✅' : first.indexOf('❌') >= 0 ? '❌' : first.indexOf('⚠️') >= 0 ? '⚠️' : '📌';
+  const infoMatch = first.match(/🧾账号\d+\(([^)]+)\)/);
+  const dayMatch = first.match(/📅(?:累签|当前累签)(\d+天)/);
+  let info = infoMatch && infoMatch[1] ? infoMatch[1] : '';
+  if (dayMatch && dayMatch[1]) {
+    info = info ? info + ' | 📅' + dayMatch[1] : '📅' + dayMatch[1];
+  }
+  if (!info) info = 'QQ三国';
+  if (list.length > 1) info += ' | + ' + (list.length - 1) + '账号';
+  return status + ' ' + info;
+}
+
 function notifyFinal() {
   if (!summaries.length) {
-    $.msg($.name, '执行完成', '未生成结果，请查看日志');
+    $.msg($.name, '⚠️ 无结果', '请查看日志定位原因');
     return;
   }
+  const subtitle = buildNotifySubtitle(summaries);
   const text = summaries.join('\n');
-  $.msg($.name, '执行完成', text);
+  $.msg($.name, subtitle, text);
 }
 
 // prettier-ignore
