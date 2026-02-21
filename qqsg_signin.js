@@ -101,39 +101,82 @@ function captureRequest() {
     return;
   }
 
-  saveCookie(cookie);
-  if (ua) $.setdata(ua, CFG.uaKey);
-  if (url.indexOf('/ams/ame/amesvr') !== -1) $.setdata(url, CFG.roleUrlKey);
-  updateRuntimeParams(url, body);
+  const cookieRet = saveCookie(cookie);
+  const uaRet = ua ? saveValueIfChanged(CFG.uaKey, ua) : { changed: false };
+  const roleUrlRet = url.indexOf('/ams/ame/amesvr') !== -1 ? saveValueIfChanged(CFG.roleUrlKey, url) : { changed: false };
+  const paramRet = updateRuntimeParams(url, body);
 
-  const openid = getCookieVal(cookie, 'openid');
-  const uin = getCookieVal(cookie, 'uin');
-  const tips = [];
-  if (openid) tips.push('openid:' + openid.slice(0, 8) + '...');
-  if (uin) tips.push('uin:' + uin);
-  if (body) tips.push('参数已更新');
-  $.log('✅ 抓包成功: ' + (tips.join(' | ') || 'Cookie 已保存'));
-  $.msg($.name, '获取 Cookie 成功', tips.join(' | ') || '已保存本地数据');
+  const normalizedCookie = cookieRet.newCookie || normalizeQQSGCookie(cookie);
+  const cookieMap = parseCookieMap(normalizedCookie);
+  const cookieFieldsText = formatMapFields(cookieMap);
+  const runtimeFieldsText = formatRuntimeParamFields(paramRet.current);
+  const who = getAccountHintFromCookie(normalizedCookie);
+
+  const changedParts = [];
+  if (cookieRet.changed) changedParts.push('Cookie');
+  if (uaRet.changed) changedParts.push('UA');
+  if (roleUrlRet.changed) changedParts.push('RoleURL');
+  if (paramRet.changed) changedParts.push('Params');
+
+  if (!changedParts.length) {
+    $.log('ℹ️ 抓包字段无变化，跳过写入与通知');
+    $.log('👤 账号: ' + who);
+    $.log('🍪 Cookie字段(全量): ' + (cookieFieldsText || '无'));
+    if (runtimeFieldsText) $.log('🧩 参数字段(全量): ' + runtimeFieldsText);
+    return;
+  }
+
+  const lines = [];
+  lines.push('变更项: ' + changedParts.join(' / '));
+  lines.push('账号: ' + who);
+  lines.push('Cookie字段(全量): ' + (cookieFieldsText || '无'));
+  if (runtimeFieldsText) lines.push('参数字段(全量): ' + runtimeFieldsText);
+
+  $.log('✅ 抓包字段已更新: ' + changedParts.join(' / '));
+  $.log('👤 账号: ' + who);
+  $.log('🍪 Cookie字段(全量): ' + (cookieFieldsText || '无'));
+  if (runtimeFieldsText) $.log('🧩 参数字段(全量): ' + runtimeFieldsText);
+  $.msg($.name, '抓包字段已更新', lines.join('\n'));
 }
 
 function saveCookie(cookie) {
+  const normalizedCookie = normalizeQQSGCookie(cookie);
   const raw = ($.getdata(CFG.cookieKey) || '').trim();
   const oldList = splitCookieList(raw);
-  const id = getCookieVal(cookie, 'openid') || getCookieVal(cookie, 'uin') || cookie.slice(0, 32);
-  let replaced = false;
+  const id = getCookieVal(normalizedCookie, 'openid') || getCookieVal(normalizedCookie, 'uin') || normalizedCookie.slice(0, 32);
+  let existed = false;
+  let changed = false;
+  let oldCookie = '';
   const next = [];
+  const newSig = cookieSignature(normalizedCookie);
   for (let i = 0; i < oldList.length; i++) {
-    const old = oldList[i];
+    const old = normalizeQQSGCookie(oldList[i]);
     const oldId = getCookieVal(old, 'openid') || getCookieVal(old, 'uin') || old.slice(0, 32);
     if (oldId === id) {
-      next.push(cookie);
-      replaced = true;
+      existed = true;
+      oldCookie = old;
+      if (cookieSignature(old) === newSig) {
+        next.push(old);
+      } else {
+        next.push(normalizedCookie);
+        changed = true;
+      }
     } else {
       next.push(old);
     }
   }
-  if (!replaced) next.push(cookie);
-  $.setdata(next.join('\n'), CFG.cookieKey);
+  if (!existed) {
+    next.push(normalizedCookie);
+    changed = true;
+  }
+  if (changed) $.setdata(next.join('\n'), CFG.cookieKey);
+  return {
+    changed: changed,
+    isNew: !existed,
+    accountId: id,
+    oldCookie: oldCookie,
+    newCookie: normalizedCookie,
+  };
 }
 
 function migrateLegacyStore() {
@@ -214,13 +257,14 @@ function saveParamStore(obj) {
 }
 
 function updateRuntimeParams(url, body) {
-  const p = loadParamStore();
-  p.updatedAt = Date.now();
+  const oldStore = loadParamStore();
+  const p = cloneByJSON(oldStore);
+  const oldSnapshot = buildRuntimeSnapshot(oldStore);
 
   if (url.indexOf('/ams/ame/amesvr') !== -1) {
     const q = parseQueryFromUrl(url);
     const b = parseFormBody(body);
-    p.roleUrl = url;
+    if (url) p.roleUrl = url;
     if (q.sServiceType || b.sServiceType) p.serviceType = q.sServiceType || b.sServiceType;
     if (q.iActivityId || b.iActivityId) p.activityId = q.iActivityId || b.iActivityId;
     if (q.sServiceDepartment || b.sServiceDepartment) p.serviceDepartment = q.sServiceDepartment || b.sServiceDepartment;
@@ -235,17 +279,43 @@ function updateRuntimeParams(url, body) {
     if (b.eas_refer) p.easRefer = b.eas_refer;
     if (!p.seenCharts || typeof p.seenCharts !== 'object') p.seenCharts = {};
     if (b.iChartId) {
+      const chartId = String(b.iChartId);
       const flowId = getFlowIdFromTag(b.sMiloTag || '');
-      p.seenCharts[b.iChartId] = {
+      const oldItem = p.seenCharts[chartId] || {};
+      const nextItem = {
         ideToken: b.sIdeToken || '',
         flowId: flowId || '',
-        ts: Date.now(),
+        ts: oldItem.ts || 0,
       };
+      const oldSign = stableStringify({
+        ideToken: oldItem.ideToken || '',
+        flowId: oldItem.flowId || '',
+      });
+      const newSign = stableStringify({
+        ideToken: nextItem.ideToken || '',
+        flowId: nextItem.flowId || '',
+      });
+      if (oldSign !== newSign) {
+        nextItem.ts = Date.now();
+        p.seenCharts[chartId] = nextItem;
+      } else if (!oldItem || typeof oldItem !== 'object') {
+        p.seenCharts[chartId] = nextItem;
+      }
     }
     inferStatusSignBySeenCharts(p);
   }
 
-  saveParamStore(p);
+  const newSnapshot = buildRuntimeSnapshot(p);
+  const changed = stableStringify(oldSnapshot) !== stableStringify(newSnapshot);
+  if (changed) {
+    p.updatedAt = Date.now();
+    saveParamStore(p);
+  }
+  return {
+    changed: changed,
+    previous: oldSnapshot,
+    current: newSnapshot,
+  };
 }
 
 function inferStatusSignBySeenCharts(p) {
@@ -324,6 +394,142 @@ function getFlowIdFromTag(tag) {
   return /^\d+$/.test(x) ? x : '';
 }
 
+function cloneByJSON(obj) {
+  return toJSON(JSON.stringify(obj || {}));
+}
+
+function stableStringify(value) {
+  if (value === null) return 'null';
+  if (typeof value === 'undefined') return 'null';
+  const t = typeof value;
+  if (t === 'number' || t === 'boolean') return JSON.stringify(value);
+  if (t === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    const arr = [];
+    for (let i = 0; i < value.length; i++) {
+      arr.push(stableStringify(value[i]));
+    }
+    return '[' + arr.join(',') + ']';
+  }
+  if (t === 'object') {
+    const keys = Object.keys(value).sort();
+    const arr = [];
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      arr.push(JSON.stringify(k) + ':' + stableStringify(value[k]));
+    }
+    return '{' + arr.join(',') + '}';
+  }
+  return JSON.stringify(String(value));
+}
+
+function saveValueIfChanged(key, nextValue) {
+  if (!key) return { changed: false, oldValue: '', newValue: '' };
+  const next = String(nextValue || '');
+  const old = String($.getdata(key) || '');
+  if (next === old) {
+    return { changed: false, oldValue: old, newValue: next };
+  }
+  $.setdata(next, key);
+  return { changed: true, oldValue: old, newValue: next };
+}
+
+function buildRuntimeSnapshot(store) {
+  const p = store || {};
+  return {
+    roleUrl: p.roleUrl || '',
+    serviceType: p.serviceType || '',
+    activityId: p.activityId || '',
+    serviceDepartment: p.serviceDepartment || '',
+    roleFlowId: p.roleFlowId || '',
+    statusFlowId: p.statusFlowId || '',
+    signFlowId: p.signFlowId || '',
+    statusChartId: p.statusChartId || '',
+    signChartId: p.signChartId || '',
+    statusIdeToken: p.statusIdeToken || '',
+    signIdeToken: p.signIdeToken || '',
+    easUrl: p.easUrl || '',
+    easRefer: p.easRefer || '',
+    seenCharts: buildSeenChartsSnapshot(p.seenCharts),
+  };
+}
+
+function buildSeenChartsSnapshot(seenCharts) {
+  const out = {};
+  if (!seenCharts || typeof seenCharts !== 'object') return out;
+  const ids = Object.keys(seenCharts).sort();
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    const item = seenCharts[id] || {};
+    out[id] = {
+      ideToken: item.ideToken || '',
+      flowId: item.flowId || '',
+    };
+  }
+  return out;
+}
+
+function formatMapFields(map) {
+  if (!map || typeof map !== 'object') return '';
+  const keys = Object.keys(map).sort();
+  if (!keys.length) return '';
+  const out = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    out.push(k + '=' + String(map[k]));
+  }
+  return out.join('; ');
+}
+
+function formatRuntimeParamFields(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return '';
+  const keys = [
+    'serviceType',
+    'activityId',
+    'serviceDepartment',
+    'roleFlowId',
+    'statusFlowId',
+    'signFlowId',
+    'statusChartId',
+    'signChartId',
+    'statusIdeToken',
+    'signIdeToken',
+    'easUrl',
+    'easRefer',
+    'roleUrl',
+  ];
+  const parts = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    parts.push(k + '=' + (snapshot[k] || ''));
+  }
+  const seen = snapshot.seenCharts || {};
+  const ids = Object.keys(seen).sort();
+  if (ids.length) {
+    const seenParts = [];
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const item = seen[id] || {};
+      seenParts.push(id + '(flow=' + (item.flowId || '') + ',token=' + (item.ideToken || '') + ')');
+    }
+    parts.push('seenCharts=' + seenParts.join(','));
+  } else {
+    parts.push('seenCharts=');
+  }
+  return parts.join(' | ');
+}
+
+function getAccountHintFromCookie(cookie) {
+  const openid = getCookieVal(cookie, 'openid');
+  const openId = getCookieVal(cookie, 'openId');
+  const uin = getCookieVal(cookie, 'uin') || getCookieVal(cookie, 'newuin');
+  const parts = [];
+  if (openid) parts.push('openid=' + openid);
+  if (openId && openId !== openid) parts.push('openId=' + openId);
+  if (uin) parts.push('uin=' + uin);
+  return parts.join(' | ') || '未知账号';
+}
+
 function parseCookieMap(cookie) {
   const map = {};
   if (!cookie) return map;
@@ -336,6 +542,11 @@ function parseCookieMap(cookie) {
     if (k) map[k] = v;
   }
   return map;
+}
+
+function cookieSignature(cookie) {
+  const map = parseCookieMap(normalizeQQSGCookie(cookie));
+  return stableStringify(map);
 }
 
 function buildCookieFromMap(map) {
@@ -353,14 +564,8 @@ function buildCookieFromMap(map) {
 function normalizeQQSGCookie(cookie) {
   const map = parseCookieMap(cookie);
 
-  if (!map.openid && map.openId) map.openid = map.openId;
-  if (!map.openId && map.openid) map.openId = map.openid;
-
-  if (!map.access_token && map.accessToken) map.access_token = map.accessToken;
-  if (!map.accessToken && map.access_token) map.accessToken = map.access_token;
-
-  if (!map.uin && map.newuin) map.uin = map.newuin;
-  if (!map.newuin && map.uin) map.newuin = map.uin;
+  // 严格模式：业务键大小写与命名必须按抓包原样保留，不做跨键补齐。
+  // 例如 openId/openid、accessToken/access_token 视为不同字段。
 
   if (!map.appid) map.appid = '101491592';
   if (!map.acctype) map.acctype = 'qc';
