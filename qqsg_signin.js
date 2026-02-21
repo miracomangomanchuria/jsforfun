@@ -1,0 +1,787 @@
+/**
+ * QQ三国活动签到（QX / Surge / Loon / Node）
+ *
+ * 抓包说明（QX）：
+ * [rewrite_local]
+ * ^https:\/\/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr.* url script-request-body qqsg_signin.js
+ * ^https:\/\/comm\.ams\.game\.qq\.com\/ide\/.*            url script-request-body qqsg_signin.js
+ * [mitm]
+ * hostname = x8m8.ams.game.qq.com, comm.ams.game.qq.com
+ *
+ * 使用说明：
+ * 1) 先打开活动页并触发一次请求，脚本会自动保存 Cookie 和 UA。
+ * 2) 再跑定时任务执行签到。
+ * 3) 多账号可在环境变量 QQSG_SIGNIN_COOKIE 中按换行分隔多个 Cookie（兼容旧变量 QQSG_COOKIE）。
+ */
+
+const $ = new Env('QQ三国签到');
+
+const CFG = {
+  cookieKey: 'qqsg_signin_cookie_v1',
+  uaKey: 'qqsg_signin_ua_v1',
+  paramsKey: 'qqsg_signin_params_v1',
+  roleUrlKey: 'qqsg_signin_role_url_v1',
+  legacy: {
+    cookieKey: 'qqsg_cookie',
+    uaKey: 'qqsg_ua',
+    paramsKey: 'qqsg_params',
+    roleUrlKey: 'qqsg_role_url',
+  },
+  ideUrl: 'https://comm.ams.game.qq.com/ide/',
+  roleUrl:
+    'https://x8m8.ams.game.qq.com/ams/ame/amesvr?sServiceType=sg&iActivityId=638986&sServiceDepartment=group_g&sSDID=1d027a5da7ec7edea26e5dfff6243ff2',
+  serviceType: 'sg',
+  activityId: '638986',
+  serviceDepartment: 'group_g',
+  roleFlowId: '1035202',
+  statusFlowId: '1035342',
+  signFlowId: '1035343',
+  statusChartId: '288091',
+  signChartId: '288092',
+  statusIdeToken: 'tZP91Q',
+  signIdeToken: 'IlzTIB',
+  // 注意：这里存“单层编码”值，提交 form 时会再次编码成抓包中的 %25 形式
+  easUrl: 'http%3A%2F%2Fsg.qq.com%2Fcp%2Fa20240429gzhqd%2F',
+  easRefer: 'http%3A%2F%2Fnoreferrer%2F',
+  origin: 'https://sg.qq.com',
+  referer: 'https://sg.qq.com/',
+  userAgent:
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 26_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 QQ/9.2.66.625',
+  debug: false,
+};
+
+const summaries = [];
+
+!(async function () {
+  migrateLegacyStore();
+
+  if (typeof $request !== 'undefined') {
+    captureRequest();
+    return;
+  }
+
+  const cookies = loadCookies();
+  if (!cookies.length) {
+    $.msg($.name, '未获取到 Cookie', '请先打开活动页抓包一次');
+    return;
+  }
+
+  for (let i = 0; i < cookies.length; i++) {
+    await runAccount(cookies[i], i + 1, cookies.length);
+  }
+  notifyFinal();
+})()
+  .catch(function (err) {
+    $.logErr(err);
+  })
+  .finally(function () {
+    $.done();
+  });
+
+function captureRequest() {
+  const url = $request.url || '';
+  if (!/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr|comm\.ams\.game\.qq\.com\/ide\//.test(url)) {
+    return;
+  }
+  const headers = $request.headers || {};
+  const body = typeof $request.body === 'string' ? $request.body : '';
+  const cookie = headers.Cookie || headers.cookie || '';
+  const ua = headers['User-Agent'] || headers['user-agent'] || '';
+
+  if (!cookie) {
+    $.msg($.name, '抓包失败', '请求头中未找到 Cookie');
+    return;
+  }
+
+  saveCookie(cookie);
+  if (ua) $.setdata(ua, CFG.uaKey);
+  if (url.indexOf('/ams/ame/amesvr') !== -1) $.setdata(url, CFG.roleUrlKey);
+  updateRuntimeParams(url, body);
+
+  const openid = getCookieVal(cookie, 'openid');
+  const uin = getCookieVal(cookie, 'uin');
+  const tips = [];
+  if (openid) tips.push('openid:' + openid.slice(0, 8) + '...');
+  if (uin) tips.push('uin:' + uin);
+  if (body) tips.push('参数已更新');
+  $.log('✅ 抓包成功: ' + (tips.join(' | ') || 'Cookie 已保存'));
+  $.msg($.name, '获取 Cookie 成功', tips.join(' | ') || '已保存本地数据');
+}
+
+function saveCookie(cookie) {
+  const raw = ($.getdata(CFG.cookieKey) || '').trim();
+  const oldList = splitCookieList(raw);
+  const id = getCookieVal(cookie, 'openid') || getCookieVal(cookie, 'uin') || cookie.slice(0, 32);
+  let replaced = false;
+  const next = [];
+  for (let i = 0; i < oldList.length; i++) {
+    const old = oldList[i];
+    const oldId = getCookieVal(old, 'openid') || getCookieVal(old, 'uin') || old.slice(0, 32);
+    if (oldId === id) {
+      next.push(cookie);
+      replaced = true;
+    } else {
+      next.push(old);
+    }
+  }
+  if (!replaced) next.push(cookie);
+  $.setdata(next.join('\n'), CFG.cookieKey);
+}
+
+function migrateLegacyStore() {
+  migrateOneStoreKey(CFG.legacy.cookieKey, CFG.cookieKey);
+  migrateOneStoreKey(CFG.legacy.uaKey, CFG.uaKey);
+  migrateOneStoreKey(CFG.legacy.paramsKey, CFG.paramsKey);
+  migrateOneStoreKey(CFG.legacy.roleUrlKey, CFG.roleUrlKey);
+}
+
+function migrateOneStoreKey(fromKey, toKey) {
+  if (!fromKey || !toKey || fromKey === toKey) return;
+  const newVal = $.getdata(toKey);
+  if (newVal !== null && newVal !== undefined && String(newVal).trim() !== '') return;
+  const oldVal = $.getdata(fromKey);
+  if (oldVal === null || oldVal === undefined || String(oldVal).trim() === '') return;
+  $.setdata(oldVal, toKey);
+  $.log('🔁 存储迁移: ' + fromKey + ' -> ' + toKey);
+}
+
+function loadCookies() {
+  const envCookie =
+    (typeof process !== 'undefined' &&
+      process.env &&
+      (
+        process.env.QQSG_SIGNIN_COOKIE ||
+        process.env.qqsg_signin_cookie ||
+        process.env.QQSG_COOKIE ||
+        process.env.qqsg_cookie ||
+        ''
+      )) ||
+    '';
+  const localCookie = $.getdata(CFG.cookieKey) || '';
+  const raw = (envCookie || localCookie || '').trim();
+  return splitCookieList(raw);
+}
+
+function splitCookieList(raw) {
+  if (!raw) return [];
+  return raw
+    .split(/\n/)
+    .map(function (s) {
+      return s.trim();
+    })
+    .filter(function (s) {
+      return !!s;
+    });
+}
+
+function getRuntimeCfg() {
+  const p = loadParamStore();
+  const out = {
+    roleUrl: p.roleUrl || CFG.roleUrl,
+    serviceType: p.serviceType || CFG.serviceType,
+    activityId: p.activityId || CFG.activityId,
+    serviceDepartment: p.serviceDepartment || CFG.serviceDepartment,
+    roleFlowId: p.roleFlowId || CFG.roleFlowId,
+    statusFlowId: p.statusFlowId || CFG.statusFlowId,
+    signFlowId: p.signFlowId || CFG.signFlowId,
+    statusChartId: p.statusChartId || CFG.statusChartId,
+    signChartId: p.signChartId || CFG.signChartId,
+    statusIdeToken: p.statusIdeToken || CFG.statusIdeToken,
+    signIdeToken: p.signIdeToken || CFG.signIdeToken,
+    easUrl: p.easUrl || CFG.easUrl,
+    easRefer: p.easRefer || CFG.easRefer,
+  };
+  return out;
+}
+
+function loadParamStore() {
+  const raw = $.getdata(CFG.paramsKey) || '';
+  const obj = toJSON(raw);
+  if (!obj || typeof obj !== 'object') return {};
+  return obj;
+}
+
+function saveParamStore(obj) {
+  $.setdata($.toStr(obj), CFG.paramsKey);
+}
+
+function updateRuntimeParams(url, body) {
+  const p = loadParamStore();
+  p.updatedAt = Date.now();
+
+  if (url.indexOf('/ams/ame/amesvr') !== -1) {
+    const q = parseQueryFromUrl(url);
+    const b = parseFormBody(body);
+    p.roleUrl = url;
+    if (q.sServiceType || b.sServiceType) p.serviceType = q.sServiceType || b.sServiceType;
+    if (q.iActivityId || b.iActivityId) p.activityId = q.iActivityId || b.iActivityId;
+    if (q.sServiceDepartment || b.sServiceDepartment) p.serviceDepartment = q.sServiceDepartment || b.sServiceDepartment;
+    if (b.iFlowId) p.roleFlowId = b.iFlowId;
+    if (b.eas_url) p.easUrl = b.eas_url;
+    if (b.eas_refer) p.easRefer = b.eas_refer;
+  }
+
+  if (url.indexOf('/ide/') !== -1 && body) {
+    const b = parseFormBody(body);
+    if (b.eas_url) p.easUrl = b.eas_url;
+    if (b.eas_refer) p.easRefer = b.eas_refer;
+    if (!p.seenCharts || typeof p.seenCharts !== 'object') p.seenCharts = {};
+    if (b.iChartId) {
+      const flowId = getFlowIdFromTag(b.sMiloTag || '');
+      p.seenCharts[b.iChartId] = {
+        ideToken: b.sIdeToken || '',
+        flowId: flowId || '',
+        ts: Date.now(),
+      };
+    }
+    inferStatusSignBySeenCharts(p);
+  }
+
+  saveParamStore(p);
+}
+
+function inferStatusSignBySeenCharts(p) {
+  const seen = p.seenCharts || {};
+  const ids = Object.keys(seen);
+  if (!ids.length) return;
+
+  const items = ids
+    .map(function (id) {
+      const it = seen[id] || {};
+      const flow = parseInt(it.flowId || '0', 10);
+      return {
+        chartId: id,
+        ideToken: it.ideToken || '',
+        flowId: it.flowId || '',
+        flowNum: isNaN(flow) ? 0 : flow,
+        ts: it.ts || 0,
+      };
+    })
+    .sort(function (a, b) {
+      if (a.flowNum && b.flowNum && a.flowNum !== b.flowNum) return a.flowNum - b.flowNum;
+      return a.ts - b.ts;
+    });
+
+  if (!p.statusChartId || !p.statusIdeToken || !p.statusFlowId) {
+    const first = items[0];
+    p.statusChartId = first.chartId;
+    p.statusIdeToken = first.ideToken || p.statusIdeToken || CFG.statusIdeToken;
+    p.statusFlowId = first.flowId || p.statusFlowId || CFG.statusFlowId;
+  }
+  if (items.length >= 2) {
+    const last = items[items.length - 1];
+    p.signChartId = last.chartId;
+    p.signIdeToken = last.ideToken || p.signIdeToken || CFG.signIdeToken;
+    p.signFlowId = last.flowId || p.signFlowId || CFG.signFlowId;
+  }
+}
+
+function parseQueryFromUrl(url) {
+  const out = {};
+  if (!url || url.indexOf('?') === -1) return out;
+  const query = url.split('?')[1] || '';
+  return parseFormBody(query);
+}
+
+function parseFormBody(raw) {
+  const out = {};
+  if (!raw || typeof raw !== 'string') return out;
+  const arr = raw.split('&');
+  for (let i = 0; i < arr.length; i++) {
+    const seg = arr[i];
+    if (!seg) continue;
+    const idx = seg.indexOf('=');
+    const k = idx >= 0 ? seg.slice(0, idx) : seg;
+    const v = idx >= 0 ? seg.slice(idx + 1) : '';
+    const key = safeDecode(k);
+    const val = safeDecode(v.replace(/\+/g, '%20'));
+    if (key) out[key] = val;
+  }
+  return out;
+}
+
+function safeDecode(str) {
+  try {
+    return decodeURIComponent(str);
+  } catch (e) {
+    return str;
+  }
+}
+
+function getFlowIdFromTag(tag) {
+  if (!tag) return '';
+  const arr = String(tag).split('-');
+  if (arr.length < 2) return '';
+  const x = arr[arr.length - 1];
+  return /^\d+$/.test(x) ? x : '';
+}
+
+function parseCookieMap(cookie) {
+  const map = {};
+  if (!cookie) return map;
+  const parts = String(cookie).split(';');
+  for (let i = 0; i < parts.length; i++) {
+    const seg = parts[i].trim();
+    if (!seg || seg.indexOf('=') < 0) continue;
+    const k = seg.split('=')[0].trim();
+    const v = seg.slice(k.length + 1);
+    if (k) map[k] = v;
+  }
+  return map;
+}
+
+function buildCookieFromMap(map) {
+  const keys = Object.keys(map || {});
+  const parts = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    const v = map[k];
+    if (v === undefined || v === null || v === '') continue;
+    parts.push(k + '=' + v);
+  }
+  return parts.join('; ');
+}
+
+function normalizeQQSGCookie(cookie) {
+  const map = parseCookieMap(cookie);
+
+  if (!map.openid && map.openId) map.openid = map.openId;
+  if (!map.openId && map.openid) map.openId = map.openid;
+
+  if (!map.access_token && map.accessToken) map.access_token = map.accessToken;
+  if (!map.accessToken && map.access_token) map.accessToken = map.access_token;
+
+  if (!map.uin && map.newuin) map.uin = map.newuin;
+  if (!map.newuin && map.uin) map.newuin = map.uin;
+
+  if (!map.appid) map.appid = '101491592';
+  if (!map.acctype) map.acctype = 'qc';
+
+  return buildCookieFromMap(map);
+}
+
+function checkLoginField(cookie) {
+  const map = parseCookieMap(cookie);
+  const miss = [];
+  if (!map.openid) miss.push('openid');
+  if (!map.access_token) miss.push('access_token');
+  if (!map.appid) miss.push('appid');
+  if (!map.acctype) miss.push('acctype');
+  return {
+    ok: miss.length === 0,
+    msg: miss.length ? '缺少 ' + miss.join(', ') : 'ok',
+  };
+}
+
+async function runAccount(cookie, index, total) {
+  const normalizedCookie = normalizeQQSGCookie(cookie);
+  const ua = $.getdata(CFG.uaKey) || CFG.userAgent;
+  const rcfg = getRuntimeCfg();
+  const openid = getCookieVal(normalizedCookie, 'openid');
+  const uin = getCookieVal(normalizedCookie, 'uin');
+  const showId = openid ? openid.slice(0, 8) + '...' : uin || '未知';
+  const headers = buildHeaders(normalizedCookie, ua);
+
+  $.log('\n🧾 ===== 账号 ' + index + '/' + total + ' =====');
+  $.log('👤 账号标识: ' + showId);
+
+  const loginCheck = checkLoginField(normalizedCookie);
+  if (!loginCheck.ok) {
+    $.log('❌ Cookie 登录字段不足: ' + loginCheck.msg);
+    summaries.push('账号' + index + '(' + showId + '): ❌ Cookie字段不足 - ' + loginCheck.msg);
+    return;
+  }
+  const gtk = getGtk(normalizedCookie);
+  $.log('🔐 g_tk=' + gtk);
+  if (CFG.debug) {
+    $.log('🧩 运行参数: iActivityId=' + rcfg.activityId + ' statusChart=' + rcfg.statusChartId + ' signChart=' + rcfg.signChartId);
+  }
+
+  const roleUrl = $.getdata(CFG.roleUrlKey) || rcfg.roleUrl || CFG.roleUrl;
+  if (gtk) {
+    const roleBody = buildRoleBody(gtk, rcfg);
+    const roleRes = await post(roleUrl, roleBody, headers);
+    if (!isRoleOk(roleRes)) {
+      const roleMsg = getRespMsg(roleRes) || '角色查询失败';
+      $.log('⚠️ 角色查询异常: ' + roleMsg);
+    } else if (CFG.debug) {
+      $.log('✅ 角色查询成功');
+    }
+  } else {
+    $.log('⚠️ 缺少 skey/p_skey，跳过角色预查询，直接尝试状态查询');
+  }
+
+  const queryBody = buildIdeBody(rcfg.statusChartId, rcfg.statusIdeToken, rcfg.statusFlowId, rcfg);
+  const queryRes = await post(CFG.ideUrl, queryBody, headers);
+  const queryIRet = getIRet(queryRes);
+  if (queryIRet !== 0) {
+    const qMsg = getRespMsg(queryRes) || '查询状态失败';
+    $.log('❌ 签到状态查询失败: ' + qMsg);
+    summaries.push('账号' + index + '(' + showId + '): ❌ 状态查询失败 - ' + qMsg);
+    return;
+  }
+
+  const queryDays = getSignDays(queryRes);
+  const signState = getTodaySignState(queryRes);
+  const milestoneState = getMilestoneStateText(queryRes);
+  if (queryDays >= 0) $.log('📅 本月累计签到: ' + queryDays + ' 天');
+  if (milestoneState) $.log('🎯 里程碑状态: ' + milestoneState);
+  if (signState === null) {
+    $.log('⚠️ 状态字段不足：未发现 hold.sign 的有效字段，停止执行以避免误签到');
+    summaries.push(
+      '账号' +
+        index +
+        '(' +
+        showId +
+        '): ⚠️ 状态不可判定，已停止执行（避免盲目签到）' +
+        (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
+    );
+    return;
+  }
+  const signedToday = signState;
+  $.log('🧭 状态判定: ' + (signedToday ? '今日已签，停止签到请求' : '今日未签，继续签到请求'));
+
+  if (signedToday) {
+    const queryPackage = getPackageName(queryRes);
+    const queryRewardDay = getRewardDay(queryRes);
+    if (queryPackage || queryRewardDay > 0) {
+      $.log(
+        '🎁 服务端奖励字段: day=' +
+          (queryRewardDay > 0 ? queryRewardDay : '-') +
+          ' packageName=' +
+          (queryPackage || '空')
+      );
+    } else {
+      $.log('🎁 服务端奖励字段: 状态查询接口未返回 packageName/day');
+    }
+    const rewardText = buildRewardText({
+      signDays: queryDays,
+      packageName: queryPackage,
+      rewardDay: queryRewardDay,
+      byQuery: true,
+      queryRes: queryRes,
+    });
+    $.log('✅ 今日已签到');
+    $.log('🎁 今日奖励: ' + rewardText);
+    summaries.push(
+      '账号' +
+        index +
+        '(' +
+        showId +
+        '): ✅ 已签到 | 累签' +
+        (queryDays >= 0 ? queryDays : '?') +
+        '天 | 奖励:' +
+        rewardText
+    );
+    return;
+  }
+
+  const signBody = buildIdeBody(rcfg.signChartId, rcfg.signIdeToken, rcfg.signFlowId, rcfg);
+  const signRes = await post(CFG.ideUrl, signBody, headers);
+  const signIRet = getIRet(signRes);
+  const signMsg = getRespMsg(signRes) || '未知';
+  if (signIRet === 0) {
+    const signDaysRaw = getSignDays(signRes);
+    const finalDays = signDaysRaw >= 0 ? signDaysRaw : queryDays >= 0 ? queryDays + 1 : -1;
+    const signPackage = getPackageName(signRes);
+    const signRewardDay = getRewardDay(signRes);
+    if (signPackage || signRewardDay > 0) {
+      $.log(
+        '🎁 服务端奖励字段: day=' +
+          (signRewardDay > 0 ? signRewardDay : '-') +
+          ' packageName=' +
+          (signPackage || '空')
+      );
+    } else {
+      $.log('🎁 服务端奖励字段: 未返回 packageName/day');
+    }
+    const rewardText = buildRewardText({
+      signDays: finalDays,
+      packageName: signPackage,
+      rewardDay: signRewardDay,
+      byQuery: false,
+      queryRes: queryRes,
+    });
+    $.log('✅ 签到成功: ' + signMsg);
+    if (finalDays >= 0) $.log('📅 本月累计签到: ' + finalDays + ' 天');
+    $.log('🎁 今日奖励: ' + rewardText);
+    summaries.push(
+      '账号' +
+        index +
+        '(' +
+        showId +
+        '): ✅ 签到成功 | 累签' +
+        (finalDays >= 0 ? finalDays : '?') +
+        '天 | 奖励:' +
+        rewardText +
+        ' | ' +
+        signMsg
+    );
+  } else {
+    $.log('❌ 签到失败: ' + signMsg);
+    summaries.push(
+      '账号' +
+        index +
+        '(' +
+        showId +
+        '): ❌ 签到失败 - ' +
+        signMsg +
+        (queryDays >= 0 ? ' | 当前累签' + queryDays + '天' : '')
+    );
+  }
+}
+
+function buildHeaders(cookie, ua) {
+  return {
+    Accept: 'application/json, text/plain, */*',
+    'Content-Type': 'application/x-www-form-urlencoded',
+    Origin: CFG.origin,
+    Referer: CFG.referer,
+    'User-Agent': ua || CFG.userAgent,
+    Cookie: cookie,
+  };
+}
+
+function buildRoleBody(gtk, rcfg) {
+  return formEncode({
+    sServiceType: rcfg.serviceType,
+    iActivityId: rcfg.activityId,
+    sServiceDepartment: rcfg.serviceDepartment,
+    iFlowId: rcfg.roleFlowId,
+    g_tk: String(gtk),
+    sMiloTag: makeMiloTag(rcfg.roleFlowId, rcfg),
+    e_code: '0',
+    g_code: '0',
+    eas_url: rcfg.easUrl,
+    eas_refer: rcfg.easRefer,
+    query: 'true',
+    sRoleId: 'undefined',
+  });
+}
+
+function buildIdeBody(chartId, ideToken, flowId, rcfg) {
+  return formEncode({
+    iChartId: chartId,
+    iSubChartId: chartId,
+    sIdeToken: ideToken,
+    e_code: '0',
+    g_code: '0',
+    eas_url: rcfg.easUrl,
+    eas_refer: rcfg.easRefer,
+    sMiloTag: makeMiloTag(flowId, rcfg),
+  });
+}
+
+function makeMiloTag(flowId, rcfg) {
+  return 'AMS-' + rcfg.serviceType + '-' + nowTagTime() + '-' + randomWord(6) + '-' + rcfg.activityId + '-' + flowId;
+}
+
+function nowTagTime() {
+  const d = new Date();
+  return (
+    pad2(d.getMonth() + 1) +
+    pad2(d.getDate()) +
+    pad2(d.getHours()) +
+    pad2(d.getMinutes()) +
+    pad2(d.getSeconds())
+  );
+}
+
+function pad2(n) {
+  return n < 10 ? '0' + n : '' + n;
+}
+
+function randomWord(len) {
+  const chars = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  let out = '';
+  for (let i = 0; i < len; i++) out += chars.charAt(Math.floor(Math.random() * chars.length));
+  return out;
+}
+
+function formEncode(obj) {
+  const keys = Object.keys(obj);
+  const arr = [];
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i];
+    let v = obj[k];
+    if (v === undefined || v === null) v = '';
+    arr.push(encodeURIComponent(k) + '=' + encodeURIComponent(String(v)));
+  }
+  return arr.join('&');
+}
+
+async function post(url, body, headers) {
+  const resp = await $.http.post({ url: url, headers: headers, body: body });
+  if (CFG.debug) {
+    $.log('🌐 POST ' + url);
+    $.log('↪ status=' + (resp && (resp.statusCode || resp.status)));
+  }
+  return toJSON(resp && resp.body);
+}
+
+function toJSON(str) {
+  if (!str || typeof str !== 'string') return {};
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    return {};
+  }
+}
+
+function getIRet(obj) {
+  if (!obj || typeof obj !== 'object') return -1;
+  if (typeof obj.iRet !== 'undefined') return Number(obj.iRet);
+  if (obj.jData && typeof obj.jData.iRet !== 'undefined') return Number(obj.jData.iRet);
+  return -1;
+}
+
+function toInt(value, fallback) {
+  const n = parseInt(String(value), 10);
+  return isNaN(n) ? fallback : n;
+}
+
+function getSignDays(obj) {
+  if (!obj || !obj.jData) return -1;
+  return toInt(obj.jData.ticket, -1);
+}
+
+function getHoldMap(obj) {
+  if (!obj || !obj.jData || !obj.jData.hold || typeof obj.jData.hold !== 'object') return {};
+  return obj.jData.hold;
+}
+
+function getTodaySignState(obj) {
+  const hold = getHoldMap(obj);
+  const sign = hold.sign;
+  if (!sign || typeof sign !== 'object') return null;
+
+  const hasUsed = typeof sign.iUsedNum !== 'undefined';
+  const hasLeft = typeof sign.iLeftNum !== 'undefined';
+  if (!hasUsed && !hasLeft) return null;
+
+  const used = toInt(sign.iUsedNum, -1);
+  const left = toInt(sign.iLeftNum, -1);
+  if (used > 0) return true;
+  if (left >= 0 && left <= 0) return true;
+  if (used === 0) return false;
+  if (left > 0) return false;
+  return null;
+}
+
+function getPackageName(obj) {
+  if (!obj || !obj.jData) return '';
+  const x = obj.jData.packageName;
+  return typeof x === 'string' ? x.trim() : '';
+}
+
+function getRewardDay(obj) {
+  if (!obj || !obj.jData) return -1;
+  return toInt(obj.jData.day, -1);
+}
+
+function getMilestoneDaysFromHold(hold) {
+  const keys = Object.keys(hold || {});
+  const days = [];
+  for (let i = 0; i < keys.length; i++) {
+    const m = keys[i].match(/^day(\d+)$/);
+    if (!m) continue;
+    const n = toInt(m[1], -1);
+    if (n > 0) days.push(n);
+  }
+  days.sort(function (a, b) {
+    return a - b;
+  });
+  return days;
+}
+
+function hasMilestoneDay(hold, day) {
+  return !!(hold && Object.prototype.hasOwnProperty.call(hold, 'day' + day));
+}
+
+function getMilestoneStateText(obj) {
+  const hold = getHoldMap(obj);
+  const days = getMilestoneDaysFromHold(hold);
+  if (!days.length) return '';
+
+  const out = [];
+  for (let i = 0; i < days.length; i++) {
+    const day = days[i];
+    const item = hold['day' + day] || {};
+    const used = toInt(item.iUsedNum, 0);
+    out.push(day + '天' + (used > 0 ? '已领' : '未领'));
+  }
+  return out.join(' ');
+}
+
+function buildRewardText(opts) {
+  const signDays = opts && typeof opts.signDays === 'number' ? opts.signDays : -1;
+  const packageName = opts && opts.packageName ? String(opts.packageName).trim() : '';
+  const rewardDay = opts && typeof opts.rewardDay === 'number' ? opts.rewardDay : -1;
+  const byQuery = !!(opts && opts.byQuery);
+  const queryRes = (opts && opts.queryRes) || {};
+  const hold = getHoldMap(queryRes);
+  const hasMilestoneInfo = getMilestoneDaysFromHold(hold).length > 0;
+
+  // 奖励名以服务端返回为准，避免活动月更替导致脚本内写死失效
+  if (packageName) return packageName;
+
+  if (rewardDay > 0) {
+    return '第' + rewardDay + '天奖励（名称未返回）';
+  }
+
+  if (signDays > 0 && hasMilestoneDay(hold, signDays)) {
+    const item = hold['day' + signDays] || {};
+    const used = toInt(item.iUsedNum, 0);
+    if (byQuery) return '第' + signDays + '天奖励' + (used > 0 ? '（已领取）' : '（待领取）');
+    return '第' + signDays + '天奖励';
+  }
+
+  if (signDays > 0 && hasMilestoneInfo) return '无（非奖励日）';
+  return byQuery ? '已签到（奖励信息未返回）' : '无（未返回奖励信息）';
+}
+
+function getRespMsg(obj) {
+  if (!obj || typeof obj !== 'object') return '';
+  if (obj.sMsg) return String(obj.sMsg);
+  if (obj.jData && obj.jData.sMsg) return String(obj.jData.sMsg);
+  return '';
+}
+
+function isRoleOk(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  const flowRet = obj.flowRet || {};
+  if (String(flowRet.iRet || '') !== '0') return false;
+  const modRet = obj.modRet || {};
+  const jData = modRet.jData || {};
+  if (typeof jData.iRet !== 'undefined' && Number(jData.iRet) !== 0) return false;
+  return true;
+}
+
+function getCookieVal(cookie, key) {
+  if (!cookie) return '';
+  const reg = new RegExp('(?:^|;\\s*)' + key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '=([^;]*)');
+  const m = cookie.match(reg);
+  return m ? m[1] : '';
+}
+
+function getGtk(cookie) {
+  const skey = getCookieVal(cookie, 'skey') || getCookieVal(cookie, 'p_skey');
+  if (!skey) return 0;
+  let hash = 5381;
+  for (let i = 0; i < skey.length; i++) {
+    hash += (hash << 5) + skey.charCodeAt(i);
+  }
+  return hash & 2147483647;
+}
+
+function notifyFinal() {
+  if (!summaries.length) {
+    $.msg($.name, '执行完成', '未生成结果，请查看日志');
+    return;
+  }
+  const text = summaries.join('\n');
+  $.msg($.name, '执行完成', text);
+}
+
+// prettier-ignore
+function Env(t,e){class s{constructor(t){this.env=t}send(t,e="GET"){t="string"==typeof t?{url:t}:t;let s=this.get;return"POST"===e&&(s=this.post),new Promise((e,i)=>{s.call(this,t,(t,s,r)=>{t?i(t):e(s)})})}get(t){return this.send.call(this.env,t)}post(t){return this.send.call(this.env,t,"POST")}}return new class{constructor(t,e){this.name=t,this.http=new s(this),this.data=null,this.dataFile="box.dat",this.logs=[],this.isMute=!1,this.isNeedRewrite=!1,this.logSeparator="\n",this.startTime=(new Date).getTime(),Object.assign(this,e),this.log("",`🔔${this.name}, 开始!`)}isNode(){return"undefined"!=typeof module&&!!module.exports}isQuanX(){return"undefined"!=typeof $task}isSurge(){return"undefined"!=typeof $httpClient&&"undefined"==typeof $loon}isLoon(){return"undefined"!=typeof $loon}isShadowrocket(){return"undefined"!=typeof $rocket}toObj(t,e=null){try{return JSON.parse(t)}catch{return e}}toStr(t,e=null){try{return JSON.stringify(t)}catch{return e}}getjson(t,e){let s=e;const i=this.getdata(t);if(i)try{s=JSON.parse(this.getdata(t))}catch{}return s}setjson(t,e){try{return this.setdata(JSON.stringify(t),e)}catch{return!1}}getScript(t){return new Promise(e=>{this.get({url:t},(t,s,i)=>e(i))})}runScript(t,e){return new Promise(s=>{let i=this.getdata("@chavy_boxjs_userCfgs.httpapi");i=i?i.replace(/\n/g,"").trim():i;let r=this.getdata("@chavy_boxjs_userCfgs.httpapi_timeout");r=r?1*r:20,r=e&&e.timeout?e.timeout:r;const[o,h]=i.split("@"),a={url:`http://${h}/v1/scripting/evaluate`,body:{script_text:t,mock_type:"cron",timeout:r},headers:{"X-Key":o,Accept:"*/*"}};this.post(a,(t,e,i)=>s(i))}).catch(t=>this.logErr(t))}loaddata(){if(!this.isNode())return{};{this.fs=this.fs?this.fs:require("fs"),this.path=this.path?this.path:require("path");const t=this.path.resolve(this.dataFile),e=this.path.resolve(process.cwd(),this.dataFile),s=this.fs.existsSync(t),i=!s&&this.fs.existsSync(e);if(!s&&!i)return{};{const i=s?t:e;try{return JSON.parse(this.fs.readFileSync(i))}catch(t){return{}}}}}writedata(){if(this.isNode()){this.fs=this.fs?this.fs:require("fs"),this.path=this.path?this.path:require("path");const t=this.path.resolve(this.dataFile),e=this.path.resolve(process.cwd(),this.dataFile),s=this.fs.existsSync(t),i=!s&&this.fs.existsSync(e),r=JSON.stringify(this.data);s?this.fs.writeFileSync(t,r):i?this.fs.writeFileSync(e,r):this.fs.writeFileSync(t,r)}}lodash_get(t,e,s){const i=e.replace(/\[(\d+)\]/g,".$1").split(".");let r=t;for(const t of i)if(r=Object(r)[t],void 0===r)return s;return r}lodash_set(t,e,s){return Object(t)!==t?t:(Array.isArray(e)||(e=e.toString().match(/[^.[\]]+/g)||[]),e.slice(0,-1).reduce((t,s,i)=>Object(t[s])===t[s]?t[s]:t[s]=Math.abs(e[i+1])>>0==+e[i+1]?[]:{},t)[e[e.length-1]]=s,t)}getdata(t){let e=this.getval(t);if(/^@/.test(t)){const[,s,i]=/^@(.*?)\.(.*?)$/.exec(t),r=s?this.getval(s):"";if(r)try{const t=JSON.parse(r);e=t?this.lodash_get(t,i,""):e}catch(t){e=""}}return e}setdata(t,e){let s=!1;if(/^@/.test(e)){const[,i,r]=/^@(.*?)\.(.*?)$/.exec(e),o=this.getval(i),h=i?"null"===o?null:o||"{}":"{}";try{const e=JSON.parse(h);this.lodash_set(e,r,t),s=this.setval(JSON.stringify(e),i)}catch(e){const o={};this.lodash_set(o,r,t),s=this.setval(JSON.stringify(o),i)}}else s=this.setval(t,e);return s}getval(t){return this.isSurge()||this.isLoon()?$persistentStore.read(t):this.isQuanX()?$prefs.valueForKey(t):this.isNode()?(this.data=this.loaddata(),this.data[t]):this.data&&this.data[t]||null}setval(t,e){return this.isSurge()||this.isLoon()?$persistentStore.write(t,e):this.isQuanX()?$prefs.setValueForKey(t,e):this.isNode()?(this.data=this.loaddata(),this.data[e]=t,this.writedata(),!0):this.data&&this.data[e]||null}initGotEnv(t){this.got=this.got?this.got:require("got"),this.cktough=this.cktough?this.cktough:require("tough-cookie"),this.ckjar=this.ckjar?this.ckjar:new this.cktough.CookieJar,t&&(t.headers=t.headers?t.headers:{},void 0===t.headers.Cookie&&void 0===t.cookieJar&&(t.cookieJar=this.ckjar))}get(t,e=(()=>{})){t.headers&&(delete t.headers["Content-Type"],delete t.headers["Content-Length"]),this.isSurge()||this.isLoon()?(this.isSurge()&&this.isNeedRewrite&&(t.headers=t.headers||{},Object.assign(t.headers,{"X-Surge-Skip-Scripting":!1})),$httpClient.get(t,(t,s,i)=>{!t&&s&&(s.body=i,s.statusCode=s.status),e(t,s,i)})):this.isQuanX()?(this.isNeedRewrite&&(t.opts=t.opts||{},Object.assign(t.opts,{hints:!1})),$task.fetch(t).then(t=>{const{statusCode:s,statusCode:i,headers:r,body:o}=t;e(null,{status:s,statusCode:i,headers:r,body:o},o)},t=>e(t))):this.isNode()&&(this.initGotEnv(t),this.got(t).on("redirect",(t,e)=>{try{if(t.headers["set-cookie"]){const s=t.headers["set-cookie"].map(this.cktough.Cookie.parse).toString();s&&this.ckjar.setCookieSync(s,null),e.cookieJar=this.ckjar}}catch(t){this.logErr(t)}}).then(t=>{const{statusCode:s,statusCode:i,headers:r,body:o}=t;e(null,{status:s,statusCode:i,headers:r,body:o},o)},t=>{const{message:s,response:i}=t;e(s,i,i&&i.body)}))}post(t,e=(()=>{})){const s=t.method?t.method.toLocaleLowerCase():"post";if(t.body&&t.headers&&!t.headers["Content-Type"]&&(t.headers["Content-Type"]="application/x-www-form-urlencoded"),t.headers&&delete t.headers["Content-Length"],this.isSurge()||this.isLoon())this.isSurge()&&this.isNeedRewrite&&(t.headers=t.headers||{},Object.assign(t.headers,{"X-Surge-Skip-Scripting":!1})),$httpClient[s](t,(t,s,i)=>{!t&&s&&(s.body=i,s.statusCode=s.status),e(t,s,i)});else if(this.isQuanX())t.method=s,this.isNeedRewrite&&(t.opts=t.opts||{},Object.assign(t.opts,{hints:!1})),$task.fetch(t).then(t=>{const{statusCode:s,statusCode:i,headers:r,body:o}=t;e(null,{status:s,statusCode:i,headers:r,body:o},o)},t=>e(t));else if(this.isNode()){this.initGotEnv(t);const{url:i,...r}=t;this.got[s](i,r).then(t=>{const{statusCode:s,statusCode:i,headers:r,body:o}=t;e(null,{status:s,statusCode:i,headers:r,body:o},o)},t=>{const{message:s,response:i}=t;e(s,i,i&&i.body)})}}time(t,e=null){const s=e?new Date(e):new Date;let i={"M+":s.getMonth()+1,"d+":s.getDate(),"H+":s.getHours(),"m+":s.getMinutes(),"s+":s.getSeconds(),"q+":Math.floor((s.getMonth()+3)/3),S:s.getMilliseconds()};/(y+)/.test(t)&&(t=t.replace(RegExp.$1,(s.getFullYear()+"").substr(4-RegExp.$1.length)));for(let e in i)new RegExp("("+e+")").test(t)&&(t=t.replace(RegExp.$1,1==RegExp.$1.length?i[e]:("00"+i[e]).substr((""+i[e]).length)));return t}msg(e=t,s="",i="",r){const o=t=>{if(!t)return t;if("string"==typeof t)return this.isLoon()?t:this.isQuanX()?{"open-url":t}:this.isSurge()?{url:t}:void 0;if("object"==typeof t){if(this.isLoon()){let e=t.openUrl||t.url||t["open-url"],s=t.mediaUrl||t["media-url"];return{openUrl:e,mediaUrl:s}}if(this.isQuanX()){let e=t["open-url"]||t.url||t.openUrl,s=t["media-url"]||t.mediaUrl;return{"open-url":e,"media-url":s}}if(this.isSurge()){let e=t.url||t.openUrl||t["open-url"];return{url:e}}}};if(this.isMute||(this.isSurge()||this.isLoon()?$notification.post(e,s,i,o(r)):this.isQuanX()&&$notify(e,s,i,o(r))),!this.isMuteLog){let t=["","==============📣系统通知📣=============="];t.push(e),s&&t.push(s),i&&t.push(i),console.log(t.join("\n")),this.logs=this.logs.concat(t)}}log(...t){t.length>0&&(this.logs=[...this.logs,...t]),console.log(t.join(this.logSeparator))}logErr(t,e){const s=!this.isSurge()&&!this.isQuanX()&&!this.isLoon();s?this.log("",`❗️${this.name}, 错误!`,t.stack):this.log("",`❗️${this.name}, 错误!`,t)}wait(t){return new Promise(e=>setTimeout(e,t))}done(t={}){const e=(new Date).getTime(),s=(e-this.startTime)/1e3;this.log("",`🔔${this.name}, 结束! 🕛 ${s} 秒`),this.log(),(this.isSurge()||this.isQuanX()||this.isLoon())&&$done(t)}}(t,e)}
