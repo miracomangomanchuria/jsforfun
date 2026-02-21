@@ -1,14 +1,15 @@
-/**
- * 多点商城签到（兼容 QX / Surge / 青龙）
- * 说明：打开签到页自动抓 Cookie；脚本本体同时负责签到与任务查询
- * QX 抓包重写规则：
- * [rewrite_local]
- * ^https:\/\/appsign-in\.dmall\.com\/.* url script-request-header dmall_signin.js
- * ^https:\/\/sign-in\.dmall\.com\/.*      url script-request-header dmall_signin.js
- * ^https:\/\/sign-in\.dmall\.com\/checkIn url script-request-body   dmall_signin.js
- * [mitm]
- * hostname = appsign-in.dmall.com, sign-in.dmall.com
- */
+/*
+多点商城签到（兼容 QX / Surge / 青龙）
+说明：打开签到页自动抓 Cookie；脚本本体同时负责签到与任务查询
+QX 抓包重写规则（简版）：
+[rewrite_local]
+^https:\/\/appsign-in\.dmall\.com\/.* url script-request-header dmall_signin.js
+^https:\/\/sign-in\.dmall\.com\/.*      url script-request-header dmall_signin.js
+^https:\/\/sign-in\.dmall\.com\/checkIn url script-request-body   dmall_signin.js
+[mitm]
+hostname = appsign-in.dmall.com, sign-in.dmall.com
+完整可复制配置见文件后部 CAPTURE_CONFIG_TEXT（缺少 Cookie 时会自动打印）。
+*/
 const $ = new Env('多点商城签到')
 
 const COOKIE_KEY = 'dmall_cookie'
@@ -39,6 +40,13 @@ const BODY = {
 
 const accountSummaries = []
 
+const CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
+^https:\/\/appsign-in\.dmall\.com\/.* url script-request-header dmall_signin.js
+^https:\/\/sign-in\.dmall\.com\/.*      url script-request-header dmall_signin.js
+^https:\/\/sign-in\.dmall\.com\/checkIn url script-request-body   dmall_signin.js
+[mitm]
+hostname = appsign-in.dmall.com, sign-in.dmall.com`
+
 !(async () => {
   if (typeof $request !== 'undefined') {
     captureCookie()
@@ -46,6 +54,7 @@ const accountSummaries = []
   }
   const cookies = loadCookies()
   if (!cookies.length) {
+    $.log('📋 QX 抓包配置（可整段复制）:\n' + CAPTURE_CONFIG_TEXT)
     $.msg($.name, '未获取到 Cookie', '请打开签到页面进行抓包')
     return
   }

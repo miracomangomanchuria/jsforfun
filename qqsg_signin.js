@@ -1,18 +1,19 @@
-/**
- * QQ三国活动签到（QX / Surge / Loon / Node）
- *
- * 抓包说明（QX）：
- * [rewrite_local]
- * ^https:\/\/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr.* url script-request-body qqsg_signin.js
- * ^https:\/\/comm\.ams\.game\.qq\.com\/ide\/.*            url script-request-body qqsg_signin.js
- * [mitm]
- * hostname = x8m8.ams.game.qq.com, comm.ams.game.qq.com
- *
- * 使用说明：
- * 1) 先打开活动页并触发一次请求，脚本会自动保存 Cookie 和 UA。
- * 2) 再跑定时任务执行签到。
- * 3) 多账号可在环境变量 QQSG_SIGNIN_COOKIE 中按换行分隔多个 Cookie（兼容旧变量 QQSG_COOKIE）。
- */
+/*
+QQ三国活动签到（QX / Surge / Loon / Node）
+
+抓包说明（QX，简版）：
+[rewrite_local]
+^https:\/\/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr.* url script-request-body qqsg_signin.js
+^https:\/\/comm\.ams\.game\.qq\.com\/ide\/.*            url script-request-body qqsg_signin.js
+[mitm]
+hostname = x8m8.ams.game.qq.com, comm.ams.game.qq.com
+完整可复制配置见文件后部 CAPTURE_CONFIG_TEXT（缺少 Cookie 时会自动打印）。
+
+使用说明：
+1) 先打开活动页并触发一次请求，脚本会自动保存 Cookie 和 UA。
+2) 再跑定时任务执行签到。
+3) 多账号可在环境变量 QQSG_SIGNIN_COOKIE 中按换行分隔多个 Cookie（兼容旧变量 QQSG_COOKIE）。
+*/
 
 const $ = new Env('QQ三国签到');
 
@@ -52,6 +53,12 @@ const CFG = {
 
 const summaries = [];
 
+const CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
+^https:\/\/x8m8\.ams\.game\.qq\.com\/ams\/ame\/amesvr.* url script-request-body qqsg_signin.js
+^https:\/\/comm\.ams\.game\.qq\.com\/ide\/.*            url script-request-body qqsg_signin.js
+[mitm]
+hostname = x8m8.ams.game.qq.com, comm.ams.game.qq.com`;
+
 !(async function () {
   migrateLegacyStore();
 
@@ -62,6 +69,7 @@ const summaries = [];
 
   const cookies = loadCookies();
   if (!cookies.length) {
+    $.log('📋 QX 抓包配置（可整段复制）:\n' + CAPTURE_CONFIG_TEXT);
     $.msg($.name, '未获取到 Cookie', '请先打开活动页抓包一次');
     return;
   }
