@@ -167,7 +167,12 @@ var CONFIG = {
   FARM_EVENT_BULING_AUTO_CLAIM: true, // 奖励补领有可领时自动领取
   FARM_EVENT_BULING_MAX_LOOP: 5, // 奖励补领复查轮次上限
   FARM_EVENT_WISH_ENABLE: true, // /cgi_farm_wish_*
+  FARM_EVENT_WISH_MAX_PASS: 8, // 许愿链路循环上限（按状态逐步推进）
   FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
+  FARM_EVENT_WISH_AUTO_HARVEST: true, // status=4 时自动收取许愿奖励
+  FARM_EVENT_WISH_AUTO_PLANT: true, // status=0 时自动许愿（优先当前可选愿望）
+  FARM_EVENT_WISH_AUTO_UPGRADE: true, // status=0 且星值足够时自动点星升级
+  FARM_EVENT_WISH_UPGRADE_MAX: 20, // 单轮点星升级上限（0=不限制）
   FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
   FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
@@ -291,7 +296,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.21-r32";
+var SCRIPT_REV = "2026.02.24-r34";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1283,9 +1288,15 @@ var FARM_EVENT_STATS = {
   wishStatus: -1,
   wishSelfStart: -1,
   wishSelfEnd: -1,
+  wishProgressStart: -1,
+  wishProgressEnd: -1,
+  wishProgressMax: 0,
   wishStarStart: 0,
   wishStarEnd: 0,
   wishStarClaim: 0,
+  wishHarvest: 0,
+  wishPlant: 0,
+  wishUpgrade: 0,
   wishHelp: 0,
   wishReward: "",
   day7Days: 0,
@@ -6959,9 +6970,17 @@ function farmEventStatusLine() {
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     var selfStart = FARM_EVENT_STATS.wishSelfStart >= 0 ? FARM_EVENT_STATS.wishSelfStart : 0;
     var selfEnd = FARM_EVENT_STATS.wishSelfEnd >= 0 ? FARM_EVENT_STATS.wishSelfEnd : selfStart;
+    var pStart = FARM_EVENT_STATS.wishProgressStart >= 0 ? FARM_EVENT_STATS.wishProgressStart : 0;
+    var pEnd = FARM_EVENT_STATS.wishProgressEnd >= 0 ? FARM_EVENT_STATS.wishProgressEnd : pStart;
+    var pMax = Number(FARM_EVENT_STATS.wishProgressMax || 0) || 0;
     parts.push(
       "许愿 状态" +
         FARM_EVENT_STATS.wishStatus +
+        " 进度" +
+        pStart +
+        "→" +
+        pEnd +
+        (pMax > 0 ? "/" + pMax : "") +
         " 自助" +
         selfStart +
         "→" +
@@ -6982,6 +7001,9 @@ function farmEventSummaryLine() {
   parts.push("补领" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     parts.push("许愿领奖" + FARM_EVENT_STATS.wishStarClaim);
+    parts.push("许愿收获" + FARM_EVENT_STATS.wishHarvest);
+    parts.push("许愿种下" + FARM_EVENT_STATS.wishPlant);
+    parts.push("许愿点星" + FARM_EVENT_STATS.wishUpgrade);
     parts.push("许愿助力" + FARM_EVENT_STATS.wishHelp);
   }
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动忙" + FARM_EVENT_STATS.busy);
@@ -6996,6 +7018,9 @@ function farmEventChangeLine() {
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
   if (FARM_EVENT_STATS.bulingClaim > 0) parts.push("补领+" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
+  if (FARM_EVENT_STATS.wishHarvest > 0) parts.push("许愿收获+" + FARM_EVENT_STATS.wishHarvest);
+  if (FARM_EVENT_STATS.wishPlant > 0) parts.push("许愿种下+" + FARM_EVENT_STATS.wishPlant);
+  if (FARM_EVENT_STATS.wishUpgrade > 0) parts.push("许愿点星+" + FARM_EVENT_STATS.wishUpgrade);
   if (FARM_EVENT_STATS.wishHelp > 0) parts.push("许愿助力+" + FARM_EVENT_STATS.wishHelp);
   if (FARM_EVENT_STATS.busy > 0) parts.push("活动繁忙" + FARM_EVENT_STATS.busy + "次");
   if (FARM_EVENT_STATS.seedReward) parts.push("节气奖励[" + FARM_EVENT_STATS.seedReward + "]");
@@ -9364,7 +9389,10 @@ function isFarmEventNoop(json, msg) {
   if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
   var m = normalizeSpace(msg || farmEventErrMsg(json));
   if (!m) return false;
-  return /(已\s*领|已\s*领取|领取\s*过|今\s*天.*领\s*取|今\s*日.*领\s*取|无需|不能|未开启|已完成|无可领|没有可领|没有可奖|可领奖励|次数不足|不满足)/.test(m);
+  var m2 = m.replace(/\s+/g, "");
+  return /(已领|已领取|领取过|今天.*领取|今日.*领取|无需|不能|未开启|已完成|无可领|没有可领|没有可奖|可领奖励|次数不足|不满足|已经可以收获|可收获了|愿望已经.*收获)/.test(
+    m2
+  );
 }
 
 function mergeRewardText(origin, add) {
@@ -9516,12 +9544,58 @@ function formatWishCooldown(state) {
   return "冷却[" + parts.join("；") + "]";
 }
 
+function formatWishReward(json) {
+  if (!json || typeof json !== "object") return "";
+  var pkg = formatFarmEventPkg(json.pkg);
+  if (pkg) return pkg;
+  var giftList = formatFarmEventPkg(json.gift_list);
+  if (giftList) return giftList;
+  var giftNew = formatFarmEventPkg(json.gift_new);
+  if (giftNew) return giftNew;
+  if (json.gift && typeof json.gift === "object") return formatFarmEventPkg([json.gift]);
+  return "";
+}
+
+function parseWishOptions(json) {
+  var out = [];
+  var seen = {};
+  var arr = ensureArray(json && json.gift_list);
+  for (var i = 0; i < arr.length; i++) {
+    var it = arr[i] || {};
+    var id = Number(it.id != null ? it.id : it.w_id != null ? it.w_id : it.wid);
+    if (!id || isNaN(id) || id <= 0) continue;
+    if (seen[id]) continue;
+    seen[id] = 1;
+    var title = formatFarmEventPkg([it]) || "愿望#" + id;
+    out.push({ id: id, title: title });
+  }
+  return out;
+}
+
+function pickWishOption(state) {
+  if (!state) return null;
+  var wid = Number(state.wId || 0);
+  if (wid > 0) {
+    var opts = ensureArray(state.options);
+    for (var i = 0; i < opts.length; i++) {
+      if (Number((opts[i] || {}).id || 0) === wid) return opts[i];
+    }
+    return { id: wid, title: "愿望#" + wid };
+  }
+  var first = ensureArray(state.options)[0];
+  if (!first) return null;
+  return first;
+}
+
 function parseWishState(json) {
   if (!isFarmEventOk(json)) return null;
   var starlist = ensureArray(json.starlist);
+  var options = parseWishOptions(json);
   var freeStarTime = Number(json.freeStarTime || json.free_star_time || 0) || 0;
   var selfLastTime = Number(json.self_lasttime || json.selfLastTime || 0) || 0;
   var starTs = Number(json.star_ts || json.starTs || 0) || 0;
+  var wId = Number(json.w_id || json.wId || 0) || 0;
+  if (!wId && options.length === 1) wId = Number(options[0].id || 0) || 0;
   return {
     open: Number(json.open || 0) || 0,
     status: Number(json.status || 0) || 0,
@@ -9529,8 +9603,11 @@ function parseWishState(json) {
     vstar: Number(json.vstar || 0) || 0,
     costStar: Number(json.cost_star || json.costStar || 0) || 0,
     allStarsTimes: Number(json.allStarsTimes || 0) || 0,
+    wId: wId,
     wNum: Number(json.w_num || 0) || 0,
+    maxWish: Number(json.max_wish || json.maxWish || 0) || 0,
     grow: Number(json.grow || 0) || 0,
+    options: options,
     freeStarTime: freeStarTime,
     selfLastTime: selfLastTime,
     starTs: starTs,
@@ -9806,6 +9883,37 @@ function runFarmEvents(cookie) {
 
   function runWish() {
     if (!CONFIG.FARM_EVENT_WISH_ENABLE) return Promise.resolve();
+    var maxPass = Number(CONFIG.FARM_EVENT_WISH_MAX_PASS || 8);
+    if (isNaN(maxPass) || maxPass < 1) maxPass = 8;
+
+    function wishActionCount() {
+      return (
+        Number(FARM_EVENT_STATS.wishStarClaim || 0) +
+        Number(FARM_EVENT_STATS.wishHarvest || 0) +
+        Number(FARM_EVENT_STATS.wishPlant || 0) +
+        Number(FARM_EVENT_STATS.wishUpgrade || 0) +
+        Number(FARM_EVENT_STATS.wishHelp || 0)
+      );
+    }
+
+    function wishStateSig(state) {
+      if (!state) return "";
+      return [
+        Number(state.status || 0),
+        Number(state.self || 0),
+        Number(state.wNum || 0),
+        Number(state.wId || 0),
+        Number(state.vstar || 0),
+        ensureArray(state.starlist).length
+      ].join("|");
+    }
+
+    function wishTransientRetries() {
+      var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
+      if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+      if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+      return transientRetries;
+    }
 
     function fetchIndex(tag) {
       return callFarmEventApi(
@@ -9832,11 +9940,17 @@ function runFarmEvents(cookie) {
           FARM_EVENT_STATS.wishStatus = state.status;
           FARM_EVENT_STATS.wishSelfStart = state.self;
           FARM_EVENT_STATS.wishSelfEnd = state.self;
+          FARM_EVENT_STATS.wishProgressStart = state.wNum;
+          FARM_EVENT_STATS.wishProgressEnd = state.wNum;
+          FARM_EVENT_STATS.wishProgressMax = state.maxWish;
           FARM_EVENT_STATS.wishStarStart = state.starlist.length;
           FARM_EVENT_STATS.wishStarEnd = state.starlist.length;
           log(
             "🌠 许愿状态: 状态" +
               state.status +
+              " 进度" +
+              state.wNum +
+              (state.maxWish > 0 ? "/" + state.maxWish : "") +
               " 自助" +
               state.self +
               " 星值" +
@@ -9851,6 +9965,8 @@ function runFarmEvents(cookie) {
         } else {
           FARM_EVENT_STATS.wishStatus = state.status;
           FARM_EVENT_STATS.wishSelfEnd = state.self;
+          FARM_EVENT_STATS.wishProgressEnd = state.wNum;
+          if (state.maxWish > 0) FARM_EVENT_STATS.wishProgressMax = state.maxWish;
           FARM_EVENT_STATS.wishStarEnd = state.starlist.length;
           if (CONFIG.DEBUG) {
             logDebug(
@@ -9858,6 +9974,9 @@ function runFarmEvents(cookie) {
                 tag +
                 "): 状态" +
                 state.status +
+                " 进度" +
+                state.wNum +
+                (state.maxWish > 0 ? "/" + state.maxWish : "") +
                 " 自助" +
                 state.self +
                 " 星值" +
@@ -9875,14 +9994,21 @@ function runFarmEvents(cookie) {
       });
     }
 
+    function appendWishReward(json, prefix) {
+      var reward = formatWishReward(json);
+      if (!reward) return false;
+      FARM_EVENT_STATS.wishReward = mergeRewardText(FARM_EVENT_STATS.wishReward, reward);
+      log(prefix + reward);
+      return true;
+    }
+
     function claimStars(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_STAR) return Promise.resolve(state);
       var ids = ensureArray(state.starlist);
       if (!ids.length) return Promise.resolve(state);
-      var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
-      if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-      if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+      var transientRetries = wishTransientRetries();
       var idx = 0;
+      var gained = 0;
       function claimOne(sid, attempt) {
         return callFarmEventApi(
           cookie,
@@ -9915,11 +10041,8 @@ function runFarmEvents(cookie) {
             return;
           }
           FARM_EVENT_STATS.wishStarClaim += 1;
-          var reward = formatFarmEventPkg(json.pkg);
-          if (reward) {
-            FARM_EVENT_STATS.wishReward = mergeRewardText(FARM_EVENT_STATS.wishReward, reward);
-            log("🌠 许愿领奖: " + reward);
-          } else {
+          gained += 1;
+          if (!appendWishReward(json, "🌠 许愿领奖: ")) {
             log("🌠 许愿领奖: 成功");
           }
         });
@@ -9935,12 +10058,136 @@ function runFarmEvents(cookie) {
           .then(next);
       }
       return next().then(function () {
+        if (gained <= 0) return state;
         return fetchIndex("领奖后");
+      });
+    }
+
+    function harvestWish(state) {
+      if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_HARVEST) return Promise.resolve(state);
+      if (Number(state.status || 0) !== 4) return Promise.resolve(state);
+      return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_wish_harvest", farmEventParams(ctx)).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 许愿收获失败: " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🌠 许愿收获: 无需执行(" + msg + ")");
+          }
+          return state;
+        }
+        FARM_EVENT_STATS.wishHarvest += 1;
+        if (!appendWishReward(json, "🌠 许愿收获: ")) {
+          log("🌠 许愿收获: 成功");
+        }
+        return fetchIndex("收获后");
+      });
+    }
+
+    function plantWish(state) {
+      if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_PLANT) return Promise.resolve(state);
+      if (Number(state.status || 0) !== 0) return Promise.resolve(state);
+      var opt = pickWishOption(state);
+      if (!opt || !opt.id) {
+        if (CONFIG.DEBUG) logDebug("🌠 许愿种下: 状态0但暂无可选愿望，跳过");
+        return Promise.resolve(state);
+      }
+      var wid = Number(opt.id || 0) || 0;
+      if (!wid) return Promise.resolve(state);
+      return callFarmEventApi(
+        cookie,
+        "/cgi-bin/cgi_farm_wish_plant",
+        farmEventParams(ctx, {
+          idlist: String(wid),
+          id: wid
+        })
+      ).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 许愿种下失败(id=" + wid + "): " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🌠 许愿种下: 无需执行(" + msg + ")");
+          }
+          return state;
+        }
+        FARM_EVENT_STATS.wishPlant += 1;
+        log("🌠 许愿种下: " + (opt.title || ("愿望#" + wid)));
+        return fetchIndex("许愿后");
+      });
+    }
+
+    function upgradeWish(state) {
+      if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_UPGRADE) return Promise.resolve(state);
+      if (Number(state.status || 0) !== 0) return Promise.resolve(state);
+      if (Number(state.wId || 0) > 0) return Promise.resolve(state);
+      var cost = Number(state.costStar || 0) || 0;
+      var star = Number(state.vstar || 0) || 0;
+      if (cost <= 0 || star < cost) return Promise.resolve(state);
+      var can = Math.floor(star / cost);
+      if (can <= 0) return Promise.resolve(state);
+      var maxLoop = Number(CONFIG.FARM_EVENT_WISH_UPGRADE_MAX || 20);
+      if (!isNaN(maxLoop) && maxLoop > 0 && can > maxLoop) can = maxLoop;
+      var transientRetries = wishTransientRetries();
+      var done = 0;
+
+      function one(loopNo, retryNo) {
+        return callFarmEventApi(
+          cookie,
+          "/cgi-bin/cgi_farm_wish_star?act=upgrade",
+          farmEventParams(ctx, {
+            num: 1
+          })
+        ).then(function (json) {
+          if (!isFarmEventOk(json)) {
+            var msg = farmEventErrMsg(json);
+            if (isFarmEventNoop(json, msg)) {
+              if (CONFIG.DEBUG) logDebug("🌠 许愿点星: 无需执行(" + msg + ")");
+              return false;
+            }
+            var transient = isTransientFailText(msg || "");
+            if (transient && retryNo < transientRetries) {
+              log("⚠️ 许愿点星繁忙，第" + (retryNo + 1) + "次重试");
+              return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                return one(loopNo, retryNo + 1);
+              });
+            }
+            if (transient) {
+              FARM_EVENT_STATS.busy += 1;
+              log("⚠️ 许愿点星繁忙: 已重试" + transientRetries + "次，留待下轮");
+              return false;
+            }
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 许愿点星失败: " + msg);
+            return false;
+          }
+          done += 1;
+          FARM_EVENT_STATS.wishUpgrade += 1;
+          if (!appendWishReward(json, "🌠 许愿点星: ")) {
+            log("🌠 许愿点星: 成功(" + done + "/" + can + ")");
+          }
+          if (loopNo + 1 >= can) return true;
+          return sleep(CONFIG.WAIT_MS).then(function () {
+            return one(loopNo + 1, 0);
+          });
+        });
+      }
+
+      return one(0, 0).then(function () {
+        if (done <= 0) return state;
+        return fetchIndex("点星后");
       });
     }
 
     function wishHelp(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_HELP) return Promise.resolve(state);
+      var status = Number(state.status || 0) || 0;
+      if (status !== 2 && status !== 3) {
+        if (CONFIG.DEBUG) logDebug("🌠 许愿助力: 当前状态" + status + "，跳过");
+        return Promise.resolve(state);
+      }
       var self = Number(state.self || 0) || 0;
       if (self >= 2) {
         if (CONFIG.DEBUG) logDebug("🌠 许愿助力: 今日次数已满(" + self + ")，跳过");
@@ -9970,16 +10217,65 @@ function runFarmEvents(cookie) {
       });
     }
 
-    return fetchIndex("开始").then(function (startState) {
-      if (!startState || startState.open !== 1) return;
-      return claimStars(startState)
-        .then(function (st2) {
-          return wishHelp(st2 || startState);
-        })
-        .then(function () {
-          return fetchIndex("结束");
-        });
-    });
+    function decideWishAction(state) {
+      if (!state) return "";
+      var status = Number(state.status || 0) || 0;
+      if (CONFIG.FARM_EVENT_WISH_AUTO_HARVEST && status === 4) return "harvest";
+      if (CONFIG.FARM_EVENT_WISH_AUTO_STAR && ensureArray(state.starlist).length > 0) return "claimStars";
+      if (CONFIG.FARM_EVENT_WISH_AUTO_PLANT && status === 0) {
+        var opt = pickWishOption(state);
+        if (opt && Number(opt.id || 0) > 0) return "plant";
+      }
+      if (CONFIG.FARM_EVENT_WISH_AUTO_UPGRADE && status === 0) {
+        var cost = Number(state.costStar || 0) || 0;
+        var star = Number(state.vstar || 0) || 0;
+        var wid = Number(state.wId || 0) || 0;
+        if (wid <= 0 && cost > 0 && star >= cost) return "upgrade";
+      }
+      if (CONFIG.FARM_EVENT_WISH_AUTO_HELP && (status === 2 || status === 3)) {
+        var self = Number(state.self || 0) || 0;
+        if (self < 2) return "help";
+      }
+      return "";
+    }
+
+    function executeWishAction(state, action) {
+      if (!action) return Promise.resolve(state);
+      if (action === "harvest") return harvestWish(state);
+      if (action === "claimStars") return claimStars(state);
+      if (action === "plant") return plantWish(state);
+      if (action === "upgrade") return upgradeWish(state);
+      if (action === "help") return wishHelp(state);
+      return Promise.resolve(state);
+    }
+
+    function pass(state, loopNo) {
+      if (!state) return Promise.resolve(state);
+      if (loopNo > maxPass) return Promise.resolve(state);
+      var action = decideWishAction(state);
+      if (!action) return Promise.resolve(state);
+      if (CONFIG.DEBUG) logDebug("🌠 许愿决策(第" + loopNo + "轮): " + action);
+      var beforeSig = wishStateSig(state);
+      var beforeCount = wishActionCount();
+      return executeWishAction(state, action).then(function (nextState) {
+        var now = nextState || state;
+        var afterSig = wishStateSig(now);
+        var afterCount = wishActionCount();
+        if (loopNo < maxPass && (afterSig !== beforeSig || afterCount > beforeCount)) {
+          return pass(now, loopNo + 1);
+        }
+        return now;
+      });
+    }
+
+    return fetchIndex("开始")
+      .then(function (startState) {
+        if (!startState || startState.open !== 1) return null;
+        return pass(startState, 1);
+      })
+      .then(function () {
+        return fetchIndex("结束");
+      });
   }
 
   function runDay7Probe() {
@@ -13863,8 +14159,32 @@ function formatTimeFarmCropMap(crops) {
   return parts.join("；");
 }
 
+function timeFarmStageText(b) {
+  var v = Number(b || 0);
+  if (v === 0) return "空地";
+  if (v === 1) return "种子";
+  if (v === 2) return "发芽";
+  if (v === 3) return "成株";
+  if (v === 4) return "开花";
+  if (v === 5) return "初熟";
+  if (v === 6) return "成熟";
+  if (v === 7) return "枯萎";
+  return "状态" + v;
+}
+
+function timeFarmLandName(land, cid) {
+  var direct = normalizeSpace(
+    (land && (land.cName || land.cropName || land.crop_name || land.name || land.tName || land.title)) || ""
+  );
+  if (direct && !/^作物#?\d+$/i.test(direct)) return direct;
+  var byCid = getTimeFarmCropName(cid);
+  if (byCid) return byCid;
+  if (cid) return "cId" + String(cid);
+  return "未知作物";
+}
+
 function summarizeTimeFarmLand(list) {
-  var out = { total: 0, empty: 0, withered: 0, mature: 0, growing: 0, crops: {}, cropText: "" };
+  var out = { total: 0, empty: 0, withered: 0, mature: 0, growing: 0, crops: {}, cropStages: {}, cropText: "" };
   for (var i = 0; i < list.length; i++) {
     var land = list[i] || {};
     out.total += 1;
@@ -13875,13 +14195,16 @@ function summarizeTimeFarmLand(list) {
     else out.growing += 1;
     if (b !== 0) {
       var cid = timeFarmLandCropId(land);
-      if (cid) {
-        var name = getTimeFarmCropName(cid);
-        if (name) out.crops[name] = (out.crops[name] || 0) + 1;
+      var baseName = timeFarmLandName(land, cid);
+      var stageName = timeFarmStageText(b);
+      if (baseName) {
+        out.crops[baseName] = (out.crops[baseName] || 0) + 1;
+        var key = baseName + "(" + stageName + ")";
+        out.cropStages[key] = (out.cropStages[key] || 0) + 1;
       }
     }
   }
-  out.cropText = formatTimeFarmCropMap(out.crops);
+  out.cropText = formatTimeFarmCropMap(out.cropStages) || formatTimeFarmCropMap(out.crops);
   return out;
 }
 
@@ -14103,6 +14426,28 @@ function fetchTimeFarmSpecialSeedMap(cookie) {
         .catch(function () {
           return 0;
         });
+    })
+    .catch(function () {
+      return 0;
+    });
+}
+
+function preloadTimeFarmSeedNames(cookie, ctx) {
+  if (!ctx) return Promise.resolve(0);
+  return callTimeFarmApi(cookie, "", timeFarmParams(ctx), true)
+    .then(function (seedJson) {
+      var list = ensureArray(seedJson);
+      var added = 0;
+      for (var i = 0; i < list.length; i++) {
+        var it = list[i] || {};
+        var cid = String(it.cId || it.cropid || it.id || "");
+        var name = normalizeSpace(it.cName || it.name || it.cropName || "");
+        if (!cid || !name) continue;
+        var prev = CROP_NAME_MAP[cid];
+        recordCropName(cid, name);
+        if (!prev || prev !== CROP_NAME_MAP[cid]) added += 1;
+      }
+      return added;
     })
     .catch(function () {
       return 0;
@@ -14541,6 +14886,13 @@ function runTimeFarm(cookie) {
             });
             logDebug("🕰️ 时光专用种子映射: 新增" + added + "，累计" + keys.length);
           }
+        })
+        .then(function () {
+          return preloadTimeFarmSeedNames(cookie, ctx).then(function (addedName) {
+            if (CONFIG.DEBUG && addedName > 0) {
+              logDebug("🕰️ 时光种子名称映射: 新增" + addedName);
+            }
+          });
         })
         .then(function () {
           return pass(0);
