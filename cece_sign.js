@@ -1,23 +1,161 @@
 /*
 测测签到+任务（QX/Surge/Loon/Node）
+
+抓包说明：
+QX:
 [rewrite_local]
 ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ url script-request-body cece_sign.js
 [mitm]
 hostname = api.cece.com
+
+Loon:
+[Script]
+http-request ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ script-path=cece_sign.js, requires-body=true, timeout=60, tag=cece_sign_capture
+[MITM]
+hostname = api.cece.com
+
+Surge:
+[Script]
+cece_sign_capture = type=http-request,pattern=^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$,script-path=cece_sign.js,requires-body=1,timeout=60
+[MITM]
+hostname = api.cece.com
+
+说明：
+1) 仅抓 refresh 也可完成签到状态查询（脚本会注入内置查询端点）。
+2) 星星/精灵等任务端点若签名失效会自动跳过，不做盲执行。
 */
 const $ = new Env("测测签到");
-const VER = "v1.2.1";
+const VER = "v1.3.2";
 const STORE = "cece_task_state_v1";
-const CAPTURE = String.raw`[rewrite_local]
+const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ url script-request-body cece_sign.js
 [mitm]
 hostname = api.cece.com`;
+const CAPTURE_LOON = String.raw`[Script]
+http-request ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ script-path=cece_sign.js, requires-body=true, timeout=60, tag=cece_sign_capture
+[MITM]
+hostname = api.cece.com`;
+const CAPTURE_SURGE = String.raw`[Script]
+cece_sign_capture = type=http-request,pattern=^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$,script-path=cece_sign.js,requires-body=1,timeout=60
+[MITM]
+hostname = api.cece.com`;
+const EMBEDDED_FP = {
+  apikey: "03096a948345c67323f533565acef6cb",
+  uuid: "61b2abe0-cab7-11ef-b24b-17987d946043",
+};
+const EMBEDDED_ENDPOINTS = [
+  {
+    key: "sign_index",
+    method: "GET",
+    url: "https://api.cece.com/user/signIn/index_v2?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&color_id=burgundyRed&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771777366367&sign=990434FB2919944398A7DA319F6D51E8&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "D57W416n", contentType: "application/json" },
+  },
+  {
+    key: "sign_record",
+    method: "GET",
+    url: "https://api.cece.com/user/signIn/record?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&page=1&page_size=20&seed=1771777368563&sign=1920234CBF3421594A0A2F9AF70FEC30&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "nc5q9W7e", contentType: "application/json" },
+  },
+  {
+    key: "user_info",
+    method: "GET",
+    url: "https://api.cece.com/user/index/info?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771777366654&sign=D7B806F15B97A6B7CCC4CBFE6F9B6020&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "rVipMUD6", contentType: "application/json" },
+  },
+  {
+    key: "scrape_lucky_note",
+    method: "GET",
+    url: "https://api.cece.com/activity/activity_new/scrape_lucky_note?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862540840&sign=24ECFD2E1529895371858CCE649351EC&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "8bQ1J9nx", contentType: "application/json" },
+  },
+  {
+    key: "lucky_note",
+    method: "POST",
+    url: "https://api.cece.com/community/luck/b01_luck?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862540426&sign=2BC743EF5FFE2EB3339ED510FCB12A49&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "{\"luck_keys\":[\"Moon-H2-N-Merc:1771894800000\"],\"point\":null,\"item_id\":\"tspt401fa441f431c0a54ce345cc\",\"need_ai_info\":false,\"need_fortune\":true,\"type_point\":{\"all\":\"null\",\"love\":\"null\",\"money\":\"null\",\"work\":\"null\",\"study\":\"null\",\"scale\":\"null\"}}",
+    meta: { method: "POST" },
+    req: { nonce: "6iyD2i4g", contentType: "application/json" },
+  },
+  {
+    key: "star_ways",
+    method: "GET",
+    url: "https://api.cece.com/user/star/ways?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862536368&sign=E2E1DA81A0C4B6314CDF3C8D4E875B99&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "1fv25c63", contentType: "application/json" },
+  },
+  {
+    key: "star_report_watch_live",
+    method: "GET",
+    url: "https://api.cece.com/user/star/report_task_done?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862532895&sign=C316B170F3AAF2AD6F01630811C3AC92&task_type=watch_live&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", task: "watch_live" },
+    req: { nonce: "7YN1130R", contentType: "application/json" },
+  },
+  {
+    key: "star_claim_watch_live",
+    method: "GET",
+    url: "https://api.cece.com/user/star/get_star?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862536281&sign=27F17F13DFBC87418578D473E8D3E582&task_type=watch_live&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", task: "watch_live" },
+    req: { nonce: "pCn0n10S", contentType: "application/json" },
+  },
+  {
+    key: "elf_overview",
+    method: "GET",
+    url: "https://api.cece.com/elf?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862541937&sign=A22E9363C656B1C430EFEFDF2EEE4CCE&uri=elf/get_user_elf_v2&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", uri: "elf/get_user_elf_v2" },
+    req: { nonce: "Z127n5GA", contentType: "application/json" },
+  },
+  {
+    key: "elf_my_list",
+    method: "GET",
+    url: "https://api.cece.com/elf?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862553651&sign=B81A88E198EA3FB747651DF4AE48B5E9&uri=elf/get_my_list&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", uri: "elf/get_my_list" },
+    req: { nonce: "rYCqk5dd", contentType: "application/json" },
+  },
+  {
+    key: "elf_get_free_food",
+    method: "GET",
+    url: "https://api.cece.com/elf/bg/get_free_food?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862554797&sign=9BE312D1A7861FBDEF9BDC27D654DCDD&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET" },
+    req: { nonce: "32U3W46v", contentType: "application/json" },
+  },
+  {
+    key: "elf_add_ats12sco3449_star_at_01",
+    method: "GET",
+    url: "https://api.cece.com/elf?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&elfId=ATS12SCO3449&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862545216&sign=08D0565E2E096FCA667E186F5A37B835&starId=star_at_01&uri=elf/user_add_stars&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", uri: "elf/user_add_stars", elfId: "ATS12SCO3449", starId: "star_at_01" },
+    req: { nonce: "186183M8", contentType: "application/json" },
+  },
+  {
+    key: "elf_feed_ats12sco3449",
+    method: "GET",
+    url: "https://api.cece.com/elf?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&elfId=ATS12SCO3449&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862549765&sign=A866AC60532540E64BEB9423C7F70596&uri=elf/feed_elf_v2&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "",
+    meta: { method: "GET", uri: "elf/feed_elf_v2", elfId: "ATS12SCO3449" },
+    req: { nonce: "00J5p82N", contentType: "application/json" },
+  },
+];
 const arg = parseArg(typeof $argument === "string" ? $argument : "");
 const CFG = {
   queryOnly: toBool(arg.query_only, false),
   doStar: toBool(arg.do_star_tasks, true),
   doElf: toBool(arg.do_elf_tasks, true),
   strictTaskCapture: toBool(arg.strict_task_capture, true),
+  embeddedBaseline: toBool(arg.use_embedded_baseline, true),
   waitMin: toInt(arg.min_extra_wait, 2),
   waitMax: toInt(arg.max_extra_wait, 6),
   maxAuto: toInt(arg.max_auto_star_tasks, 2),
@@ -32,14 +170,22 @@ const UA = "Cece/10.30.0 Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 like Mac OS X) 
 Promise.resolve().then(async function () {
   try {
     log("==========");
-    log("🚀 启动 " + VER + " | query_only=" + CFG.queryOnly + " | doStar=" + CFG.doStar + " | doElf=" + CFG.doElf + " | strictTaskCapture=" + CFG.strictTaskCapture);
+    log("🚀 启动 " + VER + " | query_only=" + CFG.queryOnly + " | doStar=" + CFG.doStar + " | doElf=" + CFG.doElf + " | strictTaskCapture=" + CFG.strictTaskCapture + " | embeddedBaseline=" + CFG.embeddedBaseline);
     if (typeof $request !== "undefined") return capReq();
     const st = load();
+    const seedRet = injectEmbeddedBaseline(st, "startup");
+    if (seedRet.warn) log("⚠️ 内置基线提示: " + seedRet.warn);
+    if (seedRet.added > 0) {
+      save(st);
+      log("🧱 已注入内置查询端点 " + seedRet.added + " 条（仅抓 refresh 可完成状态查询）");
+    }
     const s = ep(st, "sign_index");
     if (!s) {
+      const cli = captureClientName();
+      const guide = captureGuideByClient();
       log("❌ 缺少 sign_index");
-      log("📋 抓包配置:\n" + CAPTURE);
-      $.msg($.name, "未获取到抓包字段", "请先进入签到页触发抓包");
+      log("📋 抓包配置(" + cli + "):\n" + guide);
+      msgLong($.name, "未获取到抓包字段", "请先进入签到页触发抓包\n" + guide, 260);
       return;
     }
     await ensureAuth(st, "启动检测");
@@ -62,7 +208,13 @@ function capReq() {
   if (!d) return;
   const h = normH($request.headers || {});
   const req = { authorization: txt(h.authorization), s_id: txt(h.s_id || h["s-id"]), nonce: txt(h.nonce), ua: txt(h["user-agent"]), contentType: txt(h["content-type"]) };
-  if (d.key !== "auth_refresh" && !req.authorization) return $.msg($.name, "抓包失败", "未找到 Authorization");
+  if (d.key !== "auth_refresh" && !req.authorization) {
+    const cli = captureClientName();
+    const guide = captureGuideByClient();
+    log("⚠️ 抓包失败: 未找到 Authorization");
+    log("📋 抓包配置(" + cli + "):\n" + guide);
+    return msgLong($.name, "抓包失败", "未找到 Authorization\n请确认按以下配置抓包\n" + guide, 260);
+  }
   const st = load();
   if (!st.eps || typeof st.eps !== "object") st.eps = {};
   st.eps[d.key] = { url: url, req: req, body: body || "", meta: { method: d.method, task: d.task || "", uri: d.uri || "", elfId: d.elfId || "", starId: d.starId || "" }, t: Date.now() };
@@ -82,15 +234,86 @@ function capReq() {
     if (req.ua) st.ua = req.ua;
     if (req.contentType) st.contentType = req.contentType;
   }
+  const seedRet = injectEmbeddedBaseline(st, "capture");
+  if (seedRet.warn) log("⚠️ 内置基线提示: " + seedRet.warn);
+  if (seedRet.added > 0) log("🧱 抓包后补全查询端点: +" + seedRet.added);
   save(st);
-  log("✅ 抓包更新: " + d.key + " | " + short(url, 120));
+  log("✅ 抓包更新: " + d.key);
+  logLong("🌐 URL", url, 220);
+  if (req.nonce) log("🧪 nonce: " + req.nonce);
+  if (req.s_id) logLong("🧷 s_id", req.s_id, 220);
+  if (req.authorization) logLong("🔐 Authorization", req.authorization, 220);
+  if (body) logLong("🧾 body", body, 220);
   if (d.key === "auth_refresh") {
     const jb = toJSON(body || "", {});
     const rt = txt(jb.refresh_token);
     const exp = jwtExp(rt);
     const expStr = exp > 0 ? iso(exp) : "未解析";
-    $.msg($.name, "抓包字段已更新", d.key + " | refresh_exp=" + expStr);
-  } else $.msg($.name, "抓包字段已更新", d.key);
+    notifyCapture(d.key, req, url, body, expStr);
+  } else notifyCapture(d.key, req, url, body, "");
+}
+
+function injectEmbeddedBaseline(st, source) {
+  const ret = { added: 0, warn: "" };
+  if (!CFG.embeddedBaseline) return ret;
+  if (!st || typeof st !== "object") return ret;
+  if (!st.eps || typeof st.eps !== "object") st.eps = {};
+  const authEp = ep(st, "auth_refresh");
+  if (authEp && authEp.url) {
+    const chk = compatCheck(authEp.url);
+    if (!chk.ok) ret.warn = chk.msg;
+  }
+  const srcReq = authEp && authEp.req ? authEp.req : {};
+  const reqBase = {
+    authorization: txt(st.authorization),
+    s_id: txt(st.s_id || srcReq.s_id),
+    nonce: txt(st.nonce || srcReq.nonce),
+    ua: txt(st.ua || srcReq.ua || UA),
+    contentType: txt(st.contentType || srcReq.contentType || "application/json"),
+  };
+  if (reqBase.s_id) st.s_id = reqBase.s_id;
+  if (reqBase.nonce) st.nonce = reqBase.nonce;
+  if (reqBase.ua) st.ua = reqBase.ua;
+  if (reqBase.contentType) st.contentType = reqBase.contentType;
+  EMBEDDED_ENDPOINTS.forEach(function (it) {
+    if (!it || !it.key || !it.url) return;
+    if (ep(st, it.key)) return;
+    const ro = it.req || {};
+    st.eps[it.key] = {
+      url: it.url,
+      req: {
+        authorization: reqBase.authorization,
+        s_id: txt(ro.s_id || reqBase.s_id),
+        nonce: txt(ro.nonce || reqBase.nonce),
+        ua: txt(ro.ua || reqBase.ua),
+        contentType: txt(ro.contentType || reqBase.contentType),
+      },
+      body: txt(it.body) ? it.body : "",
+      meta: jclone(it.meta || { method: txt(it.method || "GET") || "GET" }),
+      t: Date.now(),
+    };
+    ret.added++;
+  });
+  if (source === "capture" && ret.added > 0) {
+    const signIndex = ep(st, "sign_index");
+    if (signIndex && signIndex.url) st.indexUrl = signIndex.url;
+    const userInfo = ep(st, "user_info");
+    if (userInfo && userInfo.url) st.infoUrl = userInfo.url;
+  }
+  return ret;
+}
+
+function compatCheck(refreshUrl) {
+  try {
+    const u = new URL(String(refreshUrl || ""));
+    const apikey = txt(u.searchParams.get("apikey"));
+    const uuid = txt(u.searchParams.get("uuid"));
+    if (apikey && apikey !== EMBEDDED_FP.apikey) return { ok: false, msg: "refresh apikey 与内置基线不一致，可能触发签名错误" };
+    if (uuid && uuid !== EMBEDDED_FP.uuid) return { ok: false, msg: "refresh uuid 与内置基线不一致，可能触发签名错误" };
+    return { ok: true, msg: "" };
+  } catch (e) {
+    return { ok: true, msg: "" };
+  }
 }
 
 function detect(url, body) {
@@ -147,6 +370,9 @@ async function runOne(st, i, n) {
     if (rr.ok) s = await sign(st);
   }
   if (!s.ok) {
+    if (/code=1001|签名错误/.test(txt(s.err))) {
+      log("⚠️ 接口签名错误：当前业务端点签名不可用。若只抓 refresh，请先确认内置基线兼容或补抓业务端点。");
+    }
     log("❌ 状态查询失败: " + s.err);
     summaries.push(line(i, fmtP(p), "❌ 状态查询失败", -1, "", "", -1, ""));
     return;
@@ -178,9 +404,15 @@ async function runOne(st, i, n) {
 async function ensureAuth(st, reason) {
   const s = ep(st, "sign_index");
   if (!s || !s.req) return false;
-  const auth = txt((s.req || {}).authorization);
+  const auth = txt((s.req || {}).authorization || st.authorization);
+  if (auth && !txt((s.req || {}).authorization)) bindAuth(st, auth);
   const rt = getRefreshToken(st);
   if (!auth) {
+    const qr = await call(s, "GET");
+    if (qr.ok && toInt(((qr.data || {}).code), -1) === 0) {
+      log("ℹ️ 当前端点可在无Authorization下使用，跳过刷新");
+      return true;
+    }
     const rr = await refreshAuth(st, reason + ": 缺少Authorization");
     if (!rr.ok) log("ℹ️ 无法自动刷新: " + rr.err);
     return rr.ok;
@@ -216,8 +448,7 @@ function isAuthExpiredErr(err) {
 async function refreshAuth(st, reason) {
   const e = ep(st, "auth_refresh");
   if (!e || !e.url) return { ok: false, err: "未抓到 /user/auth/refresh_token" };
-  const jb = toJSON(txt(e.body) ? e.body : "{}", {});
-  const rt = txt(jb.refresh_token || getRefreshToken(st));
+  const rt = txt(getRefreshToken(st));
   if (!rt) return { ok: false, err: "缺少 refresh_token" };
   const b = JSON.stringify({ refresh_token: rt });
   const r = await call(e, "POST", b);
@@ -232,13 +463,8 @@ async function refreshAuth(st, reason) {
   bindAuth(st, ah);
   st.authorization = ah;
   st.refresh_token = nrt;
-  try {
-    const eb = toJSON(txt(e.body) ? e.body : "{}", {});
-    eb.refresh_token = nrt;
-    e.body = JSON.stringify(eb);
-  } catch (x) {
-    e.body = JSON.stringify({ refresh_token: nrt });
-  }
+  // Do NOT rewrite captured auth_refresh body template.
+  // Some targets sign POST body bytes; rewriting refresh_token can break signature replay.
   const exp = jwtExp(at);
   const expStr = exp > 0 ? iso(exp) : "未解析";
   const ttl = toInt(d.expires_in, -1);
@@ -551,7 +777,8 @@ function feedEp(st, elfId) {
 function call(e, m, body) {
   if (!e || !e.url) return Promise.resolve({ ok: false, err: "缺少端点" });
   const req = e.req || {};
-  const H = { "User-Agent": req.ua || UA, Authorization: req.authorization || "", "Accept-Encoding": "gzip", "Content-Type": req.contentType || "application/json" };
+  const H = { "User-Agent": req.ua || UA, "Accept-Encoding": "gzip", "Content-Type": req.contentType || "application/json" };
+  if (txt(req.authorization)) H.Authorization = req.authorization;
   if (req.s_id) H.s_id = req.s_id;
   if (req.nonce) H.nonce = req.nonce;
   const mm = String(m || ((e.meta || {}).method || "GET")).toUpperCase();
@@ -700,6 +927,54 @@ function txt(v) { return String(v || "").replace(/<br\s*\/?>/gi, " ").replace(/<
 function toInt(v, d) { const n = parseInt(String(v), 10); return isNaN(n) ? d : n; }
 function sk(v) { const s = String(v || "").trim().toLowerCase(); return s ? s.replace(/[^a-z0-9_]+/g, "_").replace(/^_+|_+$/g, "") : "none"; }
 function short(v, n) { const s = String(v || ""); return !n || s.length <= n ? s : s.slice(0, n) + "..."; }
+function splitChunks(v, n) {
+  const s = String(v || "");
+  const max = toInt(n, 240);
+  if (!s) return [];
+  if (s.length <= max) return [s];
+  const out = [];
+  for (let i = 0; i < s.length; i += max) out.push(s.slice(i, i + max));
+  return out;
+}
+function logLong(label, value, n) {
+  const arr = splitChunks(value, n || 220);
+  if (!arr.length) return;
+  if (arr.length === 1) return log(label + ": " + arr[0]);
+  for (let i = 0; i < arr.length; i++) {
+    log(label + " (" + (i + 1) + "/" + arr.length + "): " + arr[i]);
+  }
+}
+function msgLong(title, subtitle, value, n) {
+  const arr = splitChunks(value, n || 260);
+  if (!arr.length) return;
+  if (arr.length === 1) return $.msg(title, subtitle, arr[0]);
+  for (let i = 0; i < arr.length; i++) {
+    $.msg(title, subtitle + " (" + (i + 1) + "/" + arr.length + ")", arr[i]);
+  }
+}
+function captureClientName() {
+  if ($.isQuanX()) return "QX";
+  if ($.isLoon()) return "Loon";
+  if ($.isSurge()) return "Surge";
+  return "Node";
+}
+function captureGuideByClient() {
+  if ($.isQuanX()) return CAPTURE_QX;
+  if ($.isLoon()) return CAPTURE_LOON;
+  if ($.isSurge()) return CAPTURE_SURGE;
+  return "QX:\n" + CAPTURE_QX + "\n\nLoon:\n" + CAPTURE_LOON + "\n\nSurge:\n" + CAPTURE_SURGE;
+}
+function notifyCapture(key, req, url, body, refreshExp) {
+  const lines = [];
+  lines.push("key=" + key);
+  lines.push("url=" + String(url || ""));
+  if (req && req.nonce) lines.push("nonce=" + req.nonce);
+  if (req && req.s_id) lines.push("s_id=" + req.s_id);
+  if (req && req.authorization) lines.push("authorization=" + req.authorization);
+  if (body) lines.push("body=" + body);
+  if (refreshExp) lines.push("refresh_exp=" + refreshExp);
+  msgLong($.name, "抓包字段已更新", lines.join("\n"), 260);
+}
 function normH(h) { const o = {}; Object.keys(h || {}).forEach((k) => (o[String(k).toLowerCase()] = String(h[k] || ""))); return o; }
 function parseArg(s) { const o = {}; if (!s) return o; String(s).split("&").forEach((seg) => { if (!seg) return; const i = seg.indexOf("="); const k = i >= 0 ? seg.slice(0, i) : seg; const v = i >= 0 ? seg.slice(i + 1) : ""; if (!k) return; o[ud(k)] = ud(v.replace(/\+/g, "%20")); }); return o; }
 function ud(s) { try { return decodeURIComponent(s); } catch (e) { return s; } }
@@ -707,10 +982,11 @@ function toBool(v, d) { if (v === undefined || v === null || v === "") return !!
 function toJSON(s, d) { if (!s || typeof s !== "string") return d; try { return JSON.parse(s); } catch (e) { return d; } }
 function getRefreshToken(st) {
   if (!st) return "";
-  if (txt(st.refresh_token)) return txt(st.refresh_token);
   const e = ep(st, "auth_refresh");
   const jb = toJSON(e && txt(e.body) ? e.body : "{}", {});
-  return txt(jb.refresh_token);
+  if (txt(jb.refresh_token)) return txt(jb.refresh_token);
+  if (txt(st.refresh_token)) return txt(st.refresh_token);
+  return "";
 }
 function jwtPayload(v) {
   const tok = txt(v).replace(/^Bearer\s+/i, "");
