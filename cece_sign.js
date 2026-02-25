@@ -25,7 +25,7 @@ hostname = api.cece.com
 2) 星星/精灵等任务端点若签名失效会自动跳过，不做盲执行。
 */
 const $ = new Env("测测签到");
-const VER = "v1.3.2";
+const VER = "v1.3.3";
 const STORE = "cece_task_state_v1";
 const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ url script-request-body cece_sign.js
@@ -133,6 +133,14 @@ const EMBEDDED_ENDPOINTS = [
     req: { nonce: "32U3W46v", contentType: "application/json" },
   },
   {
+    key: "ad_cfg_elf",
+    method: "GET",
+    url: "https://api.cece.com/user/ad/config_detail?ad_palace=elf&ad_type=incentive_video&agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862541938&sign=AF67EED9A628CFE5D4CAEFD08D38A68C&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
+    body: "{\"ad_palace\":\"elf\",\"ad_type\":\"incentive_video\"}",
+    meta: { method: "GET", palace: "elf", adType: "incentive_video" },
+    req: { nonce: "j5k036ls", contentType: "application/json" },
+  },
+  {
     key: "elf_add_ats12sco3449_star_at_01",
     method: "GET",
     url: "https://api.cece.com/elf?agent=ios.cc&apikey=03096a948345c67323f533565acef6cb&appType=cece&appid=cece&brand=iPhone&carrier=6553565535&channel=AppStore&client=ios&deviceId=&deviceVersion=iOS26.3&elfId=ATS12SCO3449&iosidfa=&lang=zh-CN&model=iPhone17%2C1&network=wifi&oaid=&seed=1771862545216&sign=08D0565E2E096FCA667E186F5A37B835&starId=star_at_01&uri=elf/user_add_stars&uuid=61b2abe0-cab7-11ef-b24b-17987d946043&vs=10.30.0",
@@ -217,7 +225,21 @@ function capReq() {
   }
   const st = load();
   if (!st.eps || typeof st.eps !== "object") st.eps = {};
-  st.eps[d.key] = { url: url, req: req, body: body || "", meta: { method: d.method, task: d.task || "", uri: d.uri || "", elfId: d.elfId || "", starId: d.starId || "" }, t: Date.now() };
+  st.eps[d.key] = {
+    url: url,
+    req: req,
+    body: body || "",
+    meta: {
+      method: d.method,
+      task: d.task || "",
+      uri: d.uri || "",
+      elfId: d.elfId || "",
+      starId: d.starId || "",
+      palace: d.palace || "",
+      adType: d.adType || "",
+    },
+    t: Date.now(),
+  };
   if (d.key === "sign_index") {
     st.indexUrl = url;
     st.authorization = req.authorization;
@@ -342,6 +364,16 @@ function detect(url, body) {
     const t = txt(u.searchParams.get("task_type") || jb.task_type);
     return { key: t ? "star_claim_" + sk(t) : "star_claim", method: m, task: t };
   }
+  if (p === "/user/ad/config_detail") {
+    const palace = txt(u.searchParams.get("ad_palace") || jb.ad_palace);
+    const adType = txt(u.searchParams.get("ad_type") || jb.ad_type);
+    return { key: palace ? "ad_cfg_" + sk(palace) : "ad_cfg", method: m, palace: palace, adType: adType };
+  }
+  if (p === "/user/ad/reward") {
+    const palace = txt(u.searchParams.get("ad_palace") || jb.ad_palace);
+    const adType = txt(u.searchParams.get("ad_type") || jb.ad_type);
+    return { key: palace ? "ad_reward_" + sk(palace) : "ad_reward", method: m, palace: palace, adType: adType };
+  }
   if (p === "/elf/bg/get_free_food") return { key: "elf_get_free_food", method: m };
   if (p === "/elf") {
     const uri = txt(u.searchParams.get("uri") || jb.uri);
@@ -398,7 +430,8 @@ async function runOne(st, i, n) {
   const rw = fmtR(parseR(s.signResult) || r.desc || "");
   const fs = sr.after >= 0 ? sr.after : s.star;
   const ds = sr.before >= 0 && sr.after >= 0 ? diff(sr.before, sr.after) : "";
-  summaries.push(line(i, fmtP(p), stat, s.cycle >= 0 ? s.cycle : s.actual, rw, b.text ? short(b.text, 24) : "", fs, ds));
+  const signHint = starIssueHint(sr.signIssues);
+  summaries.push(line(i, fmtP(p), stat, s.cycle >= 0 ? s.cycle : s.actual, rw, b.text ? short(b.text, 24) : "", fs, ds, signHint));
 }
 
 async function ensureAuth(st, reason) {
@@ -536,7 +569,7 @@ async function scrape(st) {
 }
 
 async function starFlow(st) {
-  const out = { before: -1, after: -1, actions: [] };
+  const out = { before: -1, after: -1, actions: [], signIssues: [] };
   if (!CFG.doStar) return out;
   const w = ep(st, "star_ways");
   if (!w) return (log("ℹ️ 未抓到 star/ways"), out);
@@ -546,7 +579,15 @@ async function starFlow(st) {
   const csTxt = cs.size ? Array.from(cs).sort().join(",") : "无";
   log("🧩 星星任务白名单 | report=" + rsTxt + " | claim=" + csTxt + (CFG.strictTaskCapture ? " | strict=on" : " | strict=off"));
   let s = await qWays(w);
-  if (!s.ok) return (log("ℹ️ star/ways失败: " + s.err), out);
+  if (!s.ok) {
+    log("ℹ️ star/ways失败: " + s.err);
+    if (isSignErrText(s.err)) {
+      addSignIssue(out, "star/ways");
+      log("⚠️ 签名模板失效: star/ways");
+      log("📌 请补抓: /user/star/ways");
+    }
+    return out;
+  }
   out.before = s.star;
   out.after = s.star;
   log("⭐ 星星任务当前: " + s.star);
@@ -559,7 +600,7 @@ async function starFlow(st) {
       log("⏭️ 待领取但未抓到 get_star(" + ty + ")，跳过");
       continue;
     }
-    if (await claim(st, ty)) {
+    if (await claim(st, ty, out)) {
       got[ty] = 1;
       out.actions.push("领取:" + ty);
     }
@@ -588,6 +629,12 @@ async function starFlow(st) {
       n++;
       const rr = await call(re, "GET");
       if (!rr.ok || toInt((rr.data || {}).code, -1) !== 0) {
+        const j = rr.data || {};
+        if (rr.ok && isSignErrCodeMsg(j.code, j.msg)) {
+          addSignIssue(out, "report_task_done(" + ty + ")");
+          log("⚠️ 签名模板失效: report_task_done(" + ty + ") | code=" + toInt(j.code, -1) + " msg=" + txt(j.msg));
+          log("📌 请补抓: /user/star/report_task_done?task_type=" + ty);
+        }
         log("ℹ️ 上报失败: " + ty + " | " + (rr.ok ? txt((rr.data || {}).msg) : rr.err));
         continue;
       }
@@ -597,7 +644,7 @@ async function starFlow(st) {
       if (rf.ok) {
         s = rf;
         const cur = bt(s.list, ty);
-        if (cur && toInt(cur.done, -1) === 2 && !got[ty] && (!CFG.strictTaskCapture || hasTask(st, "claim", ty)) && (await claim(st, ty))) {
+        if (cur && toInt(cur.done, -1) === 2 && !got[ty] && (!CFG.strictTaskCapture || hasTask(st, "claim", ty)) && (await claim(st, ty, out))) {
           got[ty] = 1;
           out.actions.push("领取:" + ty);
         } else if (cur && toInt(cur.done, -1) === 2 && !got[ty] && CFG.strictTaskCapture && !hasTask(st, "claim", ty)) {
@@ -621,13 +668,20 @@ async function qWays(e) {
   const d = j.data || {};
   return { ok: true, star: toInt(d.star_num, -1), list: Array.isArray(d.list) ? d.list : [] };
 }
-async function claim(st, ty) {
+async function claim(st, ty, out) {
   const e = tEp(st, "claim", ty);
   if (!e) return (log("ℹ️ 未抓到 get_star: " + ty), false);
   const r = await call(e, "GET");
   if (!r.ok) return (log("ℹ️ 领取失败: " + ty + " | " + r.err), false);
   const j = r.data || {};
-  if (toInt(j.code, -1) !== 0) return (log("ℹ️ 领取异常: " + ty + " | code=" + j.code + " msg=" + txt(j.msg)), false);
+  if (toInt(j.code, -1) !== 0) {
+    if (isSignErrCodeMsg(j.code, j.msg)) {
+      addSignIssue(out, "get_star(" + ty + ")");
+      log("⚠️ 签名模板失效: get_star(" + ty + ") | code=" + toInt(j.code, -1) + " msg=" + txt(j.msg));
+      log("📌 请补抓: /user/star/get_star?task_type=" + ty);
+    }
+    return (log("ℹ️ 领取异常: " + ty + " | code=" + j.code + " msg=" + txt(j.msg)), false);
+  }
   log("🎁 已领取: " + ty);
   return true;
 }
@@ -681,6 +735,7 @@ async function elfFlow(st) {
   const me = ep(st, "elf_my_list");
   const oe = ep(st, "elf_overview");
   const fe = ep(st, "elf_get_free_food");
+  const ace = adCfgEp(st, "elf");
   let m0 = null;
   if (me) {
     m0 = await qMy(me);
@@ -694,6 +749,13 @@ async function elfFlow(st) {
       log("🧪 精灵概览: food=" + o0.food + " | elfId=" + (o0.elfId || "未返回") + " | starId=" + (o0.starId || "未返回"));
     }
   }
+  let ad0 = null;
+  if (ace) {
+    ad0 = await qAdCfg(ace);
+    if (ad0.ok) {
+      log("🎬 仙果广告配置: show=" + (ad0.show ? "1" : "0") + " | reward=" + ad0.rewardNum + " | times=" + ad0.rewarded + "/" + ad0.maxTimes + " | watch=" + ad0.watchSec + "s | adId=" + (ad0.adId || "未返回"));
+    } else log("ℹ️ 仙果广告配置查询失败: " + ad0.err);
+  }
   if (!CFG.queryOnly && m0 && m0.ok && fe && !m0.fin) {
     const r = await call(fe, "GET");
     if (r.ok && toInt((r.data || {}).code, -1) === 0) {
@@ -702,6 +764,18 @@ async function elfFlow(st) {
     } else log("ℹ️ 精灵签到仙果领取失败: " + (r.ok ? txt((r.data || {}).msg) : r.err));
   }
   if (!CFG.queryOnly && o0 && o0.ok) {
+    if (ad0 && ad0.ok) {
+      if (!ad0.show) log("ℹ️ 仙果广告当前不展示");
+      else if (ad0.maxTimes > 0 && ad0.rewarded >= ad0.maxTimes) log("ℹ️ 今日仙果广告奖励已达上限");
+      else {
+        const ar = await adReward(st, "elf");
+        if (!ar.hasEp) log("⏭️ 未抓到 /user/ad/reward(ad_palace=elf)，跳过广告仙果奖励");
+        else if (ar.ok) {
+          out.actions.push("广告仙果奖励提交");
+          log("🎥 广告仙果奖励提交成功" + (ar.msg ? " | " + ar.msg : ""));
+        } else log("ℹ️ 广告仙果奖励提交失败: " + ar.err);
+      }
+    }
     if (o0.elfId && o0.starId) {
       const ae = addEp(st, o0.elfId, o0.starId);
       if (ae) {
@@ -747,6 +821,23 @@ async function qMy(e) {
   for (let i = 0; i < ds.length; i++) if (ds[i] && ds[i].signed) c++;
   return { ok: true, fin: !!s.finished, days: c };
 }
+async function qAdCfg(e) {
+  const m = String(((e.meta || {}).method) || "GET").toUpperCase();
+  const r = await call(e, m);
+  if (!r.ok) return { ok: false, err: r.err };
+  const j = r.data || {};
+  if (toInt(j.code, -1) !== 0) return { ok: false, err: "code=" + j.code + " msg=" + txt(j.msg) };
+  const d = j.data || {};
+  return {
+    ok: true,
+    show: !!toInt(d.is_show, 0),
+    rewardNum: toInt(d.reward_num, 0),
+    maxTimes: toInt(d.reward_max_times, 0),
+    rewarded: toInt(d.rewarded_times, 0),
+    watchSec: toInt(d.reward_watch_time, 0),
+    adId: txt(d.reward_ad_id || d.rewardAdId),
+  };
+}
 async function qOv(e) {
   const r = await call(e, "GET");
   if (!r.ok) return { ok: false, err: r.err };
@@ -772,6 +863,40 @@ function feedEp(st, elfId) {
   if (CFG.strictTaskCapture) return null;
   const ks = pref(st, "elf_feed_");
   return ks.length === 1 ? ep(st, ks[0]) : null;
+}
+function adCfgEp(st, palace) {
+  const k = "ad_cfg_" + sk(palace || "");
+  if (ep(st, k)) return ep(st, k);
+  if (CFG.strictTaskCapture) return null;
+  const ks = pref(st, "ad_cfg_");
+  if (ks.length === 1) return ep(st, ks[0]);
+  return ep(st, "ad_cfg") || null;
+}
+function adRewardEp(st, palace) {
+  const k = "ad_reward_" + sk(palace || "");
+  if (ep(st, k)) return ep(st, k);
+  if (CFG.strictTaskCapture) return null;
+  const ks = pref(st, "ad_reward_");
+  if (ks.length === 1) return ep(st, ks[0]);
+  return ep(st, "ad_reward") || null;
+}
+async function adReward(st, palace) {
+  const e = adRewardEp(st, palace);
+  if (!e) return { hasEp: false, ok: false, err: "未抓到 /user/ad/reward" };
+  const m = String(((e.meta || {}).method) || "POST").toUpperCase();
+  const r = await call(e, m);
+  if (!r.ok) return { hasEp: true, ok: false, err: r.err };
+  const j = r.data || {};
+  if (toInt(j.code, -1) !== 0) {
+    if (isSignErrCodeMsg(j.code, j.msg)) {
+      log("⚠️ 签名模板失效: user/ad/reward(" + palace + ") | code=" + toInt(j.code, -1) + " msg=" + txt(j.msg));
+      log("📌 请补抓: /user/ad/reward?ad_palace=" + palace);
+    }
+    return { hasEp: true, ok: false, err: "code=" + j.code + " msg=" + txt(j.msg) };
+  }
+  const d = j.data || {};
+  const msg = txt(d.msg || d.message || j.msg);
+  return { hasEp: true, ok: true, msg: msg };
 }
 
 function call(e, m, body) {
@@ -902,7 +1027,7 @@ function fmtR(s) {
   if (/^无（?非奖励日）?$/i.test(r)) return "";
   return r;
 }
-function line(i, p, st, d, r, b, star, ds) {
+function line(i, p, st, d, r, b, star, ds, hint) {
   let x = "🧾账号" + i;
   if (p) x += "(" + p + ")";
   x += ": " + st;
@@ -910,7 +1035,29 @@ function line(i, p, st, d, r, b, star, ds) {
   if (star >= 0) x += " | ⭐" + star + (ds ? "(" + ds + ")" : "");
   if (r) x += " | 🎁" + r;
   if (b) x += " | 🌈" + b;
+  if (hint) x += " | ⚠️" + hint;
   return x;
+}
+function addSignIssue(out, issue) {
+  if (!out || !issue) return;
+  if (!Array.isArray(out.signIssues)) out.signIssues = [];
+  const s = txt(issue);
+  if (!s) return;
+  if (out.signIssues.indexOf(s) >= 0) return;
+  out.signIssues.push(s);
+}
+function starIssueHint(arr) {
+  if (!Array.isArray(arr) || !arr.length) return "";
+  return short("补抓:" + arr.join("、"), 64);
+}
+function isSignErrCodeMsg(code, msg) {
+  const c = toInt(code, -1);
+  const m = txt(msg || "").toLowerCase();
+  return c === 1001 || m.indexOf("签名") >= 0 || m.indexOf("signature") >= 0 || m.indexOf("sign error") >= 0;
+}
+function isSignErrText(err) {
+  const s = txt(err || "").toLowerCase();
+  return s.indexOf("code=1001") >= 0 || s.indexOf("签名") >= 0 || s.indexOf("signature") >= 0 || s.indexOf("sign error") >= 0;
 }
 function subline(lines) {
   const f = String(lines[0] || "");
