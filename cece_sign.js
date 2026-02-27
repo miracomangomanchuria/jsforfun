@@ -25,7 +25,7 @@ hostname = api.cece.com
 2) 星星/精灵等任务端点若签名失效会自动跳过，不做盲执行。
 */
 const $ = new Env("测测签到");
-const VER = "v1.3.3";
+const VER = "v1.3.5";
 const STORE = "cece_task_state_v1";
 const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/api\.cece\.com\/user\/auth\/refresh_token(?:\?.*)?$ url script-request-body cece_sign.js
@@ -769,7 +769,10 @@ async function elfFlow(st) {
       else if (ad0.maxTimes > 0 && ad0.rewarded >= ad0.maxTimes) log("ℹ️ 今日仙果广告奖励已达上限");
       else {
         const ar = await adReward(st, "elf");
-        if (!ar.hasEp) log("⏭️ 未抓到 /user/ad/reward(ad_palace=elf)，跳过广告仙果奖励");
+        if (!ar.hasEp) {
+          log("⏭️ 未抓到 /user/ad/reward(ad_palace=elf)，跳过广告仙果奖励");
+          log("📌 待补抓广告发奖: watch=" + ad0.watchSec + "s | reward=" + ad0.rewardNum + " | adId=" + (ad0.adId || "未返回"));
+        }
         else if (ar.ok) {
           out.actions.push("广告仙果奖励提交");
           log("🎥 广告仙果奖励提交成功" + (ar.msg ? " | " + ar.msg : ""));
@@ -1092,12 +1095,8 @@ function logLong(label, value, n) {
   }
 }
 function msgLong(title, subtitle, value, n) {
-  const arr = splitChunks(value, n || 260);
-  if (!arr.length) return;
-  if (arr.length === 1) return $.msg(title, subtitle, arr[0]);
-  for (let i = 0; i < arr.length; i++) {
-    $.msg(title, subtitle + " (" + (i + 1) + "/" + arr.length + ")", arr[i]);
-  }
+  const s = String(value || "");
+  $.msg(title, subtitle, s);
 }
 function captureClientName() {
   if ($.isQuanX()) return "QX";
