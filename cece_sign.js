@@ -1,4 +1,6 @@
 /*
+本脚本仅供个人学习交流使用，严禁用于任何商业用途，请于下载后24小时内删除。
+脚本无意侵犯任何第三方的肖像权、名誉权、著作权、商标权等合法权益，如涉嫌侵权，请权利人联系脚本，脚本将在收到通知后24小时内删除相关内容。
 测测签到+任务（QX/Surge/Loon/Node）
 
 抓包说明：
@@ -1299,3 +1301,7 @@ Env.prototype._request = function (method, opts) {
     reject(new Error("Unknown runtime"));
   });
 };
+
+
+
+

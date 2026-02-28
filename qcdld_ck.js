@@ -1,13 +1,15 @@
 /*
+本脚本仅供个人学习交流使用，严禁用于任何商业用途，请于下载后24小时内删除。
+脚本无意侵犯任何第三方的肖像权、名誉权、著作权、商标权等合法权益，如涉嫌侵权，请权利人联系脚本，脚本将在收到通知后24小时内删除相关内容。
 大乐斗 Cookie 获取脚本（六字段）
 
-【抓包方式】
-1) 在 QX 添加重写：
-   ^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
-2) 打开大乐斗简版页面，触发请求即可写入。
-
-【MITM】
-在 QX 的 MITM 中添加：dld.qzapp.z.qq.com
+【抓包方式（简版）】
+[rewrite_local]
+^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
+[mitm]
+hostname = dld.qzapp.z.qq.com
+打开大乐斗简版页面，触发请求即可写入。
+完整可复制配置见后文 CAPTURE_CONFIG_TEXT（缺少 Cookie 时会自动打印）。
 
 【保存字段】
 ptcz、openId、accessToken、newuin、openid、token
@@ -23,6 +25,10 @@ const VERSION = "2026-02-09.v3";
 const DEBUG = false;
 const NOTIFY = true;
 const $ = new API("qcdld_Cookie");
+const CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
+^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
+[mitm]
+hostname = dld.qzapp.z.qq.com`;
 
 !(async () => {
   if ($.env.isNode) {
@@ -31,6 +37,7 @@ const $ = new API("qcdld_Cookie");
   }
   if (!$.env.isRequest) {
     console.log("仅用于重写脚本");
+    console.log("QX 抓包配置（可整段复制）:\n" + CAPTURE_CONFIG_TEXT);
     return;
   }
 
@@ -38,6 +45,7 @@ const $ = new API("qcdld_Cookie");
   const cookie = headers["Cookie"] || headers["cookie"] || "";
   if (!cookie) {
     console.log("qcdld_Cookie 未捕获到 Cookie，请确认已开启抓包");
+    console.log("QX 抓包配置（可整段复制）:\n" + CAPTURE_CONFIG_TEXT);
     return;
   }
 
@@ -171,3 +179,7 @@ function API(name) {
     }
   };
 }
+
+
+
+
