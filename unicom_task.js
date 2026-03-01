@@ -23,7 +23,7 @@ hostname = loginxhm.10010.com
 */
 
 var SCRIPT_NAME = "联通营业厅签到";
-var SCRIPT_VERSION = "v1.5.0";
+var SCRIPT_VERSION = "v1.5.1";
 var STORAGE_SESSION_KEY = "unicom_hall_session_v1";
 var STORAGE_UA_KEY = "unicom_hall_ua_v1";
 var UNICOM_APP_SCHEME = "chinaunicom://";
@@ -147,8 +147,8 @@ async function runTask() {
   }
 
   $.log(SEP);
-  $.log(ts() + " [INIT] " + SCRIPT_NAME + " " + SCRIPT_VERSION + " | mode=" + mode + " | accounts=" + sessions.length);
-  $.log(ts() + " [QUEUE] " + formatAccountQueue(sessions));
+  $.log(ts() + " [INIT] " + SCRIPT_NAME + " " + SCRIPT_VERSION + " | 模式=" + mode + " | 账号数=" + sessions.length);
+  $.log(ts() + " [QUEUE] 账号队列: " + formatAccountQueue(sessions));
   $.log(SEP);
   var invalidStoreCookies = {};
 
@@ -174,6 +174,7 @@ async function runTask() {
       $.log(ts() + " [A" + (i + 1) + "] EXCEPTION " + stringifyError(err));
     }
     resultRows.push(row);
+    $.log(ts() + " [A" + (i + 1) + "/" + sessions.length + "] 完成: " + row.summary_line);
     if (row.result_category === "auth_expired" && sessions[i].source === "store") {
       invalidStoreCookies[sessions[i].cookie] = 1;
     }
@@ -190,7 +191,7 @@ async function runTask() {
   }
 
   var subtitle =
-    "mode=" +
+    "模式=" +
     mode +
     " | 成功:" +
     stat.success +
@@ -221,7 +222,7 @@ async function runTask() {
 async function runOneAccount(session, index, total) {
   var account = session.mobile ? maskMobile(session.mobile) : "账号" + index;
   $.log(SUB_SEP);
-  $.log(ts() + " [A" + index + "/" + total + "] " + account + " | source=" + session.source);
+  $.log(ts() + " [A" + index + "/" + total + "] " + account + " | 来源=" + formatSourceName(session.source));
 
   var state = await queryState(session, false);
   if (!state.ok && state.category === "auth_expired") {
@@ -255,9 +256,9 @@ async function runOneAccount(session, index, total) {
     ts() +
       " [A" +
       index +
-      "] STATE todayIsSignIn=" +
+      "] 状态: todayIsSignIn=" +
       (state.todaySigned ? "y" : "n") +
-      " continue=" +
+      " 连签=" +
       state.continueCount
   );
 
@@ -290,7 +291,7 @@ async function runOneAccount(session, index, total) {
       ts() +
         " [A" +
         index +
-        "] SIGN code=" +
+        "] 签到执行: code=" +
         sign.code +
         " status=" +
         sign.status +
@@ -376,17 +377,17 @@ async function runOneAccount(session, index, total) {
     ts() +
       " [A" +
       index +
-      "] TASK total=" +
+      "] 任务统计: 总=" +
       taskInfo.total +
-      " canDo=" +
+      " 可做=" +
       taskInfo.canDo +
-      " claim=" +
+      " 领奖=" +
       taskInfo.claimed +
-      " complete=" +
+      " 完成=" +
       taskInfo.completed +
-      " skip=" +
+      " 跳过=" +
       taskInfo.skipped +
-      " fail=" +
+      " 失败=" +
       taskInfo.failed
   );
 
@@ -624,6 +625,7 @@ async function processTasks(session, runMode) {
     failed: 0,
     rewardReady: 0,
     claimReady: 0,
+    tryReady: 0,
   };
   var actionTaken = false;
   var debugRows = [];
@@ -634,6 +636,7 @@ async function processTasks(session, runMode) {
     if (action !== "skip") stat.canDo += 1;
     if (action === "reward_only") stat.rewardReady += 1;
     if (action === "complete_and_reward") stat.claimReady += 1;
+    if (action === "try_complete_reward") stat.tryReady += 1;
 
     if (runMode === "query_only") continue;
     if (action === "skip") {
@@ -669,7 +672,12 @@ async function processTasks(session, runMode) {
           reason: "taskComplete_" + task.id + "_" + (complete.reason || "auth_expired"),
         };
       }
-      debugRows.push("complete_fail:" + shortTaskName(task.taskName) + ":" + (complete.reason || complete.desc || "unknown"));
+      if (action === "try_complete_reward") {
+        stat.skipped += 1;
+        debugRows.push("try_complete_skip:" + shortTaskName(task.taskName) + ":" + (complete.reason || complete.desc || "unknown"));
+      } else {
+        debugRows.push("complete_fail:" + shortTaskName(task.taskName) + ":" + (complete.reason || complete.desc || "unknown"));
+      }
     } else {
       stat.completed += 1;
     }
@@ -683,8 +691,13 @@ async function processTasks(session, runMode) {
           reason: "taskReward_" + task.id + "_" + (reward.reason || "auth_expired"),
         };
       }
-      stat.failed += 1;
-      debugRows.push("reward_fail:" + shortTaskName(task.taskName) + ":" + (reward.reason || reward.desc || "unknown"));
+      if (action === "try_complete_reward" && isExpectedTaskNotReady(reward.desc || reward.reason || "")) {
+        stat.skipped += 1;
+        debugRows.push("try_reward_skip:" + shortTaskName(task.taskName) + ":" + (reward.reason || reward.desc || "unknown"));
+      } else {
+        stat.failed += 1;
+        debugRows.push("reward_fail:" + shortTaskName(task.taskName) + ":" + (reward.reason || reward.desc || "unknown"));
+      }
     } else {
       stat.claimed += 1;
     }
@@ -698,7 +711,7 @@ async function processTasks(session, runMode) {
   var summaryShort =
     runMode === "query_only"
       ? "任务:可做" + stat.canDo + "/" + stat.total + " (仅查询)"
-      : "任务:领" + stat.claimed + " 完" + stat.completed + " 跳" + stat.skipped + " 失" + stat.failed;
+      : "任务:领" + stat.claimed + " 完" + stat.completed + " 尝" + stat.tryReady + " 跳" + stat.skipped + " 失" + stat.failed;
 
   var decision = "query_types(" + queryTypes.join(",") + ")";
   if (queryErrors.length) decision += "_partial";
@@ -789,6 +802,7 @@ function normalizeTaskItem(item, type) {
     taskState: String(it.taskState == null ? "" : it.taskState),
     buttonName: String(it.buttonName || ""),
     bubbleButtonName: String(it.bubbleButtonName || ""),
+    showStyle: String(it.showStyle == null ? "" : it.showStyle),
     type: String(type || ""),
   };
 }
@@ -797,6 +811,7 @@ function decideTaskAction(task) {
   if (!task || !task.id) return "skip";
   if (isTaskRewardReady(task)) return "reward_only";
   if (isTaskClaimReady(task)) return "complete_and_reward";
+  if (isTaskTryCompleteReady(task)) return "try_complete_reward";
   return "skip";
 }
 
@@ -810,13 +825,32 @@ function taskDecisionPriority(task) {
 function isTaskRewardReady(task) {
   var state = String((task && task.taskState) || "");
   var button = String((task && task.buttonName) || "");
-  return state === "3" || /已完成/.test(button);
+  var showStyle = String((task && task.showStyle) || "");
+  return state === "3" || /已完成/.test(button) || showStyle === "3";
 }
 
 function isTaskClaimReady(task) {
   var state = String((task && task.taskState) || "");
   var button = String((task && task.buttonName) || "");
-  return state === "0" || /去领取|领取/.test(button);
+  var showStyle = String((task && task.showStyle) || "");
+  return state === "0" || /去领取|领取/.test(button) || showStyle === "2";
+}
+
+function isTaskTryCompleteReady(task) {
+  var state = String((task && task.taskState) || "");
+  var button = String((task && task.buttonName) || "");
+  var bubble = String((task && task.bubbleButtonName) || "");
+  var showStyle = String((task && task.showStyle) || "");
+  if (state === "1") return true;
+  if (/^去/.test(button) || /立即抽奖/.test(button)) return true;
+  if (/^去/.test(bubble) || /立即抽奖/.test(bubble)) return true;
+  if (showStyle === "0") return true;
+  return false;
+}
+
+function isExpectedTaskNotReady(text) {
+  var t = String(text || "");
+  return /任务失败|未完成|先去完成|请先完成|未达成|未达到|条件不满足|不满足/.test(t);
 }
 
 async function completeTaskById(session, taskId) {
@@ -1154,6 +1188,13 @@ function formatAccountQueue(sessions) {
     out.push("A" + (i + 1) + ":" + (mobile ? maskMobile(mobile) : "未知账号"));
   }
   return out.join(" | ");
+}
+
+function formatSourceName(source) {
+  var s = String(source || "");
+  if (s === "store") return "本地存储";
+  if (s === "input") return "传入参数";
+  return s || "未知";
 }
 
 function mergeObjects(a, b) {
