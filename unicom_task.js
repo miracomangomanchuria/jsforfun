@@ -2,7 +2,8 @@
 unicom_task（QX / Surge / Loon / Node）
 
 [rewrite_local]
-^https:\/\/loginxhm\.10010\.com\/mobileService\/onLine\.htm url script-request-body unicom_task.js
+^https:\/\/loginxhm\.10010\.com\/mobileService\/.* url script-request-header unicom_task.js
+^https:\/\/loginxhm\.10010\.com\/mobileService\/.* url script-request-body unicom_task.js
 
 [mitm]
 hostname = loginxhm.10010.com
@@ -15,8 +16,9 @@ hostname = loginxhm.10010.com
 5) Cookie 失效：当识别为登录态失效时，自动从本地持久化账号中剔除该账号。
 6) 抓包步骤：
    - 先在联通 App 保持登录。
-   - 回到 App 首页/我的页触发一次在线登录校验（onLine.htm）。
-   - 只需要抓到这一次 onLine 请求（含 cookie + token_online 链路）。
+   - 不需要找特定活动页，首页或“我的”页都可以触发抓包。
+   - 建议在首页和“我的”之间切一次，并在“我的”页下拉刷新。
+   - 抓到任意 loginxhm/mobileService 请求即可保存 Cookie；抓到 onLine 请求会同时保存 token_online 链路。
    - 回到 QX 运行定时脚本即可。
 */
 
@@ -37,9 +39,10 @@ var API = {
   onlineRefresh: "https://loginxhm.10010.com/mobileService/onLine.htm",
 };
 var CAPTURE_GUIDE_TEXT =
-  "联通App保持登录 -> 回首页/我的触发onLine -> 抓到1次onLine即可 -> 再跑脚本";
+  "联通App保持登录 -> 首页/我的切换并下拉刷新 -> 抓到loginxhm/mobileService请求 -> 再跑脚本";
 var CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
-^https:\/\/loginxhm\.10010\.com\/mobileService\/onLine\.htm url script-request-body unicom_task.js
+^https:\/\/loginxhm\.10010\.com\/mobileService\/.* url script-request-header unicom_task.js
+^https:\/\/loginxhm\.10010\.com\/mobileService\/.* url script-request-body unicom_task.js
 [mitm]
 hostname = loginxhm.10010.com`;
 
@@ -51,8 +54,9 @@ var resultRows = [];
 
 async function captureSession() {
   var url = ($request && $request.url) || "";
+  var isMobileService = /loginxhm\.10010\.com\/mobileService\//.test(url);
   var isOnline = /loginxhm\.10010\.com\/mobileService\/onLine\.htm/.test(url);
-  if (!isOnline) return;
+  if (!isMobileService) return;
 
   var headers = ($request && $request.headers) || {};
   if (String(getHeader(headers, INTERNAL_HEADER_KEY) || "") === "1") return;
@@ -65,7 +69,15 @@ async function captureSession() {
   var sessions = readSessionList();
   var idx = findSessionIndex(sessions, mobile, cookie);
   var existing = idx >= 0 ? sessions[idx] : null;
-  var changed = !existing || existing.cookie !== cookie || existing.ua !== ua;
+  var onlineParsed = parseFormBody(reqBody);
+  var capturedTokenOnline = onlineParsed.token_online || "";
+  var newOnlineTemplate =
+    isOnline &&
+    !!capturedTokenOnline &&
+    (!existing ||
+      !existing.onLineBody ||
+      String(existing.tokenOnline || "") !== String(capturedTokenOnline));
+  var changed = !existing || existing.cookie !== cookie || existing.ua !== ua || newOnlineTemplate;
 
   if (!changed) {
     $.log(ts() + " [CAPTURE] 无变化，跳过写入");
@@ -89,7 +101,6 @@ async function captureSession() {
   if (existing && existing.tokenOnline) row.tokenOnline = existing.tokenOnline;
   if (isOnline && /token_online=/.test(reqBody)) {
     row.onLineBody = reqBody;
-    var onlineParsed = parseFormBody(reqBody);
     if (onlineParsed.token_online) row.tokenOnline = onlineParsed.token_online;
   }
   if (idx >= 0) {
@@ -108,10 +119,16 @@ async function captureSession() {
       accountText +
       " | 总账号=" +
       sessions.length +
+      " | onLineTpl=" +
+      (row.onLineBody ? "y" : "n") +
       " | todayIsSignIn=" +
       (probeState.todaySigned ? "y" : "n")
   );
-  $.msg(SCRIPT_NAME, "抓包成功", "账号: " + accountText + " | 已保存会话");
+  $.msg(
+    SCRIPT_NAME,
+    "抓包成功",
+    "账号: " + accountText + " | 已保存会话" + (row.onLineBody ? " | 已捕获onLine模板" : "")
+  );
 }
 
 async function runTask() {
