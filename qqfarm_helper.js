@@ -156,6 +156,9 @@ var CONFIG = {
   HIVE_BASE: "https://nc.qzone.qq.com",
   HIVE_ENABLE: true,
   HIVE_AUTO_HARVEST: true, // 收蜂蜜(非卖蜜)
+  HIVE_AUTO_UPGRADE: true, // 自动升级蜜蜂（可升才升）
+  HIVE_UPGRADE_IDS: "2,1", // 升级顺序（优先2号蜂，再尝试1号蜂）
+  HIVE_UPGRADE_MAX: 2, // 单轮最多升级次数（0=不限制）
   HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
   HIVE_TRY_HARVEST_ON_STATUS1: true, // 状态1但蜂蜜>0时，仍补探测一次收蜜
@@ -170,7 +173,10 @@ var CONFIG = {
   FARM_EVENT_BULING_MAX_LOOP: 5, // 奖励补领复查轮次上限
   FARM_EVENT_WISH_ENABLE: true, // /cgi_farm_wish_*
   FARM_EVENT_WISH_MAX_PASS: 8, // 许愿链路循环上限（按状态逐步推进）
-  FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领星奖
+  FARM_EVENT_WISH_AUTO_COLLECT: true, // 一键收取星星（type=1）
+  FARM_EVENT_WISH_AUTO_RANDOM: true, // 许愿（act=random）
+  FARM_EVENT_WISH_RANDOM_MAX: 0, // 单轮最多许愿次数（0=按星值自动）
+  FARM_EVENT_WISH_AUTO_STAR: true, // 自动领取 starlist 中可领奖（type=0）
   FARM_EVENT_WISH_AUTO_HARVEST: true, // status=4 时自动收取许愿奖励
   FARM_EVENT_WISH_AUTO_PLANT: true, // status=0 时自动许愿（优先当前可选愿望）
   FARM_EVENT_WISH_AUTO_UPGRADE: true, // status=0 且星值足够时自动点星升级
@@ -178,6 +184,8 @@ var CONFIG = {
   FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
   FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
+  FARM_SIGNIN_BOARD_ENABLE: true, // 月签签到板（/cgi_farm_month_signin_*）自动领奖
+  FARM_SIGNIN_BOARD_MAX_LOOP: 12, // 月签签到板单轮最多领奖次数
 
   // 时光农场（独立于普通农场）
   TIME_FARM_BASE: "https://nc.qzone.qq.com",
@@ -298,7 +306,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.24-r34";
+var SCRIPT_REV = "2026.02.28-r36";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1295,6 +1303,8 @@ var FARM_EVENT_STATS = {
   wishProgressMax: 0,
   wishStarStart: 0,
   wishStarEnd: 0,
+  wishCollect: 0,
+  wishRandom: 0,
   wishStarClaim: 0,
   wishHarvest: 0,
   wishPlant: 0,
@@ -1336,6 +1346,7 @@ var FISH_STATS = {
 
 var HIVE_STATS = {
   harvest: 0,
+  upgrade: 0,
   pollen: 0,
   work: 0,
   honey: 0,
@@ -6869,6 +6880,8 @@ function hiveSummaryLine() {
   return (
     "收蜜=" +
     HIVE_STATS.harvest +
+    " 升级=" +
+    HIVE_STATS.upgrade +
     " 喂粉=" +
     HIVE_STATS.pollen +
     " 放蜂=" +
@@ -7002,6 +7015,8 @@ function farmEventSummaryLine() {
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
   parts.push("补领" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.wishStatus >= 0) {
+    parts.push("许愿收星" + FARM_EVENT_STATS.wishCollect);
+    parts.push("许愿抽星" + FARM_EVENT_STATS.wishRandom);
     parts.push("许愿领奖" + FARM_EVENT_STATS.wishStarClaim);
     parts.push("许愿收获" + FARM_EVENT_STATS.wishHarvest);
     parts.push("许愿种下" + FARM_EVENT_STATS.wishPlant);
@@ -7019,6 +7034,8 @@ function farmEventChangeLine() {
   var parts = [];
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
   if (FARM_EVENT_STATS.bulingClaim > 0) parts.push("补领+" + FARM_EVENT_STATS.bulingClaim);
+  if (FARM_EVENT_STATS.wishCollect > 0) parts.push("许愿收星+" + FARM_EVENT_STATS.wishCollect);
+  if (FARM_EVENT_STATS.wishRandom > 0) parts.push("许愿抽星+" + FARM_EVENT_STATS.wishRandom);
   if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
   if (FARM_EVENT_STATS.wishHarvest > 0) parts.push("许愿收获+" + FARM_EVENT_STATS.wishHarvest);
   if (FARM_EVENT_STATS.wishPlant > 0) parts.push("许愿种下+" + FARM_EVENT_STATS.wishPlant);
@@ -7252,6 +7269,8 @@ function summaryModuleHiveLine() {
   return (
     "收蜜" +
     HIVE_STATS.harvest +
+    " 升级" +
+    HIVE_STATS.upgrade +
     " 喂粉" +
     HIVE_STATS.pollen +
     " 放蜂" +
@@ -9279,6 +9298,136 @@ function farmSignIn(cookie) {
   var base = CONFIG.FARM_WAP_BASE;
   var sid = CONFIG.RANCH_SID;
   var g_ut = getFarmGut();
+  var boardEnabled = CONFIG.FARM_SIGNIN_BOARD_ENABLE !== false;
+  var boardMaxLoop = Number(CONFIG.FARM_SIGNIN_BOARD_MAX_LOOP || 12);
+  if (isNaN(boardMaxLoop) || boardMaxLoop < 1) boardMaxLoop = 12;
+
+  function parseMonthSignState(json) {
+    if (!isFarmEventOk(json)) return null;
+    return {
+      canDraw: Number(json.can_draw || 0) || 0,
+      todaySign: Number(json.today_signin || 0) || 0,
+      nextDrawId: Number(json.signin_can_draw_id || 0) || 0,
+      drawId: Number(json.signin_draw_id || 0) || 0,
+      monthDays: Number(json.month_days || 0) || 0,
+      nextSigninDraw: Number(json.next_signin_draw || 0) || 0
+    };
+  }
+
+  function runMonthSignBoard() {
+    if (!boardEnabled) return Promise.resolve({ probed: false, todaySign: -1, canDraw: 0, claimed: 0 });
+    var ctx = null;
+
+    function readHome(tag) {
+      return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_month_signin_home", farmEventParams(ctx)).then(function (json) {
+        var state = parseMonthSignState(json);
+        if (!state) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            log("⚠️ 签到板状态读取失败(" + tag + "): " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("📅 签到板状态(" + tag + "): 无需执行(" + msg + ")");
+          }
+          return null;
+        }
+        return state;
+      });
+    }
+
+    function drawOne(id) {
+      return callFarmEventApi(
+        cookie,
+        "/cgi-bin/cgi_farm_month_signin_draw",
+        farmEventParams(ctx, {
+          id: id
+        })
+      ).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (isFarmEventNoop(json, msg) || /已领|无可领|不能领取|次数不足|不满足|今日已签/.test(msg || "")) {
+            if (CONFIG.DEBUG) logDebug("📅 签到板领奖(id=" + id + "): 无需执行(" + msg + ")");
+            return { ok: false, noop: true, state: null };
+          }
+          log("⚠️ 签到板领奖失败(id=" + id + "): " + msg);
+          return { ok: false, noop: false, state: null };
+        }
+        var state = parseMonthSignState(json);
+        if (!state) state = { canDraw: 0, todaySign: 0, nextDrawId: 0, drawId: id, monthDays: 0, nextSigninDraw: 0 };
+        return { ok: true, noop: false, state: state };
+      });
+    }
+
+    return ensureFarmEventContext(cookie).then(function (c) {
+      if (!c) {
+        if (CONFIG.DEBUG) logDebug("📅 签到板: 缺少 uIdx/uinY，跳过");
+        return { probed: false, todaySign: -1, canDraw: 0, claimed: 0 };
+      }
+      ctx = c;
+      return readHome("开始").then(function (state) {
+        if (!state) return { probed: true, todaySign: -1, canDraw: 0, claimed: 0 };
+        if (CONFIG.DEBUG) {
+          logDebug(
+            "📅 签到板状态: 今日" +
+              (state.todaySign > 0 ? "已签" : "未签") +
+              " 可领" +
+              state.canDraw +
+              (state.nextDrawId > 0 ? " 下一档#" + state.nextDrawId : "")
+          );
+        }
+        if (state.canDraw <= 0) return { probed: true, todaySign: state.todaySign, canDraw: 0, claimed: 0 };
+
+        var claimed = 0;
+        var loopNo = 0;
+
+        function pass(cur) {
+          if (!cur || cur.canDraw <= 0) return Promise.resolve(cur);
+          if (loopNo >= boardMaxLoop) {
+            log("⚠️ 签到板领奖: 达到上限(" + boardMaxLoop + ")，剩余可领" + cur.canDraw);
+            return Promise.resolve(cur);
+          }
+          var id = Number(cur.nextDrawId || 0) || 0;
+          if (!id) id = Number(cur.drawId || 0) + 1;
+          if (!id) id = claimed + 1;
+          if (!id || isNaN(id) || id < 1) {
+            log("⚠️ 签到板领奖: 无法确定领奖档位，停止");
+            return Promise.resolve(cur);
+          }
+          loopNo += 1;
+          return drawOne(id).then(function (ret) {
+            if (!ret || !ret.ok) {
+              if (!ret || !ret.noop) return cur;
+              return readHome("领奖noop后").then(function (noopState) {
+                return noopState || cur;
+              });
+            }
+            claimed += 1;
+            var next = ret.state || cur;
+            log("🎁 签到板领奖: 第" + id + "档成功，剩余可领" + next.canDraw);
+            if (next.canDraw <= 0) return next;
+            return sleep(CONFIG.WAIT_MS).then(function () {
+              return pass(next);
+            });
+          });
+        }
+
+        return pass(state).then(function (lastState) {
+          return readHome("结束").then(function (endState) {
+            var finalState = endState || lastState || state;
+            if (claimed > 0) {
+              FARM_EXTRA.signin += 1;
+              log("📅 签到板: 共领取" + claimed + "档奖励");
+            }
+            return {
+              probed: true,
+              todaySign: Number(finalState.todaySign || 0) || 0,
+              canDraw: Number(finalState.canDraw || 0) || 0,
+              claimed: claimed
+            };
+          });
+        });
+      });
+    });
+  }
 
   function ensureHome() {
     if (LAST_FARM_HOME_HTML) return Promise.resolve({ html: LAST_FARM_HOME_HTML, cookie: cookie });
@@ -9289,37 +9438,48 @@ function farmSignIn(cookie) {
     });
   }
 
-  return ensureHome().then(function (res) {
-    var html = (res && res.html) || "";
-    var ck = (res && res.cookie) || cookie;
-    if (!hasSignInEntry(html)) {
-      log("📅 农场签到: 页面无入口，跳过");
-      return;
-    }
-    var signUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut + "&signin=1";
-    return getHtmlFollow(signUrl, ck, defaultMcappReferer(), "农场签到", 0).then(function (resp) {
-      var html2 = resp.body || "";
-      var msg = extractSignInReward(html2);
-      if (
-        msg &&
-        msg.indexOf("除草") >= 0 &&
-        msg.indexOf("杀虫") >= 0 &&
-        msg.indexOf("浇水") >= 0
-      ) {
-        msg = "";
+  return runMonthSignBoard()
+    .catch(function (e) {
+      log("⚠️ 签到板异常: " + errText(e));
+      return { probed: false, todaySign: -1, canDraw: 0, claimed: 0 };
+    })
+    .then(function (board) {
+      if (board && board.probed && Number(board.todaySign || 0) > 0) {
+        if (CONFIG.DEBUG) logDebug("📅 农场签到: 签到板显示今日已签到，跳过WAP签到");
+        return;
       }
-      if (
-        msg &&
-        !/(成功|失败|已)/.test(msg) &&
-        /(QQ提醒|黄钻|超Q|土地|施肥|收获)/.test(msg)
-      ) {
-        msg = "";
-      }
-      if (msg) log("📅 农场签到: " + msg);
-      else log("📅 农场签到: 已尝试签到");
-      if (resp.status === 200) FARM_EXTRA.signin += 1;
+      return ensureHome().then(function (res) {
+        var html = (res && res.html) || "";
+        var ck = (res && res.cookie) || cookie;
+        if (!hasSignInEntry(html)) {
+          log("📅 农场签到: 页面无入口，跳过");
+          return;
+        }
+        var signUrl = base + "/nc/cgi-bin/wap_farm_index?sid=" + sid + "&g_ut=" + g_ut + "&signin=1";
+        return getHtmlFollow(signUrl, ck, defaultMcappReferer(), "农场签到", 0).then(function (resp) {
+          var html2 = resp.body || "";
+          var msg = extractSignInReward(html2);
+          if (
+            msg &&
+            msg.indexOf("除草") >= 0 &&
+            msg.indexOf("杀虫") >= 0 &&
+            msg.indexOf("浇水") >= 0
+          ) {
+            msg = "";
+          }
+          if (
+            msg &&
+            !/(成功|失败|已)/.test(msg) &&
+            /(QQ提醒|黄钻|超Q|土地|施肥|收获)/.test(msg)
+          ) {
+            msg = "";
+          }
+          if (msg) log("📅 农场签到: " + msg);
+          else log("📅 农场签到: 已尝试签到");
+          if (resp.status === 200) FARM_EXTRA.signin += 1;
+        });
+      });
     });
-  });
 }
 
 function farmEventEnabled() {
@@ -9392,7 +9552,7 @@ function isFarmEventNoop(json, msg) {
   var m = normalizeSpace(msg || farmEventErrMsg(json));
   if (!m) return false;
   var m2 = m.replace(/\s+/g, "");
-  return /(已领|已领取|领取过|今天.*领取|今日.*领取|无需|不能|未开启|已完成|无可领|没有可领|没有可奖|可领奖励|次数不足|不满足|已经可以收获|可收获了|愿望已经.*收获)/.test(
+  return /(已领|已领取|领取过|今天.*领取|今日.*领取|无需|不能|未开启|已完成|无可领|没有可领|没有可奖|可领奖励|次数不足|不满足|活动未开始|已经可以收获|可收获了|愿望已经.*收获)/.test(
     m2
   );
 }
@@ -9605,8 +9765,11 @@ function parseWishState(json) {
     vstar: Number(json.vstar || 0) || 0,
     costStar: Number(json.cost_star || json.costStar || 0) || 0,
     allStarsTimes: Number(json.allStarsTimes || 0) || 0,
+    tool: Number(json.tool || 0) || 0,
+    starLimit: Number(json.star_limit || json.starLimit || 0) || 0,
     wId: wId,
     wNum: Number(json.w_num || 0) || 0,
+    wTime: Number(json.w_time || json.wTime || 0) || 0,
     maxWish: Number(json.max_wish || json.maxWish || 0) || 0,
     grow: Number(json.grow || 0) || 0,
     options: options,
@@ -9890,6 +10053,8 @@ function runFarmEvents(cookie) {
 
     function wishActionCount() {
       return (
+        Number(FARM_EVENT_STATS.wishCollect || 0) +
+        Number(FARM_EVENT_STATS.wishRandom || 0) +
         Number(FARM_EVENT_STATS.wishStarClaim || 0) +
         Number(FARM_EVENT_STATS.wishHarvest || 0) +
         Number(FARM_EVENT_STATS.wishPlant || 0) +
@@ -9906,7 +10071,10 @@ function runFarmEvents(cookie) {
         Number(state.wNum || 0),
         Number(state.wId || 0),
         Number(state.vstar || 0),
-        ensureArray(state.starlist).length
+        Number(state.tool || 0),
+        ensureArray(state.starlist).length,
+        Number(state.selfWaitSec || 0),
+        Number(state.starWaitSec || 0)
       ].join("|");
     }
 
@@ -9959,6 +10127,8 @@ function runFarmEvents(cookie) {
               state.vstar +
               " 单次耗星" +
               state.costStar +
+              " 摘星" +
+              (state.tool > 0 ? "可点" : "无") +
               " 待领奖" +
               state.starlist.length +
               " " +
@@ -9985,6 +10155,8 @@ function runFarmEvents(cookie) {
                 state.vstar +
                 " 单次耗星" +
                 state.costStar +
+                " 摘星" +
+                (state.tool > 0 ? "可点" : "无") +
                 " 待领奖" +
                 state.starlist.length +
                 " " +
@@ -10004,6 +10176,105 @@ function runFarmEvents(cookie) {
       return true;
     }
 
+    function wishActionOk(json) {
+      if (!isFarmEventOk(json)) return false;
+      var msg = normalizeSpace(farmEventErrMsg(json));
+      if (!msg) return true;
+      if (msg === "ecode=0") return true;
+      if (/成功|完成|ok|已领取|已收取/i.test(msg) && !/不足|失败|不能|未开启|未满足|冷却|无可/.test(msg)) return true;
+      return false;
+    }
+
+    function collectWishStars(state) {
+      if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_COLLECT) return Promise.resolve(state);
+      if (Number(state.tool || 0) <= 0) return Promise.resolve(state);
+      return callFarmEventApi(
+        cookie,
+        "/cgi-bin/cgi_farm_wish_star",
+        farmEventParams(ctx, {
+          type: 1
+        })
+      ).then(function (json) {
+        if (!wishActionOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 许愿收星失败: " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🌠 许愿收星: 无需执行(" + msg + ")");
+          }
+          return state;
+        }
+        FARM_EVENT_STATS.wishCollect += 1;
+        if (!appendWishReward(json, "🌠 许愿收星: ")) {
+          log("🌠 许愿收星: 成功");
+        }
+        return fetchIndex("收星后");
+      });
+    }
+
+    function randomWish(state) {
+      if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_RANDOM) return Promise.resolve(state);
+      var status = Number(state.status || 0) || 0;
+      if (status !== 3 && status !== 4) return Promise.resolve(state);
+      if (Number(state.starWaitSec || 0) > 0) {
+        if (CONFIG.DEBUG) logDebug("🌠 许愿抽星: 冷却中(" + formatWaitSec(state.starWaitSec) + ")，跳过");
+        return Promise.resolve(state);
+      }
+      var cost = Number(state.costStar || 0) || 0;
+      var star = Number(state.vstar || 0) || 0;
+      if (cost <= 0 || star < cost) return Promise.resolve(state);
+      var maxTry = Math.floor(star / cost);
+      var cap = Number(CONFIG.FARM_EVENT_WISH_RANDOM_MAX || 0);
+      if (!isNaN(cap) && cap > 0 && maxTry > cap) maxTry = cap;
+      if (maxTry <= 0) return Promise.resolve(state);
+      var done = 0;
+      var transientRetries = wishTransientRetries();
+
+      function one(loopNo, retryNo) {
+        return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_wish_star?act=random", farmEventParams(ctx)).then(
+          function (json) {
+            if (!wishActionOk(json)) {
+              var msg = farmEventErrMsg(json);
+              if (isFarmEventNoop(json, msg) || /星不足|冷却|不能|未开启|次数不足|不足/.test(msg || "")) {
+                if (CONFIG.DEBUG) logDebug("🌠 许愿抽星: 无需执行(" + msg + ")");
+                return false;
+              }
+              var transient = isTransientFailText(msg || "");
+              if (transient && retryNo < transientRetries) {
+                log("⚠️ 许愿抽星繁忙，第" + (retryNo + 1) + "次重试");
+                return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                  return one(loopNo, retryNo + 1);
+                });
+              }
+              if (transient) {
+                FARM_EVENT_STATS.busy += 1;
+                log("⚠️ 许愿抽星繁忙: 已重试" + transientRetries + "次，留待下轮");
+                return false;
+              }
+              FARM_EVENT_STATS.errors += 1;
+              log("⚠️ 许愿抽星失败: " + msg);
+              return false;
+            }
+            done += 1;
+            FARM_EVENT_STATS.wishRandom += 1;
+            if (!appendWishReward(json, "🌠 许愿抽星: ")) {
+              log("🌠 许愿抽星: 成功(" + done + "/" + maxTry + ")");
+            }
+            if (loopNo + 1 >= maxTry) return true;
+            return sleep(CONFIG.WAIT_MS).then(function () {
+              return one(loopNo + 1, 0);
+            });
+          }
+        );
+      }
+
+      return one(0, 0).then(function () {
+        if (done <= 0) return state;
+        return fetchIndex("抽星后");
+      });
+    }
+
     function claimStars(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_STAR) return Promise.resolve(state);
       var ids = ensureArray(state.starlist);
@@ -10020,7 +10291,7 @@ function runFarmEvents(cookie) {
             type: 0
           })
         ).then(function (json) {
-          if (!isFarmEventOk(json)) {
+          if (!wishActionOk(json)) {
             var msg = farmEventErrMsg(json);
             if (isFarmEventNoop(json, msg)) {
               if (CONFIG.DEBUG) logDebug("🌠 许愿领奖(id=" + sid + "): 无需执行(" + msg + ")");
@@ -10069,7 +10340,7 @@ function runFarmEvents(cookie) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_HARVEST) return Promise.resolve(state);
       if (Number(state.status || 0) !== 4) return Promise.resolve(state);
       return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_wish_harvest", farmEventParams(ctx)).then(function (json) {
-        if (!isFarmEventOk(json)) {
+        if (!wishActionOk(json)) {
           var msg = farmEventErrMsg(json);
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
@@ -10105,7 +10376,7 @@ function runFarmEvents(cookie) {
           id: wid
         })
       ).then(function (json) {
-        if (!isFarmEventOk(json)) {
+        if (!wishActionOk(json)) {
           var msg = farmEventErrMsg(json);
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
@@ -10123,63 +10394,55 @@ function runFarmEvents(cookie) {
 
     function upgradeWish(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_UPGRADE) return Promise.resolve(state);
-      if (Number(state.status || 0) !== 0) return Promise.resolve(state);
-      if (Number(state.wId || 0) > 0) return Promise.resolve(state);
-      var cost = Number(state.costStar || 0) || 0;
+      var status = Number(state.status || 0) || 0;
+      if (status !== 0 && status !== 3 && status !== 4) return Promise.resolve(state);
       var star = Number(state.vstar || 0) || 0;
-      if (cost <= 0 || star < cost) return Promise.resolve(state);
-      var can = Math.floor(star / cost);
-      if (can <= 0) return Promise.resolve(state);
+      if (star <= 0) return Promise.resolve(state);
+      var use = star;
       var maxLoop = Number(CONFIG.FARM_EVENT_WISH_UPGRADE_MAX || 20);
-      if (!isNaN(maxLoop) && maxLoop > 0 && can > maxLoop) can = maxLoop;
+      if (!isNaN(maxLoop) && maxLoop > 0 && use > maxLoop) use = maxLoop;
+      if (use <= 0) return Promise.resolve(state);
       var transientRetries = wishTransientRetries();
-      var done = 0;
-
-      function one(loopNo, retryNo) {
+      function run(attempt) {
         return callFarmEventApi(
           cookie,
           "/cgi-bin/cgi_farm_wish_star?act=upgrade",
           farmEventParams(ctx, {
-            num: 1
+            num: use
           })
         ).then(function (json) {
-          if (!isFarmEventOk(json)) {
+          if (!wishActionOk(json)) {
             var msg = farmEventErrMsg(json);
-            if (isFarmEventNoop(json, msg)) {
+            if (isFarmEventNoop(json, msg) || /不足|不能|未满足|未开启|冷却/.test(msg || "")) {
               if (CONFIG.DEBUG) logDebug("🌠 许愿点星: 无需执行(" + msg + ")");
-              return false;
+              return state;
             }
             var transient = isTransientFailText(msg || "");
-            if (transient && retryNo < transientRetries) {
-              log("⚠️ 许愿点星繁忙，第" + (retryNo + 1) + "次重试");
+            if (transient && attempt < transientRetries) {
+              log("⚠️ 许愿点星繁忙，第" + (attempt + 1) + "次重试");
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
-                return one(loopNo, retryNo + 1);
+                return run(attempt + 1);
               });
             }
             if (transient) {
               FARM_EVENT_STATS.busy += 1;
               log("⚠️ 许愿点星繁忙: 已重试" + transientRetries + "次，留待下轮");
-              return false;
+              return state;
             }
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 许愿点星失败: " + msg);
-            return false;
+            return state;
           }
-          done += 1;
           FARM_EVENT_STATS.wishUpgrade += 1;
           if (!appendWishReward(json, "🌠 许愿点星: ")) {
-            log("🌠 许愿点星: 成功(" + done + "/" + can + ")");
+            log("🌠 许愿点星: 成功(消耗" + use + ")");
           }
-          if (loopNo + 1 >= can) return true;
-          return sleep(CONFIG.WAIT_MS).then(function () {
-            return one(loopNo + 1, 0);
-          });
+          return fetchIndex("点星后");
         });
       }
 
-      return one(0, 0).then(function () {
-        if (done <= 0) return state;
-        return fetchIndex("点星后");
+      return run(0).then(function (nextState) {
+        return nextState || state;
       });
     }
 
@@ -10190,9 +10453,8 @@ function runFarmEvents(cookie) {
         if (CONFIG.DEBUG) logDebug("🌠 许愿助力: 当前状态" + status + "，跳过");
         return Promise.resolve(state);
       }
-      var self = Number(state.self || 0) || 0;
-      if (self >= 2) {
-        if (CONFIG.DEBUG) logDebug("🌠 许愿助力: 今日次数已满(" + self + ")，跳过");
+      if (Number(state.selfWaitSec || 0) > 0) {
+        if (CONFIG.DEBUG) logDebug("🌠 许愿助力: 冷却中(" + formatWaitSec(state.selfWaitSec) + ")，跳过");
         return Promise.resolve(state);
       }
       return callFarmEventApi(
@@ -10202,7 +10464,7 @@ function runFarmEvents(cookie) {
           ownerId: ctx.uIdx
         })
       ).then(function (json) {
-        if (!isFarmEventOk(json)) {
+        if (!wishActionOk(json)) {
           var msg = farmEventErrMsg(json);
           if (!isFarmEventNoop(json, msg)) {
             FARM_EVENT_STATS.errors += 1;
@@ -10222,28 +10484,30 @@ function runFarmEvents(cookie) {
     function decideWishAction(state) {
       if (!state) return "";
       var status = Number(state.status || 0) || 0;
+      if (CONFIG.FARM_EVENT_WISH_AUTO_COLLECT && Number(state.tool || 0) > 0) return "collect";
+      if (CONFIG.FARM_EVENT_WISH_AUTO_RANDOM) {
+        var cost = Number(state.costStar || 0) || 0;
+        var star = Number(state.vstar || 0) || 0;
+        if ((status === 3 || status === 4) && cost > 0 && star >= cost && Number(state.starWaitSec || 0) <= 0) return "random";
+      }
+      if (CONFIG.FARM_EVENT_WISH_AUTO_HELP && (status === 2 || status === 3) && Number(state.selfWaitSec || 0) <= 0)
+        return "help";
+      if (CONFIG.FARM_EVENT_WISH_AUTO_UPGRADE && Number(state.vstar || 0) > 0 && (status === 0 || status === 3 || status === 4))
+        return "upgrade";
       if (CONFIG.FARM_EVENT_WISH_AUTO_HARVEST && status === 4) return "harvest";
-      if (CONFIG.FARM_EVENT_WISH_AUTO_STAR && ensureArray(state.starlist).length > 0) return "claimStars";
       if (CONFIG.FARM_EVENT_WISH_AUTO_PLANT && status === 0) {
         var opt = pickWishOption(state);
         if (opt && Number(opt.id || 0) > 0) return "plant";
       }
-      if (CONFIG.FARM_EVENT_WISH_AUTO_UPGRADE && status === 0) {
-        var cost = Number(state.costStar || 0) || 0;
-        var star = Number(state.vstar || 0) || 0;
-        var wid = Number(state.wId || 0) || 0;
-        if (wid <= 0 && cost > 0 && star >= cost) return "upgrade";
-      }
-      if (CONFIG.FARM_EVENT_WISH_AUTO_HELP && (status === 2 || status === 3)) {
-        var self = Number(state.self || 0) || 0;
-        if (self < 2) return "help";
-      }
+      if (CONFIG.FARM_EVENT_WISH_AUTO_STAR && ensureArray(state.starlist).length > 0) return "claimStars";
       return "";
     }
 
     function executeWishAction(state, action) {
       if (!action) return Promise.resolve(state);
       if (action === "harvest") return harvestWish(state);
+      if (action === "collect") return collectWishStars(state);
+      if (action === "random") return randomWish(state);
       if (action === "claimStars") return claimStars(state);
       if (action === "plant") return plantWish(state);
       if (action === "upgrade") return upgradeWish(state);
@@ -13740,7 +14004,9 @@ function isHiveNoop(json, msg) {
   if (!isNaN(ecode) && (ecode === -32 || ecode === -16 || ecode === -30 || ecode === -31)) return true;
   var m = normalizeSpace(msg || hiveErrMsg(json));
   if (!m) return false;
-  return /(状态不对|无需|不能|已在工作|冷却|免费次数|花粉不足|蜜蜂不足|无可收|未达到|未满足)/.test(m);
+  return /(状态不对|无需|不能|已在工作|冷却|免费次数|花粉不足|蜜蜂不足|无可收|未达到|未满足|蜂蜜不足|余额不足|满级|最高级|不可升级|无法升级|无需升级|条件不足|没有可升级)/.test(
+    m
+  );
 }
 
 function parseHiveHarvestGain(json, fallback) {
@@ -13758,10 +14024,12 @@ function hiveNum(v, dft) {
 
 function buildHiveActionPlan(state, opts) {
   var plan = {
+    canUpgrade: false,
     canPollen: false,
     canHarvest: false,
     harvestProbe: false,
     canWork: false,
+    upgradeReason: "",
     pollenReason: "",
     harvestReason: "",
     workReason: "",
@@ -13816,6 +14084,16 @@ function buildHiveActionPlan(state, opts) {
     plan.canHarvest = true;
   }
 
+  if (!CONFIG.HIVE_AUTO_UPGRADE) {
+    plan.upgradeReason = "配置关闭";
+  } else if (plan.canHarvest) {
+    plan.upgradeReason = "当前有蜂蜜可收，先收后升";
+  } else if (honey <= 0) {
+    plan.upgradeReason = "蜂蜜不足(" + honey + ")";
+  } else {
+    plan.canUpgrade = true;
+  }
+
   if (!CONFIG.HIVE_AUTO_POLLEN) {
     plan.pollenReason = "配置关闭";
   } else if (plan.canHarvest) {
@@ -13845,6 +14123,8 @@ function buildHiveActionPlan(state, opts) {
     honey +
     " 花粉" +
     freeCD +
+    " | 升级" +
+    (plan.canUpgrade ? "是" : "否") +
     " | 喂粉" +
     (plan.canPollen ? "是" : "否") +
     " 收蜜" +
@@ -13898,13 +14178,34 @@ function fetchHiveIndex(cookie, ctx) {
 function runHive(cookie) {
   if (!hiveEnabled()) return Promise.resolve();
   log("🐝 蜂巢模块: 启动");
-  log("🐝 蜂巢流程: 状态检测→收蜂蜜(可收才收)→喂花粉(可用才喂)→放蜂(可放才放)→复查（禁用卖蜂蜜）");
+  log("🐝 蜂巢流程: 状态检测→收蜂蜜(可收才收)→升级蜜蜂(可升才升)→喂花粉(可用才喂)→放蜂(可放才放)→复查（禁用卖蜂蜜）");
   HIVE_STATS.start = "";
   HIVE_STATS.end = "";
   var ctx = null;
   var current = null;
   var harvested = 0;
   var harvestBlockedThisRound = false;
+
+  function parseHiveUpgradeIds(raw) {
+    var arr = String(raw || "")
+      .split(",")
+      .map(function (v) {
+        return Number(String(v || "").trim()) || 0;
+      })
+      .filter(function (n) {
+        return n > 0;
+      });
+    if (!arr.length) arr = [2, 1];
+    var out = [];
+    var seen = {};
+    for (var i = 0; i < arr.length; i++) {
+      var id = Number(arr[i] || 0) || 0;
+      if (!id || seen[id]) continue;
+      seen[id] = 1;
+      out.push(id);
+    }
+    return out;
+  }
 
   function refresh(tag) {
     return fetchHiveIndex(cookie, ctx).then(function (state) {
@@ -13991,6 +14292,73 @@ function runHive(cookie) {
     });
   }
 
+  function doUpgrade() {
+    if (!CONFIG.HIVE_AUTO_UPGRADE) {
+      if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 配置关闭");
+      return Promise.resolve();
+    }
+    var ids = parseHiveUpgradeIds(CONFIG.HIVE_UPGRADE_IDS);
+    if (!ids.length) return Promise.resolve();
+    var maxUpgrade = Number(CONFIG.HIVE_UPGRADE_MAX || 0);
+    if (isNaN(maxUpgrade) || maxUpgrade < 0) maxUpgrade = 0;
+    var done = 0;
+    var idx = 0;
+
+    function next() {
+      if (idx >= ids.length) return Promise.resolve();
+      if (maxUpgrade > 0 && done >= maxUpgrade) return Promise.resolve();
+      var bid = Number(ids[idx++] || 0) || 0;
+      if (!bid) return next();
+      var honeyNow = Number((current && current.honey) || 0) || 0;
+      if (honeyNow <= 0) {
+        if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 蜂蜜不足(" + honeyNow + ")，跳过");
+        return Promise.resolve();
+      }
+      if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 尝试 id=" + bid + "（当前蜂蜜" + honeyNow + "）");
+      return callHiveApi(
+        cookie,
+        "/cgi-bin/cgi_farm_hive_upgrade?act=bee",
+        hiveParams(ctx, {
+          id: bid
+        })
+      )
+        .then(function (json) {
+          if (!isHiveOk(json)) {
+            var msg = hiveErrMsg(json);
+            if (isHiveNoop(json, msg)) {
+              if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 无需执行(" + msg + ")");
+              return refresh("升级noop后").then(function (st) {
+                if (st) current = st;
+              });
+            }
+            HIVE_STATS.errors += 1;
+            log("⚠️ 蜜蜂升级失败(id=" + bid + "): " + msg);
+            return;
+          }
+          done += 1;
+          HIVE_STATS.upgrade += 1;
+          var left = Number(json.honey);
+          if (isNaN(left) || left < 0) {
+            log("🐝 蜜蜂升级: id=" + bid + " 成功");
+          } else {
+            log("🐝 蜜蜂升级: id=" + bid + " 成功，剩余蜂蜜" + left);
+          }
+          return refresh("升级后").then(function (st) {
+            if (st) current = st;
+          });
+        })
+        .then(function () {
+          if (idx >= ids.length) return;
+          if (maxUpgrade > 0 && done >= maxUpgrade) return;
+          return sleep(CONFIG.WAIT_MS).then(next);
+        });
+    }
+
+    return next().then(function () {
+      if (done <= 0 && CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 本轮无新增");
+    });
+  }
+
   function doWork() {
     var plan = buildHiveActionPlan(current, { skipHarvest: harvestBlockedThisRound });
     if (!plan.canWork) {
@@ -14037,6 +14405,10 @@ function runHive(cookie) {
       HIVE_STATS.start = formatHiveState(state);
       log("🐝 蜂巢预判(开始): " + buildHiveActionPlan(current).summary);
       return doHarvest()
+        .then(function () {
+          return sleep(CONFIG.WAIT_MS);
+        })
+        .then(doUpgrade)
         .then(function () {
           return sleep(CONFIG.WAIT_MS);
         })
