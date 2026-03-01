@@ -103,12 +103,12 @@ Promise.resolve().then(async () => {
   }
 
   const ledger = syncLedger(st, prizeRows, poolRows);
+  const prizeListText = formatPrizeListBySource(ledger);
   const body = [
-    '📌 抽奖执行结果',
     lines.join('\n'),
     '',
     '🎁 奖品列表',
-    formatPrizeListBySource(ledger),
+    prizeListText,
   ].join('\n');
 
   $.msg($.name, buildSubtitle(lines), body);
@@ -150,10 +150,11 @@ async function runOneActivity(st, act) {
 }
 
 function formatActLine(name, rs) {
+  const reason = friendlyMsg(rs && rs.reason);
   if (rs.category === 'ok') return '✅ ' + name + ': 已刮' + rs.done + '次 | 本次=' + (rs.prizes.length ? rs.prizes.join('、') : '奖励名未返回') + fmtRemain(rs.remain);
-  if (rs.category === 'already_done') return '⏭️ ' + name + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (rs.reason || '已刮过');
+  if (rs.category === 'already_done') return '⏭️ ' + name + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (reason || '已刮过');
   if (rs.category === 'query_only') return '🧪 ' + name + ': 状态可刮，query_only跳过' + fmtRemain(rs.remain);
-  return '❌ ' + name + ': ' + (rs.reason || '失败');
+  return '❌ ' + name + ': ' + (reason || '失败');
 }
 
 function fmtRemain(n) { return toInt(n, -1) >= 0 ? ' | 剩余' + n + '次' : ''; }
@@ -297,7 +298,12 @@ function parseDetail(raw) {
   const code = toInt(pick(obj, ['code']), -1);
   const rc = toInt(pick(obj, ['data.returnCode', 'returnCode']), -1);
   const d = pick(obj, ['data.data', 'data', 'result']) || {};
-  if (code !== 0 || rc !== 0) return { ok: false, msg: txt(pick(obj, ['data.returnMsg', 'message', 'msg'])) || '状态接口返回异常' };
+  if (code !== 0 || rc !== 0) {
+    const msg = friendlyMsg(
+      pick(obj, ['data.returnMsg', 'message', 'msg', 'data.message', 'data.msg', 'errorMsg']) || obj
+    );
+    return { ok: false, msg: msg || '状态接口返回异常' };
+  }
   const rewardPool = extractRewardPool(d);
   return {
     ok: true,
@@ -305,7 +311,7 @@ function parseDetail(raw) {
     drawCount: toInt(d.drawCount, 0),
     totalCount: toInt(d.totalCount, -1),
     errCode: toInt(d.errCode, 0),
-    errMsg: txt(d.errMsg),
+    errMsg: friendlyMsg(d.errMsg),
     rewardPool: rewardPool,
   };
 }
@@ -332,7 +338,7 @@ function parseDraw(raw) {
   const rc = toInt(pick(obj, ['data.returnCode', 'returnCode']), -1);
   const d = pick(obj, ['data.data', 'data', 'result']) || {};
   const errCode = toInt(pick(d, ['errCode', 'code']), 0);
-  const msg = txt(pick(d, ['errMsg', 'returnMsg', 'msg'])) || txt(pick(obj, ['data.returnMsg', 'message', 'msg'])) || '';
+  const msg = friendlyMsg(pick(d, ['errMsg', 'returnMsg', 'msg'])) || friendlyMsg(pick(obj, ['data.returnMsg', 'message', 'msg'])) || '';
   let prizeName = deepFind(d, ['goodsSimpleName', 'prizeName', 'goodsName', 'rewardName', 'awardName', 'ec_name']) || deepFind(obj, ['goodsSimpleName', 'prizeName', 'goodsName', 'rewardName', 'awardName', 'ec_name']);
   if (!prizeName && msg.indexOf('未中奖') >= 0) prizeName = '未中奖';
   const ok = code === 0 && rc === 0 && (errCode === 0 || errCode === -1);
@@ -802,6 +808,46 @@ function toInt(v, d) { const n = parseInt(String(v), 10); return isNaN(n) ? d : 
 function toTsMs(v) { if (v === undefined || v === null || v === '') return 0; const s = String(v).trim(); if (/^\d{10,13}$/.test(s)) { const n = parseInt(s, 10); return s.length === 10 ? n * 1000 : n; } const p = Date.parse(s.replace(' ', 'T')); return isNaN(p) ? 0 : p; }
 function toJSON(s, d) { if (!s || typeof s !== 'string') return d; try { return JSON.parse(s); } catch (e) { return d; } }
 function txt(v) { return String(v == null ? '' : v).replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function friendlyMsg(v) {
+  if (v === undefined || v === null) return '';
+  const t = typeof v;
+  if (t === 'string' || t === 'number' || t === 'boolean') return txt(v);
+  if (Array.isArray(v)) {
+    const arr = [];
+    for (let i = 0; i < v.length; i++) {
+      const s = friendlyMsg(v[i]);
+      if (s) arr.push(s);
+    }
+    return arr.join(' | ');
+  }
+  if (t === 'object') {
+    const obj = v || {};
+    const direct = [
+      obj.errMsg,
+      obj.returnMsg,
+      obj.message,
+      obj.msg,
+      obj.errorMsg,
+      obj.desc,
+      obj.detail,
+    ];
+    for (let i = 0; i < direct.length; i++) {
+      const s = friendlyMsg(direct[i]);
+      if (s) return s;
+    }
+    const nested = pick(obj, ['data.returnMsg', 'data.message', 'data.msg', 'error.message', 'error.msg', 'result.message', 'result.msg']);
+    const ns = friendlyMsg(nested);
+    if (ns) return ns;
+    try {
+      const js = JSON.stringify(obj);
+      if (!js) return '';
+      return js.length > 180 ? (js.slice(0, 180) + '...') : js;
+    } catch (e) {
+      return txt(v);
+    }
+  }
+  return txt(v);
+}
 function ymdFromAny(v) {
   const s = txt(v);
   if (!s) return '';

@@ -23,7 +23,7 @@ hostname = loginxhm.10010.com
 */
 
 var SCRIPT_NAME = "联通营业厅签到";
-var SCRIPT_VERSION = "v1.4.0";
+var SCRIPT_VERSION = "v1.5.0";
 var STORAGE_SESSION_KEY = "unicom_hall_session_v1";
 var STORAGE_UA_KEY = "unicom_hall_ua_v1";
 var UNICOM_APP_SCHEME = "chinaunicom://";
@@ -36,8 +36,14 @@ var API = {
   state: BASE_URL + "/signin/getContinuous?taskId=&channel=shouye&imei=",
   sign: BASE_URL + "/signin/daySign",
   integral: BASE_URL + "/signin/getIntegral",
+  taskList: BASE_URL + "/task/taskList?type=",
+  completeTask: BASE_URL + "/task/completeTask",
+  getTaskReward: BASE_URL + "/task/getTaskReward",
   onlineRefresh: "https://loginxhm.10010.com/mobileService/onLine.htm",
 };
+var TASK_TYPES = ["0", "1", "2", "3"];
+var SEP = "==========";
+var SUB_SEP = "----------";
 var CAPTURE_GUIDE_TEXT =
   "联通App保持登录 -> 首页/我的切换并下拉刷新 -> 抓到loginxhm/mobileService请求 -> 再跑脚本";
 var CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
@@ -140,11 +146,33 @@ async function runTask() {
     return;
   }
 
-  $.log(ts() + " [INIT] version=" + SCRIPT_VERSION + " mode=" + mode + " accounts=" + sessions.length);
+  $.log(SEP);
+  $.log(ts() + " [INIT] " + SCRIPT_NAME + " " + SCRIPT_VERSION + " | mode=" + mode + " | accounts=" + sessions.length);
+  $.log(ts() + " [QUEUE] " + formatAccountQueue(sessions));
+  $.log(SEP);
   var invalidStoreCookies = {};
 
   for (var i = 0; i < sessions.length; i++) {
-    var row = await runOneAccount(sessions[i], i + 1, sessions.length);
+    var row;
+    try {
+      row = await runOneAccount(sessions[i], i + 1, sessions.length);
+    } catch (err) {
+      row = buildResult({
+        account: sessions[i].mobile ? maskMobile(sessions[i].mobile) : "账号" + (i + 1),
+        decision_path: "runtime_exception",
+        action_taken: false,
+        result_category: "network_error",
+        key_fields: { reason: stringifyError(err) },
+        next_step: "请查看日志后重试",
+        summary_line:
+          (sessions[i].mobile ? maskMobile(sessions[i].mobile) : "账号" + (i + 1)) +
+          " | 运行异常(" +
+          stringifyError(err) +
+          ")",
+        count_as: "fail",
+      });
+      $.log(ts() + " [A" + (i + 1) + "] EXCEPTION " + stringifyError(err));
+    }
     resultRows.push(row);
     if (row.result_category === "auth_expired" && sessions[i].source === "store") {
       invalidStoreCookies[sessions[i].cookie] = 1;
@@ -152,19 +180,12 @@ async function runTask() {
     if (i < sessions.length - 1) await $.wait(500);
   }
 
-  var successCount = 0;
-  var skipCount = 0;
-  var failCount = 0;
+  var stat = { success: 0, skip: 0, fail: 0 };
   var lines = [];
 
   for (var j = 0; j < resultRows.length; j++) {
     var r = resultRows[j];
-    if (r.result_category === "sign_success" || r.result_category === "already_done" || r.result_category === "query_only") {
-      if (r.result_category === "already_done" || r.result_category === "query_only") skipCount += 1;
-      else successCount += 1;
-    } else {
-      failCount += 1;
-    }
+    stat[normalizeCountBucket(r.count_as, r.result_category)] += 1;
     lines.push(r.summary_line);
   }
 
@@ -172,11 +193,11 @@ async function runTask() {
     "mode=" +
     mode +
     " | 成功:" +
-    successCount +
+    stat.success +
     " | 跳过:" +
-    skipCount +
+    stat.skip +
     " | 失败:" +
-    failCount;
+    stat.fail;
 
   var removedCount = purgeInvalidStoredSessions(invalidStoreCookies);
   if (removedCount > 0) {
@@ -187,6 +208,9 @@ async function runTask() {
   var hasAuthExpired = resultRows.some(function (x) {
     return x && x.result_category === "auth_expired";
   });
+  $.log(SEP);
+  $.log(ts() + " [DONE] " + subtitle);
+  $.log(SEP);
   $.msg(SCRIPT_NAME, subtitle, lines.join("\n"), hasAuthExpired ? buildUnicomOpenOption() : null);
 
   if (debug) {
@@ -196,17 +220,18 @@ async function runTask() {
 
 async function runOneAccount(session, index, total) {
   var account = session.mobile ? maskMobile(session.mobile) : "账号" + index;
-  $.log(ts() + " [A" + index + "/" + total + "] START " + account);
+  $.log(SUB_SEP);
+  $.log(ts() + " [A" + index + "/" + total + "] " + account + " | source=" + session.source);
 
   var state = await queryState(session, false);
   if (!state.ok && state.category === "auth_expired") {
-    $.log(ts() + " [A" + index + "] AUTH expired, try onLine refresh");
+    $.log(ts() + " [A" + index + "] 鉴权失效，尝试 onLine 刷新");
     var refreshed = await refreshAuthByOnline(session);
     if (refreshed.ok) {
-      $.log(ts() + " [A" + index + "] AUTH refresh success, retry state");
+      $.log(ts() + " [A" + index + "] onLine 刷新成功，重查状态");
       state = await queryState(session, false);
     } else {
-      $.log(ts() + " [A" + index + "] AUTH refresh failed: " + (refreshed.reason || "unknown"));
+      $.log(ts() + " [A" + index + "] onLine 刷新失败: " + (refreshed.reason || "unknown"));
     }
   }
   if (!state.ok) {
@@ -219,13 +244,10 @@ async function runOneAccount(session, index, total) {
       key_fields: { reason: state.reason || "unknown" },
       next_step: autoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "请重新抓包更新 Cookie 后重试",
       summary_line:
-        account +
-        " 状态查询失败(" +
-        (state.reason || "unknown") +
-        ")" +
-        (autoRemoved ? " | 已自动移除" : ""),
+        account + " | 状态失败(" + (state.reason || "unknown") + ")" + (autoRemoved ? " | 已自动移除" : ""),
+      count_as: "fail",
     });
-    $.log(ts() + " [A" + index + "] STOP " + (state.category || "state_undecidable"));
+    $.log(ts() + " [A" + index + "] 结束: " + (state.category || "state_undecidable"));
     return failRow;
   }
 
@@ -239,112 +261,173 @@ async function runOneAccount(session, index, total) {
       state.continueCount
   );
 
-  if (state.todaySigned) {
-    var integralDone = await queryIntegral(session);
-    var doneLine = account + " 已签到" + (integralDone.ok ? " | 积分:" + integralDone.integralTotal : "");
-    $.log(ts() + " [A" + index + "] SKIP already signed");
-    return buildResult({
-      account: account,
-      decision_path: "query_state(y)->skip_action",
-      action_taken: false,
-      result_category: "already_done",
-      key_fields: {
-        todayIsSignIn: "y",
-        continueCount: state.continueCount,
-        integralTotal: integralDone.ok ? integralDone.integralTotal : "",
-      },
-      next_step: "none",
-      summary_line: doneLine,
-    });
-  }
+  var signInfo = {
+    category: "",
+    decision: "",
+    text: "",
+    actionTaken: false,
+    failed: false,
+    key: {
+      todayIsSignIn: state.todaySigned ? "y" : "n",
+      continueCount: state.continueCount || "",
+    },
+  };
 
   if (mode === "query_only") {
-    $.log(ts() + " [A" + index + "] QUERY_ONLY stop before action");
+    signInfo.category = "query_only";
+    signInfo.decision = state.todaySigned ? "query_state(y)->query_only" : "query_state(n)->query_only";
+    signInfo.text = state.todaySigned ? "签到:已签(仅查询)" : "签到:未签(仅查询)";
+  } else if (state.todaySigned) {
+    var integralDone = await queryIntegral(session);
+    signInfo.category = "already_done";
+    signInfo.decision = "query_state(y)->skip_sign";
+    signInfo.text = "签到:已签" + (integralDone.ok ? " 积分:" + integralDone.integralTotal : "");
+    signInfo.key.integralTotal = integralDone.ok ? integralDone.integralTotal : "";
+  } else {
+    signInfo.actionTaken = true;
+    var sign = await executeSign(session);
+    $.log(
+      ts() +
+        " [A" +
+        index +
+        "] SIGN code=" +
+        sign.code +
+        " status=" +
+        sign.status +
+        " desc=" +
+        (sign.desc || "-")
+    );
+
+    if (!sign.ok) {
+      if (sign.category === "auth_expired") {
+        var signAutoRemoved = session.source === "store";
+        return buildResult({
+          account: account,
+          decision_path: "query_state(n)->execute_sign_failed(auth)",
+          action_taken: true,
+          result_category: "auth_expired",
+          key_fields: {
+            code: sign.code,
+            status: sign.status,
+            desc: sign.desc,
+          },
+          next_step: signAutoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "请重新抓包更新 Cookie 后重试",
+          summary_line:
+            account + " | 签到失败(" + (sign.desc || sign.code || "unknown") + ")" + (signAutoRemoved ? " | 已自动移除" : ""),
+          count_as: "fail",
+        });
+      }
+      signInfo.failed = true;
+      signInfo.category = sign.category || "action_rejected";
+      signInfo.decision = "query_state(n)->execute_sign_failed";
+      signInfo.text = "签到失败(" + (sign.desc || sign.code || "unknown") + ")";
+      signInfo.key.sign_desc = sign.desc || "";
+    } else {
+      var verify = await queryState(session, false);
+      if (!verify.ok || !verify.todaySigned) {
+        signInfo.failed = true;
+        signInfo.category = "state_undecidable";
+        signInfo.decision = "query_state(n)->execute_sign->verify_failed";
+        signInfo.text = "签到后校验未通过";
+        signInfo.key.verify_ok = verify.ok ? "1" : "0";
+        signInfo.key.verify_todayIsSignIn = verify.ok ? (verify.todaySigned ? "y" : "n") : "";
+      } else {
+        var integral = await queryIntegral(session);
+        signInfo.category = "sign_success";
+        signInfo.decision = "query_state(n)->execute_sign->verify_state(y)";
+        signInfo.text =
+          "签到成功" +
+          (sign.reward ? " " + sign.reward : "") +
+          (integral.ok ? " 积分:" + integral.integralTotal : "");
+        signInfo.key.sign_desc = sign.desc || "";
+        signInfo.key.reward = sign.reward || "";
+        signInfo.key.continueCount = verify.continueCount || state.continueCount || "";
+        signInfo.key.integralTotal = integral.ok ? integral.integralTotal : "";
+      }
+    }
+  }
+
+  var taskInfo = await processTasks(session, mode);
+  if (!taskInfo.ok) {
+    var taskAutoRemoved = taskInfo.category === "auth_expired" && session.source === "store";
     return buildResult({
       account: account,
-      decision_path: "query_state(n)->query_only_stop",
-      action_taken: false,
-      result_category: "query_only",
+      decision_path: signInfo.decision + "->task_query_failed",
+      action_taken: !!signInfo.actionTaken,
+      result_category: taskInfo.category || "network_error",
       key_fields: {
-        todayIsSignIn: "n",
-        continueCount: state.continueCount,
+        sign: signInfo.text,
+        task_reason: taskInfo.reason || "unknown",
       },
-      next_step: "切换 mode=execute 才会执行签到",
-      summary_line: account + " 未签到 | query_only 模式未执行",
+      next_step: taskAutoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "建议稍后重试；若持续失败请重新抓包",
+      summary_line:
+        account +
+        " | " +
+        (signInfo.text || "签到:未知") +
+        " | 任务失败(" +
+        (taskInfo.reason || "unknown") +
+        ")" +
+        (taskAutoRemoved ? " | 已自动移除" : ""),
+      count_as: "fail",
     });
   }
 
-  var sign = await executeSign(session);
   $.log(
     ts() +
       " [A" +
       index +
-      "] ACTION code=" +
-      sign.code +
-      " status=" +
-      sign.status +
-      " desc=" +
-      (sign.desc || "-")
+      "] TASK total=" +
+      taskInfo.total +
+      " canDo=" +
+      taskInfo.canDo +
+      " claim=" +
+      taskInfo.claimed +
+      " complete=" +
+      taskInfo.completed +
+      " skip=" +
+      taskInfo.skipped +
+      " fail=" +
+      taskInfo.failed
   );
 
-  if (!sign.ok) {
-    var signAutoRemoved = sign.category === "auth_expired" && session.source === "store";
-    return buildResult({
-      account: account,
-      decision_path: "query_state(n)->execute_sign_failed",
-      action_taken: true,
-      result_category: sign.category || "action_rejected",
-      key_fields: {
-        code: sign.code,
-        status: sign.status,
-        desc: sign.desc,
-      },
-      next_step: signAutoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "检查 Cookie 是否过期，必要时重新抓包",
-      summary_line:
-        account +
-        " 签到失败(" +
-        (sign.desc || sign.code || "unknown") +
-        ")" +
-        (signAutoRemoved ? " | 已自动移除" : ""),
-    });
+  var finalCategory = signInfo.category;
+  var finalCount = "success";
+  var nextStep = "none";
+  if (mode === "query_only") {
+    finalCategory = "query_only";
+    finalCount = "skip";
+    nextStep = "切换 mode=execute 才会执行签到与任务";
+  } else if (signInfo.failed) {
+    finalCategory = signInfo.category || "action_rejected";
+    finalCount = "fail";
+    nextStep = "签到失败，建议稍后重试";
+  } else if (signInfo.category === "already_done") {
+    finalCategory = "already_done";
+    finalCount = "skip";
+  } else if (signInfo.category === "sign_success") {
+    finalCategory = "sign_success";
+    finalCount = "success";
+  } else {
+    finalCategory = signInfo.category || "query_only";
+    finalCount = finalCategory === "query_only" ? "skip" : "success";
   }
 
-  var verify = await queryState(session, false);
-  if (!verify.ok || !verify.todaySigned) {
-    return buildResult({
-      account: account,
-      decision_path: "query_state(n)->execute_sign->verify_failed",
-      action_taken: true,
-      result_category: "state_undecidable",
-      key_fields: {
-        verify_ok: verify.ok ? "1" : "0",
-        verify_todayIsSignIn: verify.ok ? (verify.todaySigned ? "y" : "n") : "",
-        sign_desc: sign.desc || "",
-      },
-      next_step: "建议手动打开页面确认签到状态",
-      summary_line: account + " 执行后校验未通过",
-    });
+  if (taskInfo.failed > 0) {
+    finalCategory = finalCategory === "query_only" ? "query_only" : "task_partial";
+    finalCount = "fail";
+    nextStep = "部分任务执行失败，可稍后重试";
   }
 
-  var integral = await queryIntegral(session);
-  $.log(ts() + " [A" + index + "] VERIFY todayIsSignIn=y");
+  var finalLine = account + " | " + (signInfo.text || "签到:未知") + " | " + taskInfo.summaryShort;
   return buildResult({
     account: account,
-    decision_path: "query_state(n)->execute_sign->verify_state(y)",
-    action_taken: true,
-    result_category: "sign_success",
-    key_fields: {
-      sign_desc: sign.desc || "",
-      reward: sign.reward || "",
-      continueCount: verify.continueCount || "",
-      integralTotal: integral.ok ? integral.integralTotal : "",
-    },
-    next_step: "none",
-    summary_line:
-      account +
-      " 签到成功" +
-      (sign.reward ? " " + sign.reward : "") +
-      (integral.ok ? " | 积分:" + integral.integralTotal : ""),
+    decision_path: signInfo.decision + "->task(" + taskInfo.decision + ")",
+    action_taken: !!signInfo.actionTaken || taskInfo.actionTaken,
+    result_category: finalCategory,
+    key_fields: mergeObjects(signInfo.key, taskInfo.keyFields),
+    next_step: nextStep,
+    summary_line: finalLine,
+    count_as: finalCount,
   });
 }
 
@@ -483,6 +566,350 @@ async function queryIntegral(session) {
   return { ok: true, integralTotal: total };
 }
 
+async function processTasks(session, runMode) {
+  var map = {};
+  var queryErrors = [];
+  var totalFetched = 0;
+  var queryTypes = [];
+
+  for (var i = 0; i < TASK_TYPES.length; i++) {
+    var type = TASK_TYPES[i];
+    var q = await queryTaskListByType(session, type);
+    if (!q.ok) {
+      if (q.category === "auth_expired") {
+        return {
+          ok: false,
+          category: "auth_expired",
+          reason: "taskList_type" + type + "_" + (q.reason || "auth_expired"),
+        };
+      }
+      queryErrors.push("type" + type + ":" + (q.reason || q.category || "unknown"));
+      continue;
+    }
+    queryTypes.push(type);
+    totalFetched += q.tasks.length;
+    for (var j = 0; j < q.tasks.length; j++) {
+      var t = q.tasks[j];
+      if (!t.id) continue;
+      if (!map[t.id] || taskDecisionPriority(t) > taskDecisionPriority(map[t.id])) {
+        map[t.id] = t;
+      }
+    }
+  }
+
+  var ids = Object.keys(map);
+  if (!queryTypes.length) {
+    return {
+      ok: false,
+      category: "network_error",
+      reason: queryErrors.length ? queryErrors.join("|") : "task_list_all_failed",
+    };
+  }
+  var tasks = [];
+  for (var k = 0; k < ids.length; k++) tasks.push(map[ids[k]]);
+  tasks.sort(function (a, b) {
+    var pa = taskDecisionPriority(a);
+    var pb = taskDecisionPriority(b);
+    if (pa !== pb) return pb - pa;
+    return String(a.taskName || "").localeCompare(String(b.taskName || ""));
+  });
+
+  var stat = {
+    total: tasks.length,
+    totalFetched: totalFetched,
+    canDo: 0,
+    completed: 0,
+    claimed: 0,
+    skipped: 0,
+    failed: 0,
+    rewardReady: 0,
+    claimReady: 0,
+  };
+  var actionTaken = false;
+  var debugRows = [];
+
+  for (var n = 0; n < tasks.length; n++) {
+    var task = tasks[n];
+    var action = decideTaskAction(task);
+    if (action !== "skip") stat.canDo += 1;
+    if (action === "reward_only") stat.rewardReady += 1;
+    if (action === "complete_and_reward") stat.claimReady += 1;
+
+    if (runMode === "query_only") continue;
+    if (action === "skip") {
+      stat.skipped += 1;
+      continue;
+    }
+
+    actionTaken = true;
+    if (action === "reward_only") {
+      var rewardOnly = await getTaskRewardWithRetry(session, task.id, 2);
+      if (!rewardOnly.ok) {
+        if (rewardOnly.category === "auth_expired") {
+          return {
+            ok: false,
+            category: "auth_expired",
+            reason: "taskReward_" + task.id + "_" + (rewardOnly.reason || "auth_expired"),
+          };
+        }
+        stat.failed += 1;
+        debugRows.push("reward_fail:" + shortTaskName(task.taskName) + ":" + (rewardOnly.reason || rewardOnly.desc || "unknown"));
+      } else {
+        stat.claimed += 1;
+      }
+      continue;
+    }
+
+    var complete = await completeTaskById(session, task.id);
+    if (!complete.ok) {
+      if (complete.category === "auth_expired") {
+        return {
+          ok: false,
+          category: "auth_expired",
+          reason: "taskComplete_" + task.id + "_" + (complete.reason || "auth_expired"),
+        };
+      }
+      debugRows.push("complete_fail:" + shortTaskName(task.taskName) + ":" + (complete.reason || complete.desc || "unknown"));
+    } else {
+      stat.completed += 1;
+    }
+
+    var reward = await getTaskRewardWithRetry(session, task.id, 2);
+    if (!reward.ok) {
+      if (reward.category === "auth_expired") {
+        return {
+          ok: false,
+          category: "auth_expired",
+          reason: "taskReward_" + task.id + "_" + (reward.reason || "auth_expired"),
+        };
+      }
+      stat.failed += 1;
+      debugRows.push("reward_fail:" + shortTaskName(task.taskName) + ":" + (reward.reason || reward.desc || "unknown"));
+    } else {
+      stat.claimed += 1;
+    }
+    await $.wait(180);
+  }
+
+  if (runMode === "query_only") {
+    stat.skipped = tasks.length - stat.canDo;
+  }
+
+  var summaryShort =
+    runMode === "query_only"
+      ? "任务:可做" + stat.canDo + "/" + stat.total + " (仅查询)"
+      : "任务:领" + stat.claimed + " 完" + stat.completed + " 跳" + stat.skipped + " 失" + stat.failed;
+
+  var decision = "query_types(" + queryTypes.join(",") + ")";
+  if (queryErrors.length) decision += "_partial";
+
+  var keyFields = {
+    task_total: String(stat.total),
+    task_can_do: String(stat.canDo),
+    task_claimed: String(stat.claimed),
+    task_completed: String(stat.completed),
+    task_skipped: String(stat.skipped),
+    task_failed: String(stat.failed),
+  };
+  if (queryErrors.length) keyFields.task_query_warn = queryErrors.join("|");
+
+  if (debug && debugRows.length) {
+    $.log(ts() + " [TASK_DEBUG] " + debugRows.slice(0, 10).join(" | "));
+  }
+
+  return {
+    ok: true,
+    decision: decision,
+    summaryShort: summaryShort,
+    actionTaken: actionTaken,
+    keyFields: keyFields,
+    total: stat.total,
+    canDo: stat.canDo,
+    claimed: stat.claimed,
+    completed: stat.completed,
+    skipped: stat.skipped,
+    failed: stat.failed,
+  };
+}
+
+async function queryTaskListByType(session, type) {
+  var resp = await requestJson("GET", API.taskList + encodeURIComponent(type), buildHeaders(session, false, false), "");
+  if (!resp.ok) {
+    if (resp.statusCode === 401 || resp.statusCode === 403) {
+      return { ok: false, category: "auth_expired", reason: "http_" + resp.statusCode };
+    }
+    return { ok: false, category: "network_error", reason: resp.reason || "network_error" };
+  }
+
+  var obj = resp.json || {};
+  if (String(obj.code || "") !== "0000") {
+    var msg = pickApiMessage(obj);
+    if (isAuthExpiredCodeOrMsg(obj.code, msg)) {
+      return { ok: false, category: "auth_expired", reason: "auth_" + String(obj.code || "") + "_" + msg };
+    }
+    return { ok: false, category: "action_rejected", reason: "bad_code_" + String(obj.code || "") };
+  }
+
+  var tasks = extractTasksFromData(obj.data, String(type || ""));
+  return { ok: true, tasks: tasks };
+}
+
+function extractTasksFromData(data, type) {
+  var out = [];
+  var i;
+  if (!data || typeof data !== "object") return out;
+
+  if (Array.isArray(data.taskList)) {
+    for (i = 0; i < data.taskList.length; i++) {
+      var t0 = normalizeTaskItem(data.taskList[i], type);
+      if (t0.id) out.push(t0);
+    }
+  }
+  if (Array.isArray(data.tagList)) {
+    for (i = 0; i < data.tagList.length; i++) {
+      var tag = data.tagList[i] || {};
+      var tagName = String(tag.tagName || "");
+      if (!Array.isArray(tag.taskDTOList)) continue;
+      for (var j = 0; j < tag.taskDTOList.length; j++) {
+        var t1 = normalizeTaskItem(tag.taskDTOList[j], type);
+        if (!t1.id) continue;
+        if (tagName) t1.tagName = tagName;
+        out.push(t1);
+      }
+    }
+  }
+  return out;
+}
+
+function normalizeTaskItem(item, type) {
+  var it = item || {};
+  return {
+    id: String(it.id || it.taskId || ""),
+    taskName: String(it.taskName || it.name || ""),
+    taskState: String(it.taskState == null ? "" : it.taskState),
+    buttonName: String(it.buttonName || ""),
+    bubbleButtonName: String(it.bubbleButtonName || ""),
+    type: String(type || ""),
+  };
+}
+
+function decideTaskAction(task) {
+  if (!task || !task.id) return "skip";
+  if (isTaskRewardReady(task)) return "reward_only";
+  if (isTaskClaimReady(task)) return "complete_and_reward";
+  return "skip";
+}
+
+function taskDecisionPriority(task) {
+  var action = decideTaskAction(task);
+  if (action === "reward_only") return 3;
+  if (action === "complete_and_reward") return 2;
+  return 1;
+}
+
+function isTaskRewardReady(task) {
+  var state = String((task && task.taskState) || "");
+  var button = String((task && task.buttonName) || "");
+  return state === "3" || /已完成/.test(button);
+}
+
+function isTaskClaimReady(task) {
+  var state = String((task && task.taskState) || "");
+  var button = String((task && task.buttonName) || "");
+  return state === "0" || /去领取|领取/.test(button);
+}
+
+async function completeTaskById(session, taskId) {
+  var url =
+    API.completeTask +
+    "?taskId=" +
+    encodeURIComponent(taskId) +
+    "&orderId=&systemCode=QDQD";
+  var resp = await requestJson("GET", url, buildHeaders(session, false, false), "");
+  if (!resp.ok) {
+    if (resp.statusCode === 401 || resp.statusCode === 403) {
+      return { ok: false, category: "auth_expired", reason: "http_" + resp.statusCode };
+    }
+    return { ok: false, category: "network_error", reason: resp.reason || "network_error" };
+  }
+
+  var obj = resp.json || {};
+  var code = String(obj.code || "");
+  var msg = pickApiMessage(obj);
+  if (code === "0000") {
+    return { ok: true, category: "ok", reason: "ok", desc: msg };
+  }
+  if (isAuthExpiredCodeOrMsg(code, msg)) {
+    return { ok: false, category: "auth_expired", reason: "auth_" + code + "_" + msg, desc: msg };
+  }
+  if (/已完成|已领取|无需重复/.test(msg)) {
+    return { ok: true, category: "ok", reason: "already", desc: msg };
+  }
+  return { ok: false, category: "action_rejected", reason: "bad_code_" + code, desc: msg };
+}
+
+async function getTaskRewardWithRetry(session, taskId, maxTry) {
+  var tries = Math.max(1, Number(maxTry || 1));
+  var last = null;
+  for (var i = 0; i < tries; i++) {
+    last = await getTaskRewardById(session, taskId);
+    if (last.ok) return last;
+    if (last.category === "auth_expired") return last;
+    var busy = /火爆|稍后|繁忙|频繁/.test(String(last.desc || ""));
+    if (!busy || i === tries - 1) return last;
+    await $.wait(400 + i * 200);
+  }
+  return last || { ok: false, category: "action_rejected", reason: "unknown_reward_error", desc: "" };
+}
+
+async function getTaskRewardById(session, taskId) {
+  var url = API.getTaskReward + "?taskId=" + encodeURIComponent(taskId);
+  var resp = await requestJson("GET", url, buildHeaders(session, false, false), "");
+  if (!resp.ok) {
+    if (resp.statusCode === 401 || resp.statusCode === 403) {
+      return { ok: false, category: "auth_expired", reason: "http_" + resp.statusCode, desc: "http_" + resp.statusCode };
+    }
+    return { ok: false, category: "network_error", reason: resp.reason || "network_error", desc: resp.reason || "" };
+  }
+
+  var obj = resp.json || {};
+  var topCode = String(obj.code || "");
+  var data = obj.data || {};
+  var innerCode = String(data.code || "");
+  var desc = String(data.desc || data.statusDesc || obj.desc || obj.msg || "");
+
+  if (topCode !== "0000") {
+    if (isAuthExpiredCodeOrMsg(topCode, desc || pickApiMessage(obj))) {
+      return { ok: false, category: "auth_expired", reason: "auth_" + topCode, desc: desc };
+    }
+    return { ok: false, category: "action_rejected", reason: "bad_top_code_" + topCode, desc: desc };
+  }
+
+  if (!innerCode || innerCode === "0000") {
+    return {
+      ok: true,
+      category: "ok",
+      reason: "ok",
+      desc: desc,
+      reward: String(data.prizeNameRed || data.prizeName || data.prizeCount || ""),
+    };
+  }
+  if (/已领取|已完成|已发放/.test(desc)) {
+    return { ok: true, category: "ok", reason: "already", desc: desc };
+  }
+  if (isAuthExpiredCodeOrMsg(innerCode, desc)) {
+    return { ok: false, category: "auth_expired", reason: "auth_" + innerCode, desc: desc };
+  }
+  return { ok: false, category: "action_rejected", reason: "bad_inner_code_" + innerCode, desc: desc };
+}
+
+function shortTaskName(name) {
+  var s = String(name || "");
+  if (!s) return "未知任务";
+  if (s.length <= 12) return s;
+  return s.slice(0, 12) + "...";
+}
+
 async function requestJson(method, url, headers, body) {
   try {
     var resp = await $.request({
@@ -598,7 +1025,11 @@ function readSessionList() {
   var raw = $.getdata(STORAGE_SESSION_KEY) || "";
   if (!raw) return [];
   var arr = safeJsonParse(raw, []);
-  if (!Array.isArray(arr)) return [];
+  if (!Array.isArray(arr)) {
+    if (arr && typeof arr === "object" && arr.cookie) arr = [arr];
+    else if (arr && typeof arr === "object" && Array.isArray(arr.sessions)) arr = arr.sessions;
+    else return [];
+  }
   var out = [];
   for (var i = 0; i < arr.length; i++) {
     var item = arr[i];
@@ -703,7 +1134,37 @@ function buildResult(input) {
     key_fields: input.key_fields || {},
     next_step: input.next_step || "",
     summary_line: input.summary_line || "",
+    count_as: input.count_as || "",
   };
+}
+
+function normalizeCountBucket(countAs, category) {
+  var c = String(countAs || "").toLowerCase();
+  if (c === "success" || c === "skip" || c === "fail") return c;
+  if (category === "already_done" || category === "query_only") return "skip";
+  if (category === "sign_success") return "success";
+  return "fail";
+}
+
+function formatAccountQueue(sessions) {
+  var out = [];
+  for (var i = 0; i < sessions.length; i++) {
+    var s = sessions[i] || {};
+    var mobile = s.mobile || detectAccountId(s.cookie || "");
+    out.push("A" + (i + 1) + ":" + (mobile ? maskMobile(mobile) : "未知账号"));
+  }
+  return out.join(" | ");
+}
+
+function mergeObjects(a, b) {
+  var out = {};
+  var x = a || {};
+  var y = b || {};
+  var k1 = Object.keys(x);
+  for (var i = 0; i < k1.length; i++) out[k1[i]] = x[k1[i]];
+  var k2 = Object.keys(y);
+  for (var j = 0; j < k2.length; j++) out[k2[j]] = y[k2[j]];
+  return out;
 }
 
 function normalizeMode(s) {
