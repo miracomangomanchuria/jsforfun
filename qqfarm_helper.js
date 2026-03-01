@@ -310,7 +310,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.03.01-r38";
+var SCRIPT_REV = "2026.03.01-r39";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -10193,28 +10193,48 @@ function runFarmEvents(cookie) {
     function collectWishStars(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_COLLECT) return Promise.resolve(state);
       if (Number(state.tool || 0) <= 0) return Promise.resolve(state);
-      return callFarmEventApi(
-        cookie,
-        "/cgi-bin/cgi_farm_wish_star",
-        farmEventParams(ctx, {
-          type: 1
-        })
-      ).then(function (json) {
-        if (!wishActionOk(json)) {
-          var msg = farmEventErrMsg(json);
-          if (!isFarmEventNoop(json, msg)) {
+      var transientRetries = wishTransientRetries();
+      function run(attempt) {
+        return callFarmEventApi(
+          cookie,
+          "/cgi-bin/cgi_farm_wish_star",
+          farmEventParams(ctx, {
+            type: 1
+          })
+        ).then(function (json) {
+          if (!wishActionOk(json)) {
+            var msg = farmEventErrMsg(json);
+            if (isFarmEventNoop(json, msg)) {
+              if (CONFIG.DEBUG) logDebug("🌠 许愿收星: 无需执行(" + msg + ")");
+              return state;
+            }
+            var transient = isTransientFailText(msg || "");
+            if (transient && attempt < transientRetries) {
+              log("⚠️ 许愿收星繁忙，第" + (attempt + 1) + "次重试");
+              return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                return run(attempt + 1);
+              });
+            }
+            if (transient) {
+              FARM_EVENT_STATS.busy += 1;
+              log("⚠️ 许愿收星繁忙: 已重试" + transientRetries + "次，留待下轮");
+              return fetchIndex("收星繁忙后").then(function (nextState) {
+                return nextState || state;
+              });
+            }
             FARM_EVENT_STATS.errors += 1;
             log("⚠️ 许愿收星失败: " + msg);
-          } else if (CONFIG.DEBUG) {
-            logDebug("🌠 许愿收星: 无需执行(" + msg + ")");
+            return state;
           }
-          return state;
-        }
-        FARM_EVENT_STATS.wishCollect += 1;
-        if (!appendWishReward(json, "🌠 许愿收星: ")) {
-          log("🌠 许愿收星: 成功");
-        }
-        return fetchIndex("收星后");
+          FARM_EVENT_STATS.wishCollect += 1;
+          if (!appendWishReward(json, "🌠 许愿收星: ")) {
+            log("🌠 许愿收星: 成功");
+          }
+          return fetchIndex("收星后");
+        });
+      }
+      return run(0).then(function (nextState) {
+        return nextState || state;
       });
     }
 
