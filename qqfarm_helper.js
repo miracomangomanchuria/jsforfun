@@ -158,6 +158,10 @@ var CONFIG = {
   HIVE_AUTO_HARVEST: true, // 收蜂蜜(非卖蜜)
   HIVE_AUTO_UPGRADE: true, // 自动升级蜜蜂（可升才升）
   HIVE_UPGRADE_IDS: "2,1", // 升级顺序（优先2号蜂，再尝试1号蜂）
+  HIVE_UPGRADE_COST_HINTS: {
+    "2": 200,
+    "1": 100
+  }, // 升级耗蜜预判（用于“先判定再请求”，按抓包可调）
   HIVE_UPGRADE_MAX: 2, // 单轮最多升级次数（0=不限制）
   HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
@@ -306,7 +310,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.02.28-r36";
+var SCRIPT_REV = "2026.03.01-r38";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -10050,6 +10054,7 @@ function runFarmEvents(cookie) {
     if (!CONFIG.FARM_EVENT_WISH_ENABLE) return Promise.resolve();
     var maxPass = Number(CONFIG.FARM_EVENT_WISH_MAX_PASS || 8);
     if (isNaN(maxPass) || maxPass < 1) maxPass = 8;
+    var wishRandomDailyLimitHit = false;
 
     function wishActionCount() {
       return (
@@ -10215,6 +10220,10 @@ function runFarmEvents(cookie) {
 
     function randomWish(state) {
       if (!state || !CONFIG.FARM_EVENT_WISH_AUTO_RANDOM) return Promise.resolve(state);
+      if (wishRandomDailyLimitHit) {
+        if (CONFIG.DEBUG) logDebug("🌠 许愿抽星: 今日次数已用完，跳过");
+        return Promise.resolve(state);
+      }
       var status = Number(state.status || 0) || 0;
       if (status !== 3 && status !== 4) return Promise.resolve(state);
       if (Number(state.starWaitSec || 0) > 0) {
@@ -10236,6 +10245,11 @@ function runFarmEvents(cookie) {
           function (json) {
             if (!wishActionOk(json)) {
               var msg = farmEventErrMsg(json);
+              if (/今天.*许愿次数|今日.*许愿次数|许愿次数.*已用完|次数.*已用完/.test(msg || "")) {
+                wishRandomDailyLimitHit = true;
+                if (CONFIG.DEBUG) logDebug("🌠 许愿抽星: 今日次数已用完，停止本轮");
+                return false;
+              }
               if (isFarmEventNoop(json, msg) || /星不足|冷却|不能|未开启|次数不足|不足/.test(msg || "")) {
                 if (CONFIG.DEBUG) logDebug("🌠 许愿抽星: 无需执行(" + msg + ")");
                 return false;
@@ -10488,7 +10502,14 @@ function runFarmEvents(cookie) {
       if (CONFIG.FARM_EVENT_WISH_AUTO_RANDOM) {
         var cost = Number(state.costStar || 0) || 0;
         var star = Number(state.vstar || 0) || 0;
-        if ((status === 3 || status === 4) && cost > 0 && star >= cost && Number(state.starWaitSec || 0) <= 0) return "random";
+        if (
+          !wishRandomDailyLimitHit &&
+          (status === 3 || status === 4) &&
+          cost > 0 &&
+          star >= cost &&
+          Number(state.starWaitSec || 0) <= 0
+        )
+          return "random";
       }
       if (CONFIG.FARM_EVENT_WISH_AUTO_HELP && (status === 2 || status === 3) && Number(state.selfWaitSec || 0) <= 0)
         return "help";
@@ -14022,6 +14043,57 @@ function hiveNum(v, dft) {
   return n;
 }
 
+function parseHiveUpgradeIdsFromConfig(raw) {
+  var arr = String(raw || "")
+    .split(",")
+    .map(function (v) {
+      return Number(String(v || "").trim()) || 0;
+    })
+    .filter(function (n) {
+      return n > 0;
+    });
+  if (!arr.length) arr = [2, 1];
+  var out = [];
+  var seen = {};
+  for (var i = 0; i < arr.length; i++) {
+    var id = Number(arr[i] || 0) || 0;
+    if (!id || seen[id]) continue;
+    seen[id] = 1;
+    out.push(id);
+  }
+  return out;
+}
+
+function hiveUpgradeNeedHoney(id) {
+  var map = (CONFIG && CONFIG.HIVE_UPGRADE_COST_HINTS) || {};
+  if (!map || typeof map !== "object") return 0;
+  var k = String(Number(id || 0) || 0);
+  if (!k || k === "0") return 0;
+  var need = Number(map[k] || 0) || 0;
+  return need > 0 ? need : 0;
+}
+
+function hiveFindUpgradeableIdByHoney(honey, ids) {
+  var h = Number(honey || 0) || 0;
+  var list = ids && ids.length ? ids : parseHiveUpgradeIdsFromConfig(CONFIG.HIVE_UPGRADE_IDS);
+  var minNeed = 0;
+  var minId = 0;
+  var hasHint = false;
+  for (var i = 0; i < list.length; i++) {
+    var id = Number(list[i] || 0) || 0;
+    if (!id) continue;
+    var need = hiveUpgradeNeedHoney(id);
+    if (need <= 0) return { can: h > 0, id: id, need: 0, hasHint: hasHint };
+    hasHint = true;
+    if (!minNeed || need < minNeed) {
+      minNeed = need;
+      minId = id;
+    }
+    if (h >= need) return { can: true, id: id, need: need, hasHint: hasHint };
+  }
+  return { can: false, id: minId, need: minNeed, hasHint: hasHint };
+}
+
 function buildHiveActionPlan(state, opts) {
   var plan = {
     canUpgrade: false,
@@ -14091,7 +14163,14 @@ function buildHiveActionPlan(state, opts) {
   } else if (honey <= 0) {
     plan.upgradeReason = "蜂蜜不足(" + honey + ")";
   } else {
-    plan.canUpgrade = true;
+    var upgradeHint = hiveFindUpgradeableIdByHoney(honey, parseHiveUpgradeIdsFromConfig(CONFIG.HIVE_UPGRADE_IDS));
+    if (upgradeHint.can) {
+      plan.canUpgrade = true;
+    } else if (upgradeHint.hasHint && upgradeHint.need > 0) {
+      plan.upgradeReason = "蜂蜜不足(当前" + honey + "，最低需" + upgradeHint.need + ")";
+    } else {
+      plan.canUpgrade = true;
+    }
   }
 
   if (!CONFIG.HIVE_AUTO_POLLEN) {
@@ -14186,27 +14265,6 @@ function runHive(cookie) {
   var harvested = 0;
   var harvestBlockedThisRound = false;
 
-  function parseHiveUpgradeIds(raw) {
-    var arr = String(raw || "")
-      .split(",")
-      .map(function (v) {
-        return Number(String(v || "").trim()) || 0;
-      })
-      .filter(function (n) {
-        return n > 0;
-      });
-    if (!arr.length) arr = [2, 1];
-    var out = [];
-    var seen = {};
-    for (var i = 0; i < arr.length; i++) {
-      var id = Number(arr[i] || 0) || 0;
-      if (!id || seen[id]) continue;
-      seen[id] = 1;
-      out.push(id);
-    }
-    return out;
-  }
-
   function refresh(tag) {
     return fetchHiveIndex(cookie, ctx).then(function (state) {
       if (!state) {
@@ -14297,10 +14355,12 @@ function runHive(cookie) {
       if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 配置关闭");
       return Promise.resolve();
     }
-    var ids = parseHiveUpgradeIds(CONFIG.HIVE_UPGRADE_IDS);
+    var ids = parseHiveUpgradeIdsFromConfig(CONFIG.HIVE_UPGRADE_IDS);
     if (!ids.length) return Promise.resolve();
     var maxUpgrade = Number(CONFIG.HIVE_UPGRADE_MAX || 0);
     if (isNaN(maxUpgrade) || maxUpgrade < 0) maxUpgrade = 0;
+    var transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
     var done = 0;
     var idx = 0;
 
@@ -14314,44 +14374,67 @@ function runHive(cookie) {
         if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 蜂蜜不足(" + honeyNow + ")，跳过");
         return Promise.resolve();
       }
+      var needHoney = hiveUpgradeNeedHoney(bid);
+      if (needHoney > 0 && honeyNow < needHoney) {
+        if (CONFIG.DEBUG) {
+          logDebug("🐝 蜜蜂升级(id=" + bid + "): 蜂蜜不足(当前" + honeyNow + "，需" + needHoney + ")，跳过");
+        }
+        return next();
+      }
       if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 尝试 id=" + bid + "（当前蜂蜜" + honeyNow + "）");
-      return callHiveApi(
-        cookie,
-        "/cgi-bin/cgi_farm_hive_upgrade?act=bee",
-        hiveParams(ctx, {
-          id: bid
-        })
-      )
-        .then(function (json) {
-          if (!isHiveOk(json)) {
-            var msg = hiveErrMsg(json);
-            if (isHiveNoop(json, msg)) {
-              if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 无需执行(" + msg + ")");
-              return refresh("升级noop后").then(function (st) {
-                if (st) current = st;
-              });
+      function tryOneUpgrade(attempt) {
+        return callHiveApi(
+          cookie,
+          "/cgi-bin/cgi_farm_hive_upgrade?act=bee",
+          hiveParams(ctx, {
+            id: bid
+          })
+        )
+          .then(function (json) {
+            if (!isHiveOk(json)) {
+              var msg = hiveErrMsg(json);
+              var transient = isTransientFailText(msg || "");
+              if (transient && attempt < transientRetries) {
+                log("⚠️ 蜜蜂升级繁忙(id=" + bid + ")，第" + (attempt + 1) + "次重试");
+                return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+                  return tryOneUpgrade(attempt + 1);
+                });
+              }
+              if (transient) {
+                log("⚠️ 蜜蜂升级繁忙(id=" + bid + "): 已重试" + transientRetries + "次，留待下轮");
+                return refresh("升级繁忙后").then(function (st) {
+                  if (st) current = st;
+                });
+              }
+              if (isHiveNoop(json, msg)) {
+                if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 无需执行(" + msg + ")");
+                return refresh("升级noop后").then(function (st) {
+                  if (st) current = st;
+                });
+              }
+              HIVE_STATS.errors += 1;
+              log("⚠️ 蜜蜂升级失败(id=" + bid + "): " + msg);
+              return;
             }
-            HIVE_STATS.errors += 1;
-            log("⚠️ 蜜蜂升级失败(id=" + bid + "): " + msg);
-            return;
-          }
-          done += 1;
-          HIVE_STATS.upgrade += 1;
-          var left = Number(json.honey);
-          if (isNaN(left) || left < 0) {
-            log("🐝 蜜蜂升级: id=" + bid + " 成功");
-          } else {
-            log("🐝 蜜蜂升级: id=" + bid + " 成功，剩余蜂蜜" + left);
-          }
-          return refresh("升级后").then(function (st) {
-            if (st) current = st;
+            done += 1;
+            HIVE_STATS.upgrade += 1;
+            var left = Number(json.honey);
+            if (isNaN(left) || left < 0) {
+              log("🐝 蜜蜂升级: id=" + bid + " 成功");
+            } else {
+              log("🐝 蜜蜂升级: id=" + bid + " 成功，剩余蜂蜜" + left);
+            }
+            return refresh("升级后").then(function (st) {
+              if (st) current = st;
+            });
+          })
+          .then(function () {
+            if (idx >= ids.length) return;
+            if (maxUpgrade > 0 && done >= maxUpgrade) return;
+            return sleep(CONFIG.WAIT_MS).then(next);
           });
-        })
-        .then(function () {
-          if (idx >= ids.length) return;
-          if (maxUpgrade > 0 && done >= maxUpgrade) return;
-          return sleep(CONFIG.WAIT_MS).then(next);
-        });
+      }
+      return tryOneUpgrade(0);
     }
 
     return next().then(function () {
