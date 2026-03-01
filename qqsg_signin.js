@@ -802,7 +802,20 @@ function extractRewardNamesFromHtml(html) {
   let m;
   while ((m = reg.exec(src))) {
     const text = stripHtmlToText(m[1]);
-    if (text) out.push(text);
+    const cleaned = String(text || '').trim();
+    if (cleaned && !isLikelyMojibakeText(cleaned)) out.push(cleaned);
+  }
+
+  // 兜底：reward-name 缺失时，尝试从图片 alt 抽取奖励名
+  if (!out.length) {
+    const regAlt = /<img[^>]*alt=["']([^"']+)["'][^>]*>/gi;
+    while ((m = regAlt.exec(src))) {
+      const alt = stripHtmlToText(m[1]);
+      const cleanedAlt = String(alt || '').trim();
+      if (!cleanedAlt) continue;
+      if (isLikelyMojibakeText(cleanedAlt)) continue;
+      out.push(cleanedAlt);
+    }
   }
   return out;
 }
@@ -844,11 +857,20 @@ function loadCachedRewardMap() {
   if (!obj || typeof obj !== 'object') return {};
   const keys = getObjKeys(obj);
   const out = {};
+  let dropped = 0;
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i];
     if (!/^day\d+$/.test(k)) continue;
     const v = String(obj[k] || '').trim();
-    if (v) out[k] = v;
+    if (!v) continue;
+    if (isLikelyMojibakeText(v)) {
+      dropped += 1;
+      continue;
+    }
+    out[k] = v;
+  }
+  if (dropped > 0) {
+    $.log('⚠️ 检测到旧缓存奖励名乱码，已忽略 ' + dropped + ' 项，等待实时重建');
   }
   return out;
 }
@@ -862,11 +884,143 @@ function saveCachedRewardMap(map) {
 async function getTextByGet(url, headers) {
   if (!url) return '';
   try {
+    if ($.isQuanX() && typeof $task !== 'undefined') {
+      const resp = await $task.fetch({
+        url: url,
+        method: 'GET',
+        headers: headers || {},
+        opts: { hints: false },
+      });
+      return decodeHttpText(resp);
+    }
+    if ($.isNode() && typeof fetch === 'function') {
+      const resp = await fetch(url, { method: 'GET', headers: headers || {} });
+      const ab = await resp.arrayBuffer();
+      const hs = {};
+      if (resp && resp.headers && typeof resp.headers.forEach === 'function') {
+        resp.headers.forEach(function (v, k) {
+          hs[String(k || '').toLowerCase()] = String(v || '');
+        });
+      }
+      return decodeTextFromBytes(ab, hs, '');
+    }
     const resp = await $.http.get({ url: url, headers: headers || {} });
-    return (resp && resp.body) || '';
+    return decodeHttpText(resp);
   } catch (e) {
     return '';
   }
+}
+
+function decodeHttpText(resp) {
+  const body = (resp && resp.body) || '';
+  const headers = normalizeHeaderMap(resp && resp.headers ? resp.headers : {});
+  const bytes = bodyBytesToU8(resp && resp.bodyBytes);
+  if (!bytes) return String(body || '');
+  return decodeTextFromBytes(bytes, headers, String(body || ''));
+}
+
+function normalizeHeaderMap(headers) {
+  const out = {};
+  if (!headers) return out;
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length; i++) {
+      const it = headers[i] || {};
+      const k = String(it.name || '').toLowerCase();
+      if (!k) continue;
+      out[k] = String(it.value || '');
+    }
+    return out;
+  }
+  const keys = Object.keys(headers);
+  for (let i = 0; i < keys.length; i++) {
+    const k = String(keys[i] || '').toLowerCase();
+    out[k] = String(headers[keys[i]] || '');
+  }
+  return out;
+}
+
+function bodyBytesToU8(bodyBytes) {
+  if (!bodyBytes) return null;
+  if (typeof Uint8Array !== 'undefined') {
+    if (bodyBytes instanceof Uint8Array) return bodyBytes;
+    if (typeof ArrayBuffer !== 'undefined' && bodyBytes instanceof ArrayBuffer) return new Uint8Array(bodyBytes);
+  }
+  if (typeof Buffer !== 'undefined' && Buffer.isBuffer && Buffer.isBuffer(bodyBytes)) {
+    return new Uint8Array(bodyBytes);
+  }
+  if (Array.isArray(bodyBytes)) {
+    try {
+      return new Uint8Array(bodyBytes);
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function extractCharset(headers, fallbackText) {
+  const h = headers || {};
+  const ct = String(h['content-type'] || h['Content-Type'] || '').toLowerCase();
+  let m = ct.match(/charset\s*=\s*([a-z0-9\-_]+)/i);
+  if (m && m[1]) return m[1].toLowerCase();
+  const text = String(fallbackText || '');
+  m = text.match(/<meta[^>]+charset\s*=\s*["']?([a-z0-9\-_]+)/i);
+  if (m && m[1]) return m[1].toLowerCase();
+  return '';
+}
+
+function decodeBytesByCharset(bytes, charset, fallbackText) {
+  const b = bytes || null;
+  if (!b) return String(fallbackText || '');
+  const cs = String(charset || '').toLowerCase();
+  const list = [];
+  if (/gbk|gb2312|gb18030/.test(cs)) {
+    list.push('gb18030', 'gbk', 'utf-8');
+  } else if (cs) {
+    list.push(cs, 'utf-8');
+  } else {
+    list.push('utf-8', 'gb18030');
+  }
+
+  for (let i = 0; i < list.length; i++) {
+    const name = list[i];
+    try {
+      if (typeof TextDecoder !== 'undefined') {
+        const td = new TextDecoder(name);
+        const out = td.decode(b);
+        if (out) return out;
+      }
+    } catch (e) {}
+  }
+  try {
+    if (typeof Buffer !== 'undefined') return Buffer.from(b).toString('utf8');
+  } catch (e) {}
+  return String(fallbackText || '');
+}
+
+function decodeTextFromBytes(bytes, headers, fallbackText) {
+  const fb = String(fallbackText || '');
+  const cs = extractCharset(headers, fb);
+  let text = decodeBytesByCharset(bytes, cs, fb);
+
+  // 若未显式声明 charset，但文本出现典型乱码，尝试按 GB18030 重新解码
+  if (!/gbk|gb2312|gb18030/.test(cs) && isLikelyMojibakeText(text)) {
+    const tryGb = decodeBytesByCharset(bytes, 'gb18030', fb);
+    if (tryGb && !isLikelyMojibakeText(tryGb)) text = tryGb;
+  }
+  return text;
+}
+
+function isLikelyMojibakeText(text) {
+  const s = String(text || '').trim();
+  if (!s) return false;
+  const bad = (s.match(/�/g) || []).length;
+  if (bad >= 2) return true;
+  const cjk = (s.match(/[\u4e00-\u9fff]/g) || []).length;
+  const cyr = (s.match(/[\u0400-\u04ff]/g) || []).length;
+  if (cjk === 0 && cyr > 0) return true;
+  if (/����|˫����|���/.test(s)) return true;
+  return false;
 }
 
 async function fetchRewardMapLive(headers, rcfg) {
