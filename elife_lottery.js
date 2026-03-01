@@ -23,7 +23,7 @@ hostname = chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.3.4';
+const VER = 'v1.3.5';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
@@ -43,6 +43,7 @@ hostname = chp.icbc.com.cn`;
 
 const ACTS = [
   { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20251230091958948510' },
+  { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260104102512423965' },
   { key: 'food', name: '美食刮刮乐', actId: 'LOT20251231142538552213' },
   { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054' },
   { key: 'movie', name: '电影刮刮乐', actId: 'LOT20260104114622189618' },
@@ -279,6 +280,7 @@ async function reqDetail(st, actId) {
 async function reqDraw(st, actId) {
   const l = st.lottery || {};
   const url = 'https://chp.icbc.com.cn/bmcs/api-bmcs/' + txt(l.version || 'v3') + '/lott/h5/lottery?corpId=' + encodeURIComponent(txt(l.corpId || '2000000882'));
+  const payload = { actId: actId, isApp: txt(l.isApp || '2') || '2' };
   return httpJSON('POST', url, {
     Accept: 'application/json',
     'Content-Type': txt(l.contentType || 'application/json; charset=UTF-8'),
@@ -286,7 +288,7 @@ async function reqDraw(st, actId) {
     Referer: txt(l.referer),
     Origin: txt(l.origin || 'https://chp.icbc.com.cn'),
     Cookie: txt(l.cookie),
-  }, JSON.stringify({ actId }), CFG.drawTimeout);
+  }, JSON.stringify(payload), CFG.drawTimeout);
 }
 
 function parseDetail(raw) {
@@ -520,6 +522,8 @@ function formatMapping(v) {
 function categoryOf(n) {
   const s = txt(n);
   if (s.indexOf('刷卡金天天抽') >= 0) return '刷卡金天天抽';
+  if (s.indexOf('打车') >= 0 && s.indexOf('刷卡金') >= 0) return '打车刷卡金周周抽';
+  if (s.indexOf('高德打车') >= 0) return '打车刷卡金周周抽';
   if (s.indexOf('周周好运') >= 0) return '周周好运刮刮乐';
   if (s.indexOf('电影') >= 0) return '电影刮刮乐';
   if (s.indexOf('美食') >= 0) return '美食刮刮乐';
@@ -683,6 +687,7 @@ function captureReq() {
     referer: ref,
     origin: txt(hs.origin) || deriveOrigin(ref, 'https://chp.icbc.com.cn'),
     contentType: txt(hs['content-type']) || 'application/json; charset=UTF-8',
+    isApp: txt(st.lottery && st.lottery.isApp) || '2',
     updateAt: now(),
   };
   const cur = JSON.stringify(st.lottery);
@@ -698,6 +703,7 @@ function captureReq() {
     'cookie=' + st.lottery.cookie,
     'referer=' + st.lottery.referer,
     'origin=' + st.lottery.origin,
+    'isApp=' + st.lottery.isApp,
     'updatedAt=' + st.lottery.updateAt,
   ].join('\n');
   log('✅ 抓包更新: lottery_state');
