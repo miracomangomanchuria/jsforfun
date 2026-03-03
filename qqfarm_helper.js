@@ -163,8 +163,10 @@ var CONFIG = {
     "1": 100
   }, // 升级耗蜜预判（用于“先判定再请求”，按抓包可调）
   HIVE_UPGRADE_MAX: 2, // 单轮最多升级次数（0=不限制）
+  HIVE_UPGRADE_BUSY_COOLDOWN_SEC: 1800, // 升级接口繁忙后，该蜂冷却时长（秒）
   HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
+  HIVE_WORK_REQUIRE_FREECD: true, // 放蜂前要求花粉可用值>0（本轮喂粉成功可放行）
   HIVE_TRY_HARVEST_ON_STATUS1: true, // 状态1但蜂蜜>0时，仍补探测一次收蜜
 
   // 节气/活动（状态检测 + 每日领取）
@@ -310,7 +312,7 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.03.01-r39";
+var SCRIPT_REV = "2026.03.03-r42";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -1432,8 +1434,10 @@ var STORE_KEY_FISH_PEARL_FREE_TIMES = "qqfarm_fish_pearl_free_times";
 var STORE_KEY_FISH_PEARL_FREE_STAMP = "qqfarm_fish_pearl_free_stamp";
 var STORE_KEY_FISH_COMPOSE_NEED = "qqfarm_fish_compose_need";
 var STORE_KEY_FISH_COMPOSE_FREEZE = "qqfarm_fish_compose_freeze";
+var STORE_KEY_HIVE_UPGRADE_BUSY_UNTIL = "qqfarm_hive_upgrade_busy_until";
 var FISH_COMPOSE_NEED_MAP = null;
 var FISH_COMPOSE_FREEZE_MAP = null;
+var HIVE_UPGRADE_BUSY_MAP = null;
 
 function pad2(n) {
   var x = Number(n || 0);
@@ -10055,6 +10059,8 @@ function runFarmEvents(cookie) {
     var maxPass = Number(CONFIG.FARM_EVENT_WISH_MAX_PASS || 8);
     if (isNaN(maxPass) || maxPass < 1) maxPass = 8;
     var wishRandomDailyLimitHit = false;
+    var wishCollectBusyBlocked = false;
+    var wishCollectBusyVersion = 0;
 
     function wishActionCount() {
       return (
@@ -10064,7 +10070,8 @@ function runFarmEvents(cookie) {
         Number(FARM_EVENT_STATS.wishHarvest || 0) +
         Number(FARM_EVENT_STATS.wishPlant || 0) +
         Number(FARM_EVENT_STATS.wishUpgrade || 0) +
-        Number(FARM_EVENT_STATS.wishHelp || 0)
+        Number(FARM_EVENT_STATS.wishHelp || 0) +
+        Number(wishCollectBusyVersion || 0)
       );
     }
 
@@ -10109,6 +10116,10 @@ function runFarmEvents(cookie) {
             logDebug("🌠 许愿状态(" + tag + "): 无需执行(" + msg + ")");
           }
           return null;
+        }
+        if (Number(state.tool || 0) <= 0 && wishCollectBusyBlocked) {
+          wishCollectBusyBlocked = false;
+          if (CONFIG.DEBUG) logDebug("🌠 许愿收星: 摘星不可用，解除繁忙屏蔽");
         }
         if (tag === "开始") {
           FARM_EVENT_STATS.wishOpen = state.open;
@@ -10217,6 +10228,8 @@ function runFarmEvents(cookie) {
             }
             if (transient) {
               FARM_EVENT_STATS.busy += 1;
+              wishCollectBusyBlocked = true;
+              wishCollectBusyVersion += 1;
               log("⚠️ 许愿收星繁忙: 已重试" + transientRetries + "次，留待下轮");
               return fetchIndex("收星繁忙后").then(function (nextState) {
                 return nextState || state;
@@ -10226,6 +10239,7 @@ function runFarmEvents(cookie) {
             log("⚠️ 许愿收星失败: " + msg);
             return state;
           }
+          wishCollectBusyBlocked = false;
           FARM_EVENT_STATS.wishCollect += 1;
           if (!appendWishReward(json, "🌠 许愿收星: ")) {
             log("🌠 许愿收星: 成功");
@@ -10518,7 +10532,7 @@ function runFarmEvents(cookie) {
     function decideWishAction(state) {
       if (!state) return "";
       var status = Number(state.status || 0) || 0;
-      if (CONFIG.FARM_EVENT_WISH_AUTO_COLLECT && Number(state.tool || 0) > 0) return "collect";
+      if (CONFIG.FARM_EVENT_WISH_AUTO_COLLECT && Number(state.tool || 0) > 0 && !wishCollectBusyBlocked) return "collect";
       if (CONFIG.FARM_EVENT_WISH_AUTO_RANDOM) {
         var cost = Number(state.costStar || 0) || 0;
         var star = Number(state.vstar || 0) || 0;
@@ -10559,6 +10573,7 @@ function runFarmEvents(cookie) {
     function pass(state, loopNo) {
       if (!state) return Promise.resolve(state);
       if (loopNo > maxPass) return Promise.resolve(state);
+      if (Number(state.tool || 0) <= 0) wishCollectBusyBlocked = false;
       var action = decideWishAction(state);
       if (!action) return Promise.resolve(state);
       if (CONFIG.DEBUG) logDebug("🌠 许愿决策(第" + loopNo + "轮): " + action);
@@ -14114,6 +14129,90 @@ function hiveFindUpgradeableIdByHoney(honey, ids) {
   return { can: false, id: minId, need: minNeed, hasHint: hasHint };
 }
 
+function loadHiveUpgradeBusyMap() {
+  if (HIVE_UPGRADE_BUSY_MAP && typeof HIVE_UPGRADE_BUSY_MAP === "object") return HIVE_UPGRADE_BUSY_MAP;
+  var out = {};
+  var raw = $.read(STORE_KEY_HIVE_UPGRADE_BUSY_UNTIL) || "";
+  if (raw) {
+    var obj = tryJson(raw);
+    if (obj && typeof obj === "object") out = obj;
+  }
+  var now = getFarmTime();
+  var map = {};
+  var changed = false;
+  for (var k in out) {
+    if (!out.hasOwnProperty(k)) continue;
+    if (!/^\d+$/.test(String(k))) {
+      changed = true;
+      continue;
+    }
+    var until = Number(out[k] || 0);
+    if (isNaN(until) || until <= now) {
+      changed = true;
+      continue;
+    }
+    map[String(k)] = Math.floor(until);
+  }
+  HIVE_UPGRADE_BUSY_MAP = map;
+  if (changed) {
+    try {
+      $.write(JSON.stringify(map || {}), STORE_KEY_HIVE_UPGRADE_BUSY_UNTIL);
+    } catch (e) {
+      if (CONFIG.DEBUG) logDebug("🐝 升级繁忙缓存清理失败: " + e);
+    }
+  }
+  return HIVE_UPGRADE_BUSY_MAP;
+}
+
+function saveHiveUpgradeBusyMap() {
+  var map = loadHiveUpgradeBusyMap();
+  try {
+    $.write(JSON.stringify(map || {}), STORE_KEY_HIVE_UPGRADE_BUSY_UNTIL);
+  } catch (e) {
+    if (CONFIG.DEBUG) logDebug("🐝 升级繁忙缓存写入失败: " + e);
+  }
+}
+
+function hiveUpgradeBusyUntil(id) {
+  var key = String(Number(id || 0) || 0);
+  if (!key || key === "0") return 0;
+  var map = loadHiveUpgradeBusyMap();
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return 0;
+  var until = Number(map[key] || 0);
+  if (isNaN(until) || until <= getFarmTime()) {
+    delete map[key];
+    saveHiveUpgradeBusyMap();
+    return 0;
+  }
+  return Math.floor(until);
+}
+
+function setHiveUpgradeBusyUntil(id, untilTs) {
+  var key = String(Number(id || 0) || 0);
+  if (!key || key === "0") return false;
+  var map = loadHiveUpgradeBusyMap();
+  var until = Number(untilTs || 0) || 0;
+  if (until <= getFarmTime()) {
+    if (Object.prototype.hasOwnProperty.call(map, key)) {
+      delete map[key];
+      saveHiveUpgradeBusyMap();
+    }
+    return false;
+  }
+  map[key] = Math.floor(until);
+  saveHiveUpgradeBusyMap();
+  return true;
+}
+
+function clearHiveUpgradeBusyUntil(id) {
+  var key = String(Number(id || 0) || 0);
+  if (!key || key === "0") return;
+  var map = loadHiveUpgradeBusyMap();
+  if (!Object.prototype.hasOwnProperty.call(map, key)) return;
+  delete map[key];
+  saveHiveUpgradeBusyMap();
+}
+
 function buildHiveActionPlan(state, opts) {
   var plan = {
     canUpgrade: false,
@@ -14157,6 +14256,7 @@ function buildHiveActionPlan(state, opts) {
   plan.payCD = payCD;
   plan.remainCd = remainCd;
   var skipHarvest = !!(opts && opts.skipHarvest);
+  var forceWorkAfterPollen = !!(opts && opts.forceWorkAfterPollen);
   // 收蜜优先按蜂蜜值判断，状态仅用于控制是否允许“状态1补探测”。
   if (!CONFIG.HIVE_AUTO_HARVEST) {
     plan.harvestReason = "配置关闭";
@@ -14164,11 +14264,15 @@ function buildHiveActionPlan(state, opts) {
     plan.harvestReason = "状态显示无可收蜂蜜";
   } else if (skipHarvest) {
     plan.harvestReason = "本轮已判定不可收";
+  } else if (status === 2) {
+    plan.harvestReason = "状态2(采蜜中/冷却)，先跳过收蜜";
   } else if (status === 1) {
-    if (CONFIG.HIVE_TRY_HARVEST_ON_STATUS1) {
+    if (CONFIG.HIVE_TRY_HARVEST_ON_STATUS1 && freeCD > 0) {
       plan.canHarvest = true;
       plan.harvestProbe = true;
       plan.harvestReason = "状态1且蜂蜜>0，补探测收蜜";
+    } else if (CONFIG.HIVE_TRY_HARVEST_ON_STATUS1) {
+      plan.harvestReason = "状态1且花粉可用值不足(" + freeCD + ")";
     } else {
       plan.harvestReason = "状态1且蜂蜜>0(已关闭补探测)";
     }
@@ -14210,9 +14314,15 @@ function buildHiveActionPlan(state, opts) {
     plan.workReason = "当前有蜂蜜可收，先收后放";
   } else if (status === 0) {
     plan.workReason = "状态0(疑似无可放蜜蜂)";
+  } else if (CONFIG.HIVE_WORK_REQUIRE_FREECD !== false && freeCD <= 0 && !forceWorkAfterPollen) {
+    plan.workReason = "免费花粉为0，暂不放蜂";
   } else {
     plan.canWork = true;
-    if (remainCd > 0) plan.workReason = "冷却提示" + remainCd + "s(仍尝试一次，以接口为准)";
+    if (forceWorkAfterPollen && freeCD <= 0) {
+      plan.workReason = "本轮已喂花粉，放蜂放行";
+    } else if (remainCd > 0) {
+      plan.workReason = "冷却提示" + remainCd + "s(仍尝试一次，以接口为准)";
+    }
   }
 
   plan.summary =
@@ -14237,6 +14347,25 @@ function formatHiveState(state) {
   if (!state) return "未知";
   var freeCd = state.freeCD != null ? Number(state.freeCD) || 0 : 0;
   return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level + " 花粉" + freeCd;
+}
+
+function hiveActionStateChanged(before, after, action) {
+  if (!before || !after) return false;
+  var keys = [];
+  if (action === "pollen") {
+    keys = ["freeCD", "status", "payCD", "stamp", "step"];
+  } else if (action === "work") {
+    keys = ["status", "payCD", "stamp", "step", "freeCD"];
+  } else {
+    keys = ["status", "honey", "freeCD", "payCD", "stamp", "step"];
+  }
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var a = hiveNum(before[k], 0);
+    var b = hiveNum(after[k], 0);
+    if (a !== b) return true;
+  }
+  return false;
 }
 
 function callHiveApi(cookie, path, params) {
@@ -14284,6 +14413,7 @@ function runHive(cookie) {
   var current = null;
   var harvested = 0;
   var harvestBlockedThisRound = false;
+  var pollenDoneThisRound = false;
 
   function refresh(tag) {
     return fetchHiveIndex(cookie, ctx).then(function (state) {
@@ -14323,10 +14453,17 @@ function runHive(cookie) {
         log("⚠️ 喂花粉失败: " + msg);
         return;
       }
-      HIVE_STATS.pollen += 1;
-      log("🌸 喂花粉: 成功");
+      var before = current;
       return refresh("喂粉后").then(function (st) {
         if (st) current = st;
+        var after = st || current;
+        if (hiveActionStateChanged(before, after, "pollen")) {
+          HIVE_STATS.pollen += 1;
+          pollenDoneThisRound = true;
+          log("🌸 喂花粉: 成功");
+        } else {
+          log("ℹ️ 喂花粉: 接口成功但状态未变化，按未生效处理");
+        }
       });
     });
   }
@@ -14381,6 +14518,9 @@ function runHive(cookie) {
     if (isNaN(maxUpgrade) || maxUpgrade < 0) maxUpgrade = 0;
     var transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
     if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    var busyCooldownSec = Number(CONFIG.HIVE_UPGRADE_BUSY_COOLDOWN_SEC || 0);
+    if (isNaN(busyCooldownSec) || busyCooldownSec < 0) busyCooldownSec = 0;
+    busyCooldownSec = Math.floor(busyCooldownSec);
     var done = 0;
     var idx = 0;
 
@@ -14389,6 +14529,15 @@ function runHive(cookie) {
       if (maxUpgrade > 0 && done >= maxUpgrade) return Promise.resolve();
       var bid = Number(ids[idx++] || 0) || 0;
       if (!bid) return next();
+      var busyUntil = hiveUpgradeBusyUntil(bid);
+      if (busyUntil > 0) {
+        if (CONFIG.DEBUG) {
+          var leftWait = busyUntil - getFarmTime();
+          if (leftWait < 0) leftWait = 0;
+          logDebug("🐝 蜜蜂升级(id=" + bid + "): 繁忙冷却中(" + formatWaitSec(leftWait) + ")，跳过");
+        }
+        return next();
+      }
       var honeyNow = Number((current && current.honey) || 0) || 0;
       if (honeyNow <= 0) {
         if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 蜂蜜不足(" + honeyNow + ")，跳过");
@@ -14421,7 +14570,20 @@ function runHive(cookie) {
                 });
               }
               if (transient) {
-                log("⚠️ 蜜蜂升级繁忙(id=" + bid + "): 已重试" + transientRetries + "次，留待下轮");
+                if (busyCooldownSec > 0) {
+                  setHiveUpgradeBusyUntil(bid, getFarmTime() + busyCooldownSec);
+                  log(
+                    "⚠️ 蜜蜂升级繁忙(id=" +
+                      bid +
+                      "): 已重试" +
+                      transientRetries +
+                      "次，冷却" +
+                      formatWaitSec(busyCooldownSec) +
+                      "后再试"
+                  );
+                } else {
+                  log("⚠️ 蜜蜂升级繁忙(id=" + bid + "): 已重试" + transientRetries + "次，留待下轮");
+                }
                 return refresh("升级繁忙后").then(function (st) {
                   if (st) current = st;
                 });
@@ -14438,6 +14600,7 @@ function runHive(cookie) {
             }
             done += 1;
             HIVE_STATS.upgrade += 1;
+            clearHiveUpgradeBusyUntil(bid);
             var left = Number(json.honey);
             if (isNaN(left) || left < 0) {
               log("🐝 蜜蜂升级: id=" + bid + " 成功");
@@ -14463,7 +14626,10 @@ function runHive(cookie) {
   }
 
   function doWork() {
-    var plan = buildHiveActionPlan(current, { skipHarvest: harvestBlockedThisRound });
+    var plan = buildHiveActionPlan(current, {
+      skipHarvest: harvestBlockedThisRound,
+      forceWorkAfterPollen: pollenDoneThisRound
+    });
     if (!plan.canWork) {
       if (CONFIG.DEBUG) logDebug("🐝 放养蜜蜂: " + (plan.workReason || "无需执行"));
       return Promise.resolve();
@@ -14482,10 +14648,16 @@ function runHive(cookie) {
         log("⚠️ 放养蜜蜂失败: " + msg);
         return;
       }
-      HIVE_STATS.work += 1;
-      log("🐝 放养蜜蜂: 成功");
+      var before = current;
       return refresh("放蜂后").then(function (st) {
         if (st) current = st;
+        var after = st || current;
+        if (hiveActionStateChanged(before, after, "work")) {
+          HIVE_STATS.work += 1;
+          log("🐝 放养蜜蜂: 成功");
+        } else {
+          log("ℹ️ 放养蜜蜂: 接口成功但状态未变化，按未生效处理");
+        }
       });
     });
   }
