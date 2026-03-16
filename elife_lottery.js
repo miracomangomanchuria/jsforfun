@@ -23,10 +23,11 @@ hostname = chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.3.5';
+const VER = 'v1.3.6';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
+const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
 
 const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ url script-request-header elife_lottery.js
@@ -90,10 +91,15 @@ Promise.resolve().then(async () => {
   const lines = [];
   const prizeRows = [];
   const poolRows = [];
+  let authExpired = null;
   for (let i = 0; i < ACTS.length; i++) {
     const a = ACTS[i];
     const rs = await runOneActivity(st, a);
     lines.push(formatActLine(a.name, rs));
+    if (rs && rs.authExpired) {
+      authExpired = { actName: a.name, reason: friendlyMsg(rs.reason) || 'HTTP 401' };
+      break;
+    }
     for (let j = 0; j < rs.prizes.length; j++) {
       const p = txt(rs.prizes[j]);
       prizeRows.push({ actName: a.name, prizeName: p });
@@ -103,6 +109,17 @@ Promise.resolve().then(async () => {
       if (!rp) continue;
       poolRows.push({ actName: a.name, rewardName: rp });
     }
+  }
+  if (authExpired) {
+    const b = [
+      '接口401，Cookie已过期',
+      '请重新抓包 getActivityDetail',
+      '来源活动: ' + authExpired.actName,
+      '错误信息: ' + authExpired.reason,
+      '点击本通知可跳转抓包入口',
+    ].join('\n');
+    $.msg($.name, '过期重抓', b, buildOpenUrlOpts(RECAPTURE_URL));
+    return;
   }
 
   const ledger = syncLedger(st, prizeRows, poolRows);
@@ -122,11 +139,11 @@ async function runOneActivity(st, act) {
   log('🎯 活动: ' + act.name + ' | actId=' + act.actId);
 
   const detail = parseDetail(await reqDetail(st, act.actId));
-  if (!detail.ok) return { category: 'error', reason: detail.msg, prizes: [], remain: -1, done: 0, rewardPool: [] };
+  if (!detail.ok) return { category: 'error', reason: detail.msg, prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: !!detail.authExpired };
   log('📊 状态: drawFlag=' + detail.drawFlag + ' | drawCount=' + detail.drawCount + ' | totalCount=' + detail.totalCount + ' | errCode=' + detail.errCode + ' | errMsg=' + detail.errMsg);
 
-  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool };
-  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool };
+  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
 
   let remain = detail.drawCount;
   let done = 0;
@@ -135,8 +152,8 @@ async function runOneActivity(st, act) {
   for (let i = 0; i < maxTry; i++) {
     const draw = parseDraw(await reqDraw(st, act.actId));
     if (!draw.ok) {
-      if (String(draw.errCode) === '200004' || txt(draw.msg).indexOf('次数用完') >= 0) return { category: 'already_done', reason: draw.msg || '次数已用完', prizes, remain: 0, done, rewardPool: detail.rewardPool };
-      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes, remain, done, rewardPool: detail.rewardPool };
+      if (String(draw.errCode) === '200004' || txt(draw.msg).indexOf('次数用完') >= 0) return { category: 'already_done', reason: draw.msg || '次数已用完', prizes, remain: 0, done, rewardPool: detail.rewardPool, authExpired: false };
+      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: !!draw.authExpired };
     }
     const p = draw.prizeName || '奖励名未返回';
     prizes.push(p);
@@ -149,11 +166,12 @@ async function runOneActivity(st, act) {
     const re = parseDetail(await reqDetail(st, act.actId));
     if (re.ok) remain = re.drawCount;
   }
-  return { category: 'ok', reason: '执行完成', prizes, remain, done, rewardPool: detail.rewardPool };
+  return { category: 'ok', reason: '执行完成', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false };
 }
 
 function formatActLine(name, rs) {
   const reason = friendlyMsg(rs && rs.reason);
+  if (rs && rs.authExpired) return '⚠️ ' + name + ': 接口401，Cookie已过期，请重新抓包';
   if (rs.category === 'ok') return '✅ ' + name + ': 已刮' + rs.done + '次 | 本次=' + (rs.prizes.length ? rs.prizes.join('、') : '奖励名未返回') + fmtRemain(rs.remain);
   if (rs.category === 'already_done') return '⏭️ ' + name + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (reason || '已刮过');
   if (rs.category === 'query_only') return '🧪 ' + name + ': 状态可刮，query_only跳过' + fmtRemain(rs.remain);
@@ -296,16 +314,24 @@ async function reqDraw(st, actId) {
 }
 
 function parseDetail(raw) {
-  if (!raw || raw.error) return { ok: false, msg: raw && raw.error ? raw.error.message : 'request failed' };
+  if (!raw || raw.error) {
+    const msg = raw && raw.error ? raw.error.message : 'request failed';
+    return { ok: false, msg: msg, authExpired: is401Status(raw) || has401Text(msg) };
+  }
   const obj = raw.json || {};
   const code = toInt(pick(obj, ['code']), -1);
   const rc = toInt(pick(obj, ['data.returnCode', 'returnCode']), -1);
   const d = pick(obj, ['data.data', 'data', 'result']) || {};
+  const errCode = toInt(pick(d, ['errCode', 'code']), 0);
   if (code !== 0 || rc !== 0) {
     const msg = friendlyMsg(
       pick(obj, ['data.returnMsg', 'message', 'msg', 'data.message', 'data.msg', 'errorMsg']) || obj
     );
-    return { ok: false, msg: msg || '状态接口返回异常' };
+    return {
+      ok: false,
+      msg: msg || '状态接口返回异常',
+      authExpired: is401Status(raw) || code === 401 || rc === 401 || errCode === 401 || has401Text(msg),
+    };
   }
   const rewardPool = extractRewardPool(d);
   return {
@@ -313,9 +339,10 @@ function parseDetail(raw) {
     drawFlag: toBool(d.drawFlag, false),
     drawCount: toInt(d.drawCount, 0),
     totalCount: toInt(d.totalCount, -1),
-    errCode: toInt(d.errCode, 0),
+    errCode: errCode,
     errMsg: friendlyMsg(d.errMsg),
     rewardPool: rewardPool,
+    authExpired: false,
   };
 }
 
@@ -335,7 +362,10 @@ function extractRewardPool(d) {
 }
 
 function parseDraw(raw) {
-  if (!raw || raw.error) return { ok: false, msg: raw && raw.error ? raw.error.message : 'request failed', errCode: -1, prizeName: '' };
+  if (!raw || raw.error) {
+    const msg = raw && raw.error ? raw.error.message : 'request failed';
+    return { ok: false, msg: msg, errCode: -1, prizeName: '', authExpired: is401Status(raw) || has401Text(msg) };
+  }
   const obj = raw.json || {};
   const code = toInt(pick(obj, ['code']), -1);
   const rc = toInt(pick(obj, ['data.returnCode', 'returnCode']), -1);
@@ -345,7 +375,13 @@ function parseDraw(raw) {
   let prizeName = deepFind(d, ['goodsSimpleName', 'prizeName', 'goodsName', 'rewardName', 'awardName', 'ec_name']) || deepFind(obj, ['goodsSimpleName', 'prizeName', 'goodsName', 'rewardName', 'awardName', 'ec_name']);
   if (!prizeName && msg.indexOf('未中奖') >= 0) prizeName = '未中奖';
   const ok = code === 0 && rc === 0 && (errCode === 0 || errCode === -1);
-  return { ok, msg, errCode, prizeName: txt(prizeName) };
+  return {
+    ok,
+    msg,
+    errCode,
+    prizeName: txt(prizeName),
+    authExpired: is401Status(raw) || code === 401 || rc === 401 || errCode === 401 || has401Text(msg),
+  };
 }
 
 function syncLedger(st, prizeRows, poolRows) {
@@ -878,6 +914,20 @@ function friendlyMsg(v) {
     }
   }
   return txt(v);
+}
+function is401Status(raw) {
+  if (!raw || typeof raw !== 'object') return false;
+  return toInt(raw.status, 0) === 401;
+}
+function has401Text(v) {
+  const s = txt(v);
+  if (!s) return false;
+  return /(^|[^0-9])401([^0-9]|$)/.test(s);
+}
+function buildOpenUrlOpts(u) {
+  const s = txt(u);
+  if (!s) return {};
+  return { url: s, 'open-url': s, openUrl: s };
 }
 function ymdFromAny(v) {
   const s = txt(v);
