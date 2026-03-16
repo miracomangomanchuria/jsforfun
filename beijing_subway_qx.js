@@ -36,7 +36,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.1.3";
+const SCRIPT_VERSION = "1.1.4";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -641,6 +641,38 @@ function argumentChannelDebug(rawArg) {
   return out.join(" | ");
 }
 
+function discoverGlobalArgCandidates() {
+  function pv(v) {
+    try {
+      if (v == null) return "";
+      if (typeof v === "object") return JSON.stringify(v).slice(0, 100);
+      return String(v).replace(/\s+/g, " ").slice(0, 100);
+    } catch (e) {
+      return String(v).slice(0, 100);
+    }
+  }
+  try {
+    const g = typeof globalThis !== "undefined" ? globalThis : this;
+    const names = Object.getOwnPropertyNames(g || {});
+    const picked = [];
+    const re = /(arg|param|path|url|input|shortcut|script|source|env)/i;
+    for (const k of names) {
+      if (!re.test(k)) continue;
+      let v = null;
+      try {
+        v = g[k];
+      } catch (e) {
+        v = "<unreadable>";
+      }
+      picked.push(`${k}:${typeof v}:${pv(v)}`);
+      if (picked.length >= 20) break;
+    }
+    return picked.join(" || ");
+  } catch (e) {
+    return "scan_failed";
+  }
+}
+
 function buildCatalog(mapObj) {
   if (!mapObj || !Array.isArray(mapObj.stations_data) || !Array.isArray(mapObj.lines_data)) {
     throw new Error("map-app.json format unexpected");
@@ -1167,8 +1199,9 @@ async function main() {
     }
     preview = preview.replace(/\s+/g, " ").slice(0, 200);
     const dbg = argumentChannelDebug(rawArg);
+    const glb = discoverGlobalArgCandidates();
     const traceLine = parseTrace.join(" -> ").slice(0, 1200);
-    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 解析轨迹=${traceLine}`);
+    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
