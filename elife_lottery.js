@@ -43,6 +43,9 @@ hostname = chp.icbc.com.cn`;
 
 const ACTS = [
   { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20251230091958948510' },
+  { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260104140832936109' },
+  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260104095117513209' },
+  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260104093807607845' },
   { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260104102512423965' },
   { key: 'food', name: '美食刮刮乐', actId: 'LOT20251231142538552213' },
   { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054' },
@@ -64,7 +67,7 @@ const CFG = {
   drawTimeout: toInt(arg.draw_timeout_ms, 20000),
   waitMinMs: Math.max(0, toInt(arg.wait_min_s, 1) * 1000),
   waitMaxMs: Math.max(0, toInt(arg.wait_max_s, 3) * 1000),
-  waitLog: toBool(arg.wait_log, true),
+  waitLog: toBool(arg.wait_log, false),
   debug: toBool(arg.debug, false),
 };
 if (CFG.waitMaxMs < CFG.waitMinMs) { const t = CFG.waitMinMs; CFG.waitMinMs = CFG.waitMaxMs; CFG.waitMaxMs = t; }
@@ -528,6 +531,10 @@ function formatMapping(v) {
 function categoryOf(n) {
   const s = txt(n);
   if (s.indexOf('刷卡金天天抽') >= 0) return '刷卡金天天抽';
+  if (s.indexOf('乐园') >= 0 && s.indexOf('刷卡金') >= 0) return '乐园刮刮乐';
+  if (s.indexOf('薪动福利') >= 0 && s.indexOf('线下') >= 0) return '薪动福利周周刮（线下用）';
+  if (s.indexOf('薪动福利') >= 0 && (s.indexOf('线上') >= 0 || s.indexOf('美食') >= 0)) return '薪动福利周周刮（线上用）';
+  if (s.indexOf('薪动福利') >= 0) return '薪动福利周周刮（线上用）';
   if (s.indexOf('打车') >= 0 && s.indexOf('刷卡金') >= 0) return '打车刷卡金周周抽';
   if (s.indexOf('高德打车') >= 0) return '打车刷卡金周周抽';
   if (s.indexOf('周周好运') >= 0) return '周周好运刮刮乐';
@@ -705,8 +712,8 @@ function captureReq() {
     'version=' + st.lottery.version,
     'corpId=' + st.lottery.corpId,
     'roccSwt=' + st.lottery.roccSwt,
-    'ua=' + st.lottery.ua,
-    'cookie=' + st.lottery.cookie,
+    'ua=' + summarizeUa(st.lottery.ua),
+    'cookie=' + summarizeCookie(st.lottery.cookie),
     'referer=' + st.lottery.referer,
     'origin=' + st.lottery.origin,
     'isApp=' + st.lottery.isApp,
@@ -808,6 +815,30 @@ function toInt(v, d) { const n = parseInt(String(v), 10); return isNaN(n) ? d : 
 function toTsMs(v) { if (v === undefined || v === null || v === '') return 0; const s = String(v).trim(); if (/^\d{10,13}$/.test(s)) { const n = parseInt(s, 10); return s.length === 10 ? n * 1000 : n; } const p = Date.parse(s.replace(' ', 'T')); return isNaN(p) ? 0 : p; }
 function toJSON(s, d) { if (!s || typeof s !== 'string') return d; try { return JSON.parse(s); } catch (e) { return d; } }
 function txt(v) { return String(v == null ? '' : v).replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(); }
+function summarizeCookie(cookie) {
+  const s = String(cookie || '').trim();
+  if (!s) return '空';
+  const segs = s.split(';');
+  const keys = [];
+  const seen = {};
+  for (let i = 0; i < segs.length; i++) {
+    const t = String(segs[i] || '').trim();
+    if (!t) continue;
+    const p = t.indexOf('=');
+    const k = (p >= 0 ? t.slice(0, p) : t).trim();
+    if (!k || seen[k]) continue;
+    seen[k] = 1;
+    keys.push(k);
+  }
+  const preview = keys.slice(0, 8).join(',');
+  return 'keys=' + (preview || '无') + (keys.length > 8 ? '...' : '') + ' | count=' + keys.length + ' | len=' + s.length;
+}
+function summarizeUa(ua) {
+  const s = txt(ua);
+  if (!s) return '空';
+  if (s.length <= 72) return s;
+  return s.slice(0, 72) + '...';
+}
 function friendlyMsg(v) {
   if (v === undefined || v === null) return '';
   const t = typeof v;
