@@ -1,18 +1,23 @@
 /*
-Quantumult X - Beijing Subway Departure Script
+Purpose:
+- Quantumult X subway departure estimator for Beijing.
+- Input is longitude/latitude, output is nearest station(s) and upcoming departures by direction.
+- No notification is sent; script writes structured logs and returns a plain-text output string.
 
-Thanks to:
-- https://github.com/BoyInTheSun/beijing-subway-schedule
-- https://bjsubway.boyinthesun.cn/
+Attribution:
+- Schedule/data references from BoyInTheSun:
+  https://github.com/BoyInTheSun/beijing-subway-schedule
+  https://bjsubway.boyinthesun.cn/
+- Station map source:
+  https://dtdata.bjsubway.com/stations/map-app.json
 
-Args (exactly 2 params, lon then lat):
-1) "$argument" = "116.3198,39.9288"
-2) "$argument" = "116.3198 39.9288"
-3) "$argument" = "lon=116.3198&lat=39.9288"
+Argument format:
+- Exactly two values: lon + lat.
+- Supported examples: "lon,lat", "lon lat", "lon=<value>&lat=<value>".
 
-Output:
-- Log only (no notification)
-- Each station is split into 2 log parts with separators
+Log protocol:
+- Per station, output is split into PART1 (station header) and PART2 (line details).
+- Delimiters are fixed for downstream parser compatibility.
 */
 
 const MAP_APP_URL = "https://dtdata.bjsubway.com/stations/map-app.json";
@@ -749,7 +754,7 @@ async function main() {
 
   const parsed = parseArgument(typeof $argument !== "undefined" ? $argument : "");
   if (!parsed) {
-    throw new Error("参数错误：请传 2 个参数（lon,lat），如 116.3198,39.9288");
+    throw new Error("参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value>");
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
