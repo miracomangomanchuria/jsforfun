@@ -36,7 +36,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.1.1";
+const SCRIPT_VERSION = "1.1.2";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -501,6 +501,30 @@ function parseArgument(arg) {
     }
   }
   return null;
+}
+
+function pickInputArgument() {
+  if (typeof $argument !== "undefined" && $argument != null && String($argument).trim() !== "") {
+    return $argument;
+  }
+  if (typeof $arguments !== "undefined" && $arguments != null) {
+    if (Array.isArray($arguments)) {
+      if ($arguments.length === 1) return $arguments[0];
+      if ($arguments.length >= 2) return `${$arguments[0]},${$arguments[1]}`;
+    }
+    if (String($arguments).trim() !== "") return $arguments;
+  }
+  if (typeof $environment !== "undefined" && $environment && typeof $environment === "object") {
+    if ($environment.params != null) {
+      if (Array.isArray($environment.params)) {
+        if ($environment.params.length === 1) return $environment.params[0];
+        if ($environment.params.length >= 2) return `${$environment.params[0]},${$environment.params[1]}`;
+      }
+      if (typeof $environment.params === "object") return $environment.params;
+      if (String($environment.params).trim() !== "") return $environment.params;
+    }
+  }
+  return "";
 }
 
 function buildCatalog(mapObj) {
@@ -1012,9 +1036,18 @@ async function main() {
     throw new Error("This script must run in Quantumult X.");
   }
 
-  const parsed = parseArgument(typeof $argument !== "undefined" ? $argument : "");
+  const rawArg = pickInputArgument();
+  const parsed = parseArgument(rawArg);
   if (!parsed) {
-    throw new Error("参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value>");
+    const rawType = rawArg == null ? "null" : typeof rawArg;
+    let preview = "";
+    try {
+      preview = rawType === "object" ? JSON.stringify(rawArg) : String(rawArg);
+    } catch (e) {
+      preview = String(rawArg);
+    }
+    preview = preview.replace(/\s+/g, " ").slice(0, 200);
+    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview}`);
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
