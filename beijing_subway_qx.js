@@ -36,7 +36,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.1.2";
+const SCRIPT_VERSION = "1.1.3";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -424,17 +424,33 @@ function autoAlignCoordForCatalog(catalog, lat, lon, preferGcj = true) {
   return { lat, lon, mode: "raw" };
 }
 
-function parseArgument(arg) {
+function parseArgument(arg, trace) {
+  const tr = Array.isArray(trace) ? trace : null;
+  function add(msg) {
+    if (tr) tr.push(String(msg));
+  }
+  function pv(v) {
+    try {
+      if (v == null) return "";
+      if (typeof v === "object") return JSON.stringify(v).slice(0, 160);
+      return String(v).replace(/\s+/g, " ").slice(0, 160);
+    } catch (e) {
+      return String(v).slice(0, 160);
+    }
+  }
   function fromObj(o) {
     if (!o || typeof o !== "object") return null;
     if (Array.isArray(o)) {
+      add(`对象分支: array len=${o.length}, 预览=${pv(o)}`);
       if (o.length >= 2) {
         const lon = Number(o[0]);
         const lat = Number(o[1]);
+        add(`对象分支(array): lon=${lon}, lat=${lat}`);
         if (Number.isFinite(lon) && Number.isFinite(lat)) return { lon, lat };
       }
       return null;
     }
+    add(`对象分支: object keys=${Object.keys(o).slice(0, 10).join(",")}`);
     const lonKeys = ["lon", "lng", "longitude", "经度"];
     const latKeys = ["lat", "latitude", "纬度"];
     let lon = NaN;
@@ -451,16 +467,19 @@ function parseArgument(arg) {
         break;
       }
     }
+    add(`对象分支(object): lon=${lon}, lat=${lat}`);
     if (Number.isFinite(lon) && Number.isFinite(lat)) return { lon, lat };
     return null;
   }
 
   if (arg && typeof arg === "object") {
+    add(`原始参数类型=object, 预览=${pv(arg)}`);
     const r = fromObj(arg);
     if (r) return r;
   }
 
   let s = String(arg == null ? "" : arg).trim();
+  add(`原始参数字符串='${pv(s)}'`);
   if (!s) return null;
 
   // 兼容快捷指令里可能出现的全角符号与 URL 编码。
@@ -472,21 +491,25 @@ function parseArgument(arg) {
       // ignore decode errors
     }
   }
+  add(`归一化后='${pv(s)}'`);
 
   if (s.includes("=") && (s.includes("&") || s.includes("lat") || s.includes("lon"))) {
     const mLon = s.match(/(?:^|[&;,\s])(?:lon|lng)\s*=\s*(-?\d+(?:\.\d+)?)/i);
     const mLat = s.match(/(?:^|[&;,\s])lat\s*=\s*(-?\d+(?:\.\d+)?)/i);
     const lon = Number(mLon ? mLon[1] : NaN);
     const lat = Number(mLat ? mLat[1] : NaN);
+    add(`键值分支: mLon=${mLon ? mLon[1] : "NA"}, mLat=${mLat ? mLat[1] : "NA"}, lon=${lon}, lat=${lat}`);
     if (Number.isFinite(lon) && Number.isFinite(lat)) {
       return { lon, lat };
     }
   }
 
   const parts = s.split(/[\s,;|]+/).filter(Boolean);
+  add(`分隔分支: parts_len=${parts.length}, p0=${pv(parts[0] || "")}, p1=${pv(parts[1] || "")}`);
   if (parts.length >= 2) {
     const lon = Number(parts[0]);
     const lat = Number(parts[1]);
+    add(`分隔分支: lon=${lon}, lat=${lat}`);
     if (Number.isFinite(lon) && Number.isFinite(lat)) {
       return { lon, lat };
     }
@@ -494,13 +517,16 @@ function parseArgument(arg) {
 
   // 兜底：从混合文本中提取前两个浮点数作为 lon/lat。
   const nums = s.match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/ig) || [];
+  add(`数字提取分支: nums=${pv(nums.join(","))}`);
   if (nums.length >= 2) {
     const lon = Number(nums[0]);
     const lat = Number(nums[1]);
+    add(`数字提取分支: lon=${lon}, lat=${lat}`);
     if (Number.isFinite(lon) && Number.isFinite(lat)) {
       return { lon, lat };
     }
   }
+  add("解析结果: FAIL");
   return null;
 }
 
@@ -552,6 +578,40 @@ function pickInputArgument() {
       const frag = sp.slice(idx + 1).trim();
       if (frag) return frag;
     }
+  }
+
+  // 兜底：扫描常见全局字段，兼容某些快捷指令动作不走 $argument/$environment 的情况。
+  try {
+    const g = typeof globalThis !== "undefined" ? globalThis : this;
+    const topKeys = ["sourcePath", "scriptPath", "scriptURL", "scriptUrl", "path", "url", "param", "params", "argument", "arguments"];
+    for (const k of topKeys) {
+      if (!Object.prototype.hasOwnProperty.call(g, k)) continue;
+      const v = g[k];
+      if (v == null) continue;
+      if (typeof v === "string" && v.trim() !== "") return v;
+      if (Array.isArray(v) && v.length) return v.join(",");
+      if (typeof v === "object") {
+        const kk = ["sourcePath", "path", "url", "param", "params", "argument", "arguments"];
+        for (const x of kk) {
+          if (v[x] == null) continue;
+          if (typeof v[x] === "string" && String(v[x]).trim() !== "") return v[x];
+          if (Array.isArray(v[x]) && v[x].length) return v[x].join(",");
+        }
+      }
+    }
+    const objKeys = ["$script", "$resource", "$context", "$input", "$options"];
+    for (const ok of objKeys) {
+      const o = g[ok];
+      if (!o || typeof o !== "object") continue;
+      const kk = ["sourcePath", "path", "url", "param", "params", "argument", "arguments"];
+      for (const x of kk) {
+        if (o[x] == null) continue;
+        if (typeof o[x] === "string" && String(o[x]).trim() !== "") return o[x];
+        if (Array.isArray(o[x]) && o[x].length) return o[x].join(",");
+      }
+    }
+  } catch (e) {
+    // ignore
   }
   return "";
 }
@@ -1091,7 +1151,12 @@ async function main() {
   }
 
   const rawArg = pickInputArgument();
-  const parsed = parseArgument(rawArg);
+  const parseTrace = [];
+  const parsed = parseArgument(rawArg, parseTrace);
+  console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${String(rawArg == null ? "" : rawArg).replace(/\s+/g, " ").slice(0, 200)}'`);
+  for (const t of parseTrace) {
+    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
+  }
   if (!parsed) {
     const rawType = rawArg == null ? "null" : typeof rawArg;
     let preview = "";
@@ -1102,10 +1167,12 @@ async function main() {
     }
     preview = preview.replace(/\s+/g, " ").slice(0, 200);
     const dbg = argumentChannelDebug(rawArg);
-    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg}`);
+    const traceLine = parseTrace.join(" -> ").slice(0, 1200);
+    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 解析轨迹=${traceLine}`);
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
+  console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
 
   const now = new Date();
   const serviceDayCtx = serviceDayFor(now, SERVICE_DAY_CUTOFF_HOUR);
