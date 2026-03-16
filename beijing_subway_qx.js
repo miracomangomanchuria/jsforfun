@@ -174,9 +174,10 @@ function doneErr(err) {
   const eMsg = err && err.message ? String(err.message) : String(err);
   const eStack = err && err.stack ? String(err.stack) : "";
   const msg = eStack && eStack.indexOf(eMsg) === -1 ? `${eMsg}\n${eStack}` : (eStack || eMsg);
-  console.log("[ERROR] " + msg);
+  const tagged = `[v${SCRIPT_VERSION}] ${msg}`;
+  console.log("[ERROR] " + tagged);
   if (typeof $done === "function") {
-    $done("ERROR: " + msg);
+    $done("ERROR: " + tagged);
   }
 }
 
@@ -504,6 +505,13 @@ function parseArgument(arg) {
 }
 
 function pickInputArgument() {
+  function envVal(k) {
+    if (typeof $environment !== "undefined" && $environment && typeof $environment === "object") {
+      return $environment[k];
+    }
+    return undefined;
+  }
+
   if (typeof $argument !== "undefined" && $argument != null && String($argument).trim() !== "") {
     return $argument;
   }
@@ -524,7 +532,53 @@ function pickInputArgument() {
       if (String($environment.params).trim() !== "") return $environment.params;
     }
   }
+  const extraKeys = ["argument", "arguments", "arg", "args", "param", "query", "extra", "extraParams", "argv"];
+  for (const k of extraKeys) {
+    const v = envVal(k);
+    if (v == null) continue;
+    if (Array.isArray(v)) {
+      if (v.length === 1 && String(v[0]).trim() !== "") return v[0];
+      if (v.length >= 2) return `${v[0]},${v[1]}`;
+      continue;
+    }
+    if (typeof v === "object") return v;
+    if (String(v).trim() !== "") return v;
+  }
+  const sourcePath = envVal("sourcePath");
+  if (sourcePath != null) {
+    const sp = String(sourcePath);
+    const idx = sp.indexOf("#");
+    if (idx >= 0 && idx + 1 < sp.length) {
+      const frag = sp.slice(idx + 1).trim();
+      if (frag) return frag;
+    }
+  }
   return "";
+}
+
+function argumentChannelDebug(rawArg) {
+  function pv(v) {
+    try {
+      if (v == null) return "";
+      if (typeof v === "object") return JSON.stringify(v).slice(0, 120);
+      return String(v).replace(/\s+/g, " ").slice(0, 120);
+    } catch (e) {
+      return String(v).slice(0, 120);
+    }
+  }
+  const out = [];
+  out.push(`arg=${typeof $argument !== "undefined" ? typeof $argument : "undef"}:${pv(typeof $argument !== "undefined" ? $argument : "")}`);
+  out.push(`args=${typeof $arguments !== "undefined" ? typeof $arguments : "undef"}:${pv(typeof $arguments !== "undefined" ? $arguments : "")}`);
+  if (typeof $environment !== "undefined" && $environment && typeof $environment === "object") {
+    const keys = Object.keys($environment).slice(0, 20);
+    out.push(`env_keys=${keys.join(",")}`);
+    if (Object.prototype.hasOwnProperty.call($environment, "params")) out.push(`env.params=${pv($environment.params)}`);
+    if (Object.prototype.hasOwnProperty.call($environment, "sourcePath")) out.push(`env.sourcePath=${pv($environment.sourcePath)}`);
+  } else {
+    out.push("env=undef");
+  }
+  out.push(`picked=${typeof rawArg}:${pv(rawArg)}`);
+  return out.join(" | ");
 }
 
 function buildCatalog(mapObj) {
@@ -1047,7 +1101,8 @@ async function main() {
       preview = String(rawArg);
     }
     preview = preview.replace(/\s+/g, " ").slice(0, 200);
-    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview}`);
+    const dbg = argumentChannelDebug(rawArg);
+    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg}`);
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
