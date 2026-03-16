@@ -36,7 +36,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.1.0";
+const SCRIPT_VERSION = "1.1.1";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -424,8 +424,53 @@ function autoAlignCoordForCatalog(catalog, lat, lon, preferGcj = true) {
 }
 
 function parseArgument(arg) {
-  const s = String(arg || "").trim();
+  function fromObj(o) {
+    if (!o || typeof o !== "object") return null;
+    if (Array.isArray(o)) {
+      if (o.length >= 2) {
+        const lon = Number(o[0]);
+        const lat = Number(o[1]);
+        if (Number.isFinite(lon) && Number.isFinite(lat)) return { lon, lat };
+      }
+      return null;
+    }
+    const lonKeys = ["lon", "lng", "longitude", "经度"];
+    const latKeys = ["lat", "latitude", "纬度"];
+    let lon = NaN;
+    let lat = NaN;
+    for (const k of lonKeys) {
+      if (Object.prototype.hasOwnProperty.call(o, k)) {
+        lon = Number(o[k]);
+        break;
+      }
+    }
+    for (const k of latKeys) {
+      if (Object.prototype.hasOwnProperty.call(o, k)) {
+        lat = Number(o[k]);
+        break;
+      }
+    }
+    if (Number.isFinite(lon) && Number.isFinite(lat)) return { lon, lat };
+    return null;
+  }
+
+  if (arg && typeof arg === "object") {
+    const r = fromObj(arg);
+    if (r) return r;
+  }
+
+  let s = String(arg == null ? "" : arg).trim();
   if (!s) return null;
+
+  // 兼容快捷指令里可能出现的全角符号与 URL 编码。
+  s = s.replace(/，/g, ",").replace(/；/g, ";").replace(/＝/g, "=").replace(/＆/g, "&");
+  if (s.includes("%")) {
+    try {
+      s = decodeURIComponent(s);
+    } catch (e) {
+      // ignore decode errors
+    }
+  }
 
   if (s.includes("=") && (s.includes("&") || s.includes("lat") || s.includes("lon"))) {
     const mLon = s.match(/(?:^|[&;,\s])(?:lon|lng)\s*=\s*(-?\d+(?:\.\d+)?)/i);
@@ -437,7 +482,7 @@ function parseArgument(arg) {
     }
   }
 
-  const parts = s.split(/[\s,;]+/).filter(Boolean);
+  const parts = s.split(/[\s,;|]+/).filter(Boolean);
   if (parts.length >= 2) {
     const lon = Number(parts[0]);
     const lat = Number(parts[1]);
@@ -447,7 +492,7 @@ function parseArgument(arg) {
   }
 
   // 兜底：从混合文本中提取前两个浮点数作为 lon/lat。
-  const nums = s.match(/-?\d+(?:\.\d+)?/g) || [];
+  const nums = s.match(/[+-]?\d+(?:\.\d+)?(?:e[+-]?\d+)?/ig) || [];
   if (nums.length >= 2) {
     const lon = Number(nums[0]);
     const lat = Number(nums[1]);
