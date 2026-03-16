@@ -1,23 +1,23 @@
 /*
-Purpose:
-- Quantumult X subway departure estimator for Beijing.
-- Input is longitude/latitude, output is nearest station(s) and upcoming departures by direction.
-- No notification is sent; script writes structured logs and returns a plain-text output string.
+用途说明：
+- Quantumult X 北京地铁出发时刻测算脚本。
+- 输入经纬度（lon/lat），输出最近站点及各方向后续班次信息。
+- 不发送通知，仅输出结构化日志，并通过 $done 返回纯文本结果。
 
-Attribution:
-- Schedule/data references from BoyInTheSun:
+资源致谢：
+- BoyInTheSun 开源时刻表与站点网页数据：
   https://github.com/BoyInTheSun/beijing-subway-schedule
   https://bjsubway.boyinthesun.cn/
-- Station map source:
+- 北京地铁站点地图数据：
   https://dtdata.bjsubway.com/stations/map-app.json
 
-Argument format:
-- Exactly two values: lon + lat.
-- Supported examples: "lon,lat", "lon lat", "lon=<value>&lat=<value>".
+参数格式：
+- 仅需两个参数：lon + lat。
+- 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
 
-Log protocol:
-- Per station, output is split into PART1 (station header) and PART2 (line details).
-- Delimiters are fixed for downstream parser compatibility.
+日志协议：
+- 每个站点拆为两段：PART1（站点头）和 PART2（线路详情）。
+- 分隔符固定，便于下游脚本按段解析。
 */
 
 const MAP_APP_URL = "https://dtdata.bjsubway.com/stations/map-app.json";
@@ -233,7 +233,7 @@ function parseArgument(arg) {
     }
   }
 
-  // Fallback: extract first two float-like numbers from any mixed argument text.
+  // 兜底：从混合文本中提取前两个浮点数作为 lon/lat。
   const nums = s.match(/-?\d+(?:\.\d+)?/g) || [];
   if (nums.length >= 2) {
     const lon = Number(nums[0]);
