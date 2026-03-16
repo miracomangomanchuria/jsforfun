@@ -18,6 +18,11 @@
 日志协议：
 - 每个站点拆为两段：PART1（站点头）和 PART2（线路详情）。
 - 分隔符固定，便于下游脚本按段解析。
+
+缓存策略：
+- 时刻表按“服务日所在周”更新（每周首跑自动刷新）。
+- 节假日按“年份”更新（当年首次请求后复用本地缓存）。
+- 若刷新失败，自动回退到旧缓存，避免脚本不可用。
 */
 
 const MAP_APP_URL = "https://dtdata.bjsubway.com/stations/map-app.json";
@@ -31,7 +36,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.0.1";
+const SCRIPT_VERSION = "1.1.0";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -39,6 +44,125 @@ const MAX_STATIONS = 8;
 const SERVICE_DAY_CUTOFF_HOUR = 4;
 const HTTP_TIMEOUT_MS = 60000;
 const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
+const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
+const CACHE_CHUNK_SIZE = 180000;
+const CACHE_MAX_CHUNKS = 120;
+
+const __MEMORY_STORE__ = {};
+
+function storeRead(key) {
+  try {
+    if (typeof $prefs !== "undefined" && $prefs && typeof $prefs.valueForKey === "function") {
+      const v = $prefs.valueForKey(key);
+      return v == null ? null : String(v);
+    }
+    if (typeof $persistentStore !== "undefined" && $persistentStore && typeof $persistentStore.read === "function") {
+      const v = $persistentStore.read(key);
+      return v == null ? null : String(v);
+    }
+  } catch (e) {
+    // ignore
+  }
+  if (Object.prototype.hasOwnProperty.call(__MEMORY_STORE__, key)) {
+    return __MEMORY_STORE__[key];
+  }
+  return null;
+}
+
+function storeWrite(key, value) {
+  const s = value == null ? "" : String(value);
+  let ok = false;
+  let hasPersistentApi = false;
+  try {
+    if (typeof $prefs !== "undefined" && $prefs && typeof $prefs.setValueForKey === "function") {
+      hasPersistentApi = true;
+      ok = !!$prefs.setValueForKey(s, key);
+    } else if (typeof $persistentStore !== "undefined" && $persistentStore && typeof $persistentStore.write === "function") {
+      hasPersistentApi = true;
+      ok = !!$persistentStore.write(s, key);
+    }
+  } catch (e) {
+    ok = false;
+  }
+  if (!ok && !hasPersistentApi) {
+    __MEMORY_STORE__[key] = s;
+  }
+  return ok;
+}
+
+function readJsonCache(key) {
+  const raw = storeRead(key);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeJsonCache(key, obj) {
+  try {
+    return storeWrite(key, JSON.stringify(obj));
+  } catch (e) {
+    return false;
+  }
+}
+
+function readLargeTextCache(baseKey) {
+  const meta = readJsonCache(baseKey + ":meta");
+  if (!meta || typeof meta !== "object") return null;
+  const chunks = Number(meta.chunks);
+  if (!Number.isFinite(chunks) || chunks <= 0 || chunks > CACHE_MAX_CHUNKS) return null;
+
+  let all = "";
+  for (let i = 0; i < chunks; i++) {
+    const part = storeRead(`${baseKey}:part:${i}`);
+    if (part == null) return null;
+    all += String(part);
+  }
+  return all;
+}
+
+function writeLargeTextCache(baseKey, text) {
+  const s = String(text == null ? "" : text);
+  const chunks = Math.max(1, Math.ceil(s.length / CACHE_CHUNK_SIZE));
+  if (chunks > CACHE_MAX_CHUNKS) return false;
+
+  const oldMeta = readJsonCache(baseKey + ":meta");
+  const oldChunks = oldMeta && Number.isFinite(Number(oldMeta.chunks)) ? Number(oldMeta.chunks) : 0;
+
+  for (let i = 0; i < chunks; i++) {
+    const seg = s.slice(i * CACHE_CHUNK_SIZE, (i + 1) * CACHE_CHUNK_SIZE);
+    if (!storeWrite(`${baseKey}:part:${i}`, seg)) return false;
+  }
+  for (let i = chunks; i < oldChunks; i++) {
+    storeWrite(`${baseKey}:part:${i}`, "");
+  }
+
+  return writeJsonCache(baseKey + ":meta", {
+    chunks,
+    len: s.length,
+    updated_at: new Date().toISOString()
+  });
+}
+
+function readLargeJsonCache(baseKey) {
+  const raw = readLargeTextCache(baseKey);
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function writeLargeJsonCache(baseKey, obj) {
+  try {
+    return writeLargeTextCache(baseKey, JSON.stringify(obj));
+  } catch (e) {
+    return false;
+  }
+}
 
 function doneOk(extra = "") {
   if (typeof $done === "function") {
@@ -150,12 +274,68 @@ function ymd(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
+function isoWeekKey(d) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const day = x.getDay() || 7;
+  x.setDate(x.getDate() + 4 - day);
+  const yearStart = new Date(x.getFullYear(), 0, 1);
+  const weekNo = Math.ceil((((x - yearStart) / 86400000) + 1) / 7);
+  return `${x.getFullYear()}-W${pad2(weekNo)}`;
+}
+
+async function loadHolidayYearData(year) {
+  const key = `${CACHE_KEY_PREFIX}:holiday:${year}`;
+  const cached = readJsonCache(key);
+  if (cached && typeof cached === "object" && Array.isArray(cached.days)) {
+    return { data: cached, source: `holiday-cn-cache:${year}` };
+  }
+
+  const url = HOLIDAY_CN_URL.replace("{year}", String(year));
+  const remote = await fetchJson(url, {}, HOLIDAY_HTTP_TIMEOUT_MS);
+  if (remote && typeof remote === "object" && Array.isArray(remote.days)) {
+    writeJsonCache(key, remote);
+  }
+  return { data: remote, source: `holiday-cn:${year}` };
+}
+
+async function loadScheduleWithWeeklyCache(isWorkday, weekKey) {
+  const dayKey = isWorkday ? "weekday" : "weekend";
+  const urls = isWorkday ? SCHEDULE_WEEKDAY_URLS : SCHEDULE_WEEKEND_URLS;
+  const cacheKey = `${CACHE_KEY_PREFIX}:schedule:${dayKey}`;
+
+  const cached = readLargeJsonCache(cacheKey);
+  if (
+    cached &&
+    typeof cached === "object" &&
+    cached.week_key === weekKey &&
+    cached.data &&
+    typeof cached.data === "object"
+  ) {
+    return cached.data;
+  }
+
+  try {
+    const remote = await fetchJsonWithFallback(urls);
+    writeLargeJsonCache(cacheKey, {
+      week_key: weekKey,
+      updated_at: new Date().toISOString(),
+      data: remote
+    });
+    return remote;
+  } catch (e) {
+    if (cached && cached.data && typeof cached.data === "object") {
+      return cached.data;
+    }
+    throw e;
+  }
+}
+
 async function isWorkdayByHolidayCN(nowDate) {
   const year = nowDate.getFullYear();
-  const url = HOLIDAY_CN_URL.replace("{year}", String(year));
   let obj = null;
   try {
-    obj = await fetchJson(url, {}, HOLIDAY_HTTP_TIMEOUT_MS);
+    const r = await loadHolidayYearData(year);
+    obj = r && r.data ? r.data : null;
   } catch (e) {
     return { isWorkday: nowDate.getDay() >= 1 && nowDate.getDay() <= 5, source: "weekday_heuristic" };
   }
@@ -698,8 +878,10 @@ function sortRuntimeDirectionsClockwise(directions) {
   dirs.sort((a, b) => {
     const la = String(a.line_name_display || a.line_name || "");
     const lb = String(b.line_name_display || b.line_name || "");
-    const ka = [lineOrder[la] ?? 9999, directionBearingDeg(a), String(a.to || ""), String(a.key || "")];
-    const kb = [lineOrder[lb] ?? 9999, directionBearingDeg(b), String(b.to || ""), String(b.key || "")];
+    const oa = Object.prototype.hasOwnProperty.call(lineOrder, la) ? lineOrder[la] : 9999;
+    const ob = Object.prototype.hasOwnProperty.call(lineOrder, lb) ? lineOrder[lb] : 9999;
+    const ka = [oa, directionBearingDeg(a), String(a.to || ""), String(a.key || "")];
+    const kb = [ob, directionBearingDeg(b), String(b.to || ""), String(b.key || "")];
     for (let i = 0; i < ka.length; i++) {
       if (ka[i] < kb[i]) return -1;
       if (ka[i] > kb[i]) return 1;
@@ -793,13 +975,15 @@ async function main() {
   const inputLat = parsed.lat;
 
   const now = new Date();
-  const dayType = await isWorkdayByHolidayCN(now);
+  const serviceDayCtx = serviceDayFor(now, SERVICE_DAY_CUTOFF_HOUR);
+  const serviceDay = serviceDayCtx.date;
+  const dayType = await isWorkdayByHolidayCN(serviceDay);
   const isWorkday = !!dayType.isWorkday;
-  const scheduleUrls = isWorkday ? SCHEDULE_WEEKDAY_URLS : SCHEDULE_WEEKEND_URLS;
+  const weekKey = isoWeekKey(serviceDay);
 
   const [mapObj, scheduleObj] = await Promise.all([
     fetchJson(MAP_APP_URL),
-    fetchJsonWithFallback(scheduleUrls)
+    loadScheduleWithWeeklyCache(isWorkday, weekKey)
   ]);
 
   const catalog = buildCatalog(mapObj);
@@ -820,7 +1004,6 @@ async function main() {
     return;
   }
 
-  const serviceDay = serviceDayFor(now, SERVICE_DAY_CUTOFF_HOUR).date;
   const schedule = pickScheduleDay(scheduleObj, isWorkday) || scheduleObj;
 
   const stationNorms = nearStations.map((s) => s.norm);
