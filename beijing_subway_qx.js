@@ -21,8 +21,14 @@
 */
 
 const MAP_APP_URL = "https://dtdata.bjsubway.com/stations/map-app.json";
-const SCHEDULE_WEEKDAY_URL = "https://raw.githubusercontent.com/BoyInTheSun/beijing-subway-schedule/main/train_schedule_all/schedule_weekday.json";
-const SCHEDULE_WEEKEND_URL = "https://raw.githubusercontent.com/BoyInTheSun/beijing-subway-schedule/main/train_schedule_all/schedule_weekend.json";
+const SCHEDULE_WEEKDAY_URLS = [
+  "https://raw.githubusercontent.com/BoyInTheSun/beijing-subway-schedule/main/train_schedule_all/schedule_weekday.json",
+  "https://cdn.jsdelivr.net/gh/BoyInTheSun/beijing-subway-schedule@main/train_schedule_all/schedule_weekday.json"
+];
+const SCHEDULE_WEEKEND_URLS = [
+  "https://raw.githubusercontent.com/BoyInTheSun/beijing-subway-schedule/main/train_schedule_all/schedule_weekend.json",
+  "https://cdn.jsdelivr.net/gh/BoyInTheSun/beijing-subway-schedule@main/train_schedule_all/schedule_weekend.json"
+];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
 const SCRIPT_VERSION = "1.0.1";
@@ -41,7 +47,9 @@ function doneOk(extra = "") {
 }
 
 function doneErr(err) {
-  const msg = err && err.stack ? err.stack : String(err);
+  const eMsg = err && err.message ? String(err.message) : String(err);
+  const eStack = err && err.stack ? String(err.stack) : "";
+  const msg = eStack && eStack.indexOf(eMsg) === -1 ? `${eMsg}\n${eStack}` : (eStack || eMsg);
   console.log("[ERROR] " + msg);
   if (typeof $done === "function") {
     $done("ERROR: " + msg);
@@ -66,12 +74,36 @@ function fetchJson(url, headers = {}, timeoutMs = HTTP_TIMEOUT_MS) {
     if (status < 200 || status >= 300) {
       throw new Error(`HTTP ${status} for ${url}`);
     }
-    return JSON.parse(resp.body || "{}");
+    try {
+      return JSON.parse(resp.body || "{}");
+    } catch (e) {
+      const em = e && e.message ? e.message : String(e);
+      throw new Error(`JSON 解析失败: ${url} | ${em}`);
+    }
+  }).catch((e) => {
+    const em = e && e.message ? e.message : String(e);
+    throw new Error(`请求失败: ${url} | ${em}`);
   });
 }
 
+async function fetchJsonWithFallback(urls, headers = {}, timeoutMs = HTTP_TIMEOUT_MS) {
+  const list = Array.isArray(urls) ? urls : [urls];
+  const errs = [];
+  for (const u of list) {
+    try {
+      return await fetchJson(u, headers, timeoutMs);
+    } catch (e) {
+      const em = e && e.message ? e.message : String(e);
+      errs.push(em);
+    }
+  }
+  throw new Error("全部数据源请求失败:\n" + errs.join("\n"));
+}
+
 function pad2(n) {
-  return String(n).padStart(2, "0");
+  const v = Math.trunc(Number(n));
+  if (v >= 0 && v < 10) return "0" + String(v);
+  return String(v);
 }
 
 function hhmmStr(h, m) {
@@ -216,9 +248,10 @@ function parseArgument(arg) {
   if (!s) return null;
 
   if (s.includes("=") && (s.includes("&") || s.includes("lat") || s.includes("lon"))) {
-    const params = new URLSearchParams(s);
-    const lon = Number(params.get("lon") || params.get("lng"));
-    const lat = Number(params.get("lat"));
+    const mLon = s.match(/(?:^|[&;,\s])(?:lon|lng)\s*=\s*(-?\d+(?:\.\d+)?)/i);
+    const mLat = s.match(/(?:^|[&;,\s])lat\s*=\s*(-?\d+(?:\.\d+)?)/i);
+    const lon = Number(mLon ? mLon[1] : NaN);
+    const lat = Number(mLat ? mLat[1] : NaN);
     if (Number.isFinite(lon) && Number.isFinite(lat)) {
       return { lon, lat };
     }
@@ -762,11 +795,11 @@ async function main() {
   const now = new Date();
   const dayType = await isWorkdayByHolidayCN(now);
   const isWorkday = !!dayType.isWorkday;
-  const scheduleUrl = isWorkday ? SCHEDULE_WEEKDAY_URL : SCHEDULE_WEEKEND_URL;
+  const scheduleUrls = isWorkday ? SCHEDULE_WEEKDAY_URLS : SCHEDULE_WEEKEND_URLS;
 
   const [mapObj, scheduleObj] = await Promise.all([
     fetchJson(MAP_APP_URL),
-    fetchJson(scheduleUrl)
+    fetchJsonWithFallback(scheduleUrls)
   ]);
 
   const catalog = buildCatalog(mapObj);
