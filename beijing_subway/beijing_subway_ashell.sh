@@ -1,8 +1,8 @@
-#!/bin/sh
+#!/usr/bin/sh
 # iOS a-Shell script: Beijing subway next departures by lon/lat.
 #
 # Usage:
-# 1) Edit LON/LAT below.
+# 1) Prefer positional args or export vars.
 # 2) Run: sh beijing_subway_ashell.sh
 #
 # Data acknowledgment:
@@ -13,8 +13,8 @@
 set -eu
 
 # ===== User variables (edit these two) =====
-LON="${LON:-116.3198}"
-LAT="${LAT:-39.9288}"
+LON="${LON:-}"
+LAT="${LAT:-}"
 
 # ===== Optional knobs =====
 THRESHOLD_M="${THRESHOLD_M:-300}"           # Include multiple nearest stations within +300m
@@ -23,6 +23,8 @@ TIMEOUT_SEC="${TIMEOUT_SEC:-20}"            # HTTP timeout
 SERVICE_CUTOFF_HOUR="${SERVICE_CUTOFF_HOUR:-4}"  # 04:00 boundary for service day
 PREFER_GCJ="${PREFER_GCJ:-1}"               # 1: prefer WGS84->GCJ02 alignment
 CACHE_DIR="${CACHE_DIR:-$HOME/Documents/beijing_subway_cache}"
+AMAP_KEY="${AMAP_KEY:-}"                    # Optional: improve IP geolocation in mainland China
+IP_GEO_FALLBACK="${IP_GEO_FALLBACK:-1}"     # 1: if lon/lat missing, try rough IP geolocation
 
 # Positional override (optional): sh beijing_subway_ashell.sh <lon> <lat>
 if [ "${1:-}" != "" ] && [ "${2:-}" != "" ]; then
@@ -35,8 +37,121 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p "$CACHE_DIR"
+resolve_ip_geo() {
+  # output: "<lon> <lat>"
+  if [ -n "$AMAP_KEY" ]; then
+    amap_url="https://restapi.amap.com/v3/ip?key=$AMAP_KEY"
+    body="$(curl -fsSL --connect-timeout 8 --max-time 12 "$amap_url" 2>/dev/null || true)"
+    if [ -n "$body" ]; then
+      out="$(JSON_BODY="$body" python3 - <<'PY'
+import json, os
+raw = os.environ.get("JSON_BODY", "")
+try:
+    obj = json.loads(raw)
+except Exception:
+    print("")
+    raise SystemExit
+if str(obj.get("status")) != "1":
+    print("")
+    raise SystemExit
+rect = str(obj.get("rectangle") or "")
+if ";" not in rect:
+    print("")
+    raise SystemExit
+try:
+    a, b = rect.split(";", 1)
+    lon1, lat1 = [float(x) for x in a.split(",", 1)]
+    lon2, lat2 = [float(x) for x in b.split(",", 1)]
+    lon = (lon1 + lon2) / 2.0
+    lat = (lat1 + lat2) / 2.0
+    if -180 <= lon <= 180 and -90 <= lat <= 90:
+        print(f"{lon} {lat}")
+    else:
+        print("")
+except Exception:
+    print("")
+PY
+)"
+      if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+      fi
+    fi
+  fi
 
+  for u in \
+    "https://ipapi.co/json/" \
+    "https://ipwho.is/" \
+    "https://ipinfo.io/json"
+  do
+    body="$(curl -fsSL --connect-timeout 8 --max-time 12 "$u" 2>/dev/null || true)"
+    [ -n "$body" ] || continue
+    out="$(JSON_BODY="$body" python3 - <<'PY'
+import json, os
+raw = os.environ.get("JSON_BODY", "")
+try:
+    obj = json.loads(raw)
+except Exception:
+    print("")
+    raise SystemExit
+
+def emit(lon, lat):
+    try:
+        lon = float(lon); lat = float(lat)
+    except Exception:
+        return False
+    if -180 <= lon <= 180 and -90 <= lat <= 90:
+        print(f"{lon} {lat}")
+        return True
+    return False
+
+if isinstance(obj, dict):
+    if emit(obj.get("longitude"), obj.get("latitude")): raise SystemExit
+    if emit(obj.get("lon"), obj.get("lat")): raise SystemExit
+    loc = obj.get("loc")
+    if isinstance(loc, str) and "," in loc:
+        a, b = loc.split(",", 1)  # ipinfo: lat,lon
+        if emit(b, a): raise SystemExit
+print("")
+PY
+)"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+geo_source="manual"
+if [ -z "$LON" ] || [ -z "$LAT" ]; then
+  if [ "$IP_GEO_FALLBACK" = "1" ]; then
+    if ! command -v curl >/dev/null 2>&1; then
+      echo "ERROR: 缺少经纬度，且 curl 不可用，无法做 IP 粗定位。"
+      exit 1
+    fi
+    loc="$(resolve_ip_geo || true)"
+    if [ -n "$loc" ]; then
+      LON="$(printf '%s' "$loc" | awk '{print $1}')"
+      LAT="$(printf '%s' "$loc" | awk '{print $2}')"
+      geo_source="ip"
+      echo "INFO: 未传经纬度，已使用IP粗定位。lon=$LON lat=$LAT"
+    fi
+  fi
+fi
+
+if [ -z "$LON" ] || [ -z "$LAT" ]; then
+  echo "ERROR: 缺少经纬度，且 IP 反查失败。"
+  echo "示例: export LON=YOUR_LON; export LAT=YOUR_LAT; sh beijing_subway_ashell.sh"
+  echo "示例: sh beijing_subway_ashell.sh YOUR_LON YOUR_LAT"
+  echo "可选: 设置 AMAP_KEY 提升中国大陆 IP 定位可用性。"
+  exit 1
+fi
+
+mkdir -p "$CACHE_DIR"
+set +e
+output="$(
 python3 - "$LON" "$LAT" "$THRESHOLD_M" "$MAX_STATIONS" "$TIMEOUT_SEC" "$SERVICE_CUTOFF_HOUR" "$PREFER_GCJ" "$CACHE_DIR" <<'PY'
 from __future__ import annotations
 import datetime as dt
@@ -717,3 +832,23 @@ def main():
 if __name__ == "__main__":
     main()
 PY
+)"
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  printf '%s\n' "$output"
+  exit "$status"
+fi
+
+if [ "$geo_source" = "ip" ]; then
+  output="$(INPUT_TEXT="$output" python3 - <<'PY'
+import os, re
+s = os.environ.get("INPUT_TEXT", "")
+s = re.sub(r"📏(?!约)(\d+(?:\.\d+)?)米", r"📏约\1米", s)
+print(s, end="")
+PY
+)"
+fi
+
+printf '%s\n' "$output"
