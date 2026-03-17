@@ -15,6 +15,17 @@ set -eu
 # Verbose logs (0: quiet, 1: print progress to stderr)
 VERBOSE="${VERBOSE:-0}"
 
+# Base writable dir (override with BASE_DIR if needed)
+if [ -z "${BASE_DIR:-}" ]; then
+  if [ -w "$HOME" ]; then
+    BASE_DIR="$HOME"
+  elif [ -d "$HOME/Documents" ] && [ -w "$HOME/Documents" ]; then
+    BASE_DIR="$HOME/Documents"
+  else
+    BASE_DIR="$HOME"
+  fi
+fi
+
 # ===== User variables (edit these two) =====
 LON="${LON:-}"
 LAT="${LAT:-}"
@@ -25,7 +36,7 @@ MAX_STATIONS="${MAX_STATIONS:-8}"           # Hard cap for tie candidates
 TIMEOUT_SEC="${TIMEOUT_SEC:-20}"            # HTTP timeout
 SERVICE_CUTOFF_HOUR="${SERVICE_CUTOFF_HOUR:-4}"  # 04:00 boundary for service day
 PREFER_GCJ="${PREFER_GCJ:-1}"               # 1: prefer WGS84->GCJ02 alignment
-CACHE_DIR="${CACHE_DIR:-$HOME/Documents/beijing_subway_cache}"
+CACHE_DIR="${CACHE_DIR:-$BASE_DIR/beijing_subway_cache}"
 AMAP_KEY="${AMAP_KEY:-}"                    # Optional: improve IP geolocation in mainland China
 IP_GEO_FALLBACK="${IP_GEO_FALLBACK:-1}"     # 1: if lon/lat missing, try rough IP geolocation
 

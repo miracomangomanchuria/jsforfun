@@ -18,6 +18,17 @@ set -eu
 # Verbose logs (0: quiet, 1: print progress to stderr)
 VERBOSE="${VERBOSE:-0}"
 
+# Base writable dir (override with BASE_DIR if needed)
+if [ -z "${BASE_DIR:-}" ]; then
+  if [ -w "$HOME" ]; then
+    BASE_DIR="$HOME"
+  elif [ -d "$HOME/Documents" ] && [ -w "$HOME/Documents" ]; then
+    BASE_DIR="$HOME/Documents"
+  else
+    BASE_DIR="$HOME"
+  fi
+fi
+
 # ===== User editable vars =====
 LON="${LON:-}"
 LAT="${LAT:-}"
@@ -26,14 +37,14 @@ LAT="${LAT:-}"
 SCRIPT_URL="${SCRIPT_URL:-https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/beijing_subway_shortcut.py}"
 
 # Local persisted script path:
-PY_PATH="${PY_PATH:-$HOME/Documents/beijing_subway_shortcut.py}"
+PY_PATH="${PY_PATH:-$BASE_DIR/beijing_subway_shortcut.py}"
 
 # Pull strategy:
 FORCE_PULL="${FORCE_PULL:-0}"        # 1 => always pull before run
 AUTO_PULL_DAYS="${AUTO_PULL_DAYS:-0}"  # 0 => disabled
 
 # Runtime params:
-CACHE_DIR="${CACHE_DIR:-$HOME/Documents/beijing_subway_cache}"
+CACHE_DIR="${CACHE_DIR:-$BASE_DIR/beijing_subway_cache}"
 THRESHOLD_M="${THRESHOLD_M:-300}"
 MAX_STATIONS="${MAX_STATIONS:-8}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-18}"

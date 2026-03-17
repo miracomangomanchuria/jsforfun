@@ -19,6 +19,19 @@
 4. `AUTO_PULL_DAYS`：可选，按天自动更新（`0` 表示关闭）
 5. `IP_GEO_FALLBACK`：未传 `LON/LAT` 时，是否启用 IP 粗定位（默认 `1`）
 6. `AMAP_KEY`：可选，高德 Web Key，用于提升中国大陆 IP 定位可用性
+7. `BASE_DIR`：可选，脚本缓存/下载文件根目录（默认自动探测可写目录）
+
+## 1.1 先确认目录（避免 Documents/Documents）
+
+```sh
+echo "$HOME"
+pwd
+```
+
+说明：
+1. 本文档统一用 `"$HOME/..."`，不要再手动拼 `"$HOME/Documents/..."`。
+2. 复制命令时请按行执行；把 `curl` 和 `chmod` 粘成一行会触发 `Could not resolve host: chmod`。
+3. 启动器会自动判断目录：优先可写的 `HOME`，否则回退到 `HOME/Documents`。
 
 ## 2. a-Shell 兼容优先写法（推荐）
 
@@ -30,41 +43,41 @@
 ### 2.1 先下载再执行（位置参数，最稳）
 
 ```sh
-curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$HOME/Documents/run_beijing_subway_py_ashell.sh"
-chmod +x "$HOME/Documents/run_beijing_subway_py_ashell.sh"
+curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$HOME/run_beijing_subway_py_ashell.sh"
+chmod +x "$HOME/run_beijing_subway_py_ashell.sh"
 ```
 
 平时运行（不强制更新）：
 
 ```sh
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
+sh "$HOME/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 ```
 
 不传经纬度，走 IP 粗定位（默认开启）：
 
 ```sh
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh"
+sh "$HOME/run_beijing_subway_py_ashell.sh"
 ```
 
 不传经纬度 + 指定高德 Key（更稳）：
 
 ```sh
 export AMAP_KEY=YOUR_AMAP_KEY
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh"
+sh "$HOME/run_beijing_subway_py_ashell.sh"
 ```
 
 强制更新后再运行：
 
 ```sh
 export FORCE_PULL=1
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
+sh "$HOME/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 ```
 
 每 7 天自动更新一次：
 
 ```sh
 export AUTO_PULL_DAYS=7
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
+sh "$HOME/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 ```
 
 ### 2.2 export 方式（适合调试）
@@ -73,7 +86,14 @@ sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 export LON=YOUR_LON
 export LAT=YOUR_LAT
 export FORCE_PULL=0
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh"
+sh "$HOME/run_beijing_subway_py_ashell.sh"
+```
+
+如需强制指定目录：
+
+```sh
+export BASE_DIR="$HOME"
+sh "$HOME/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 ```
 
 ## 3. 一行执行（带下载失败检测）
@@ -81,7 +101,7 @@ sh "$HOME/Documents/run_beijing_subway_py_ashell.sh"
 不落地文件，直接执行（位置参数，失败会报错）：
 
 ```sh
-TMP_SH="$HOME/Documents/.run_beijing_subway_py_ashell.tmp.sh"; \
+TMP_SH="$HOME/.run_beijing_subway_py_ashell.tmp.sh"; \
 curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/refs/heads/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$TMP_SH" && \
 sh "$TMP_SH" YOUR_LON YOUR_LAT; \
 RC=$?; rm -f "$TMP_SH"; \
@@ -92,7 +112,7 @@ RC=$?; rm -f "$TMP_SH"; \
 
 ```sh
 export FORCE_PULL=1
-TMP_SH="$HOME/Documents/.run_beijing_subway_py_ashell.tmp.sh"; \
+TMP_SH="$HOME/.run_beijing_subway_py_ashell.tmp.sh"; \
 curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/refs/heads/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$TMP_SH" && \
 sh "$TMP_SH" YOUR_LON YOUR_LAT; \
 RC=$?; rm -f "$TMP_SH"; \
@@ -104,7 +124,7 @@ RC=$?; rm -f "$TMP_SH"; \
 启动器也支持位置参数：
 
 ```sh
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
+sh "$HOME/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 ```
 
 ## 4.1 a-Shell 逐行调试（推荐）
@@ -115,7 +135,7 @@ sh "$HOME/Documents/run_beijing_subway_py_ashell.sh" YOUR_LON YOUR_LAT
 export LON=YOUR_LON
 export LAT=YOUR_LAT
 export FORCE_PULL=0
-sh "$HOME/Documents/run_beijing_subway_py_ashell.sh"
+sh "$HOME/run_beijing_subway_py_ashell.sh"
 ```
 
 注意：
