@@ -85,7 +85,7 @@ TMP_SH="$HOME/Documents/.run_beijing_subway_py_ashell.tmp.sh"; \
 curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/refs/heads/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$TMP_SH" && \
 sh "$TMP_SH" YOUR_LON YOUR_LAT; \
 RC=$?; rm -f "$TMP_SH"; \
-if [ "$RC" -ne 0 ]; then echo "ERROR: 执行失败，退出码=$RC"; fi
+[ "$RC" -eq 0 ]
 ```
 
 强制更新版本：
@@ -96,7 +96,7 @@ TMP_SH="$HOME/Documents/.run_beijing_subway_py_ashell.tmp.sh"; \
 curl -fsSL "https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/refs/heads/main/beijing_subway/run_beijing_subway_py_ashell.sh" -o "$TMP_SH" && \
 sh "$TMP_SH" YOUR_LON YOUR_LAT; \
 RC=$?; rm -f "$TMP_SH"; \
-if [ "$RC" -ne 0 ]; then echo "ERROR: 执行失败，退出码=$RC"; fi
+[ "$RC" -eq 0 ]
 ```
 
 ## 4. 位置参数写法（可选）

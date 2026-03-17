@@ -15,6 +15,9 @@
 
 set -eu
 
+# Verbose logs (0: quiet, 1: print progress to stderr)
+VERBOSE="${VERBOSE:-0}"
+
 # ===== User editable vars =====
 LON="${LON:-}"
 LAT="${LAT:-}"
@@ -134,11 +137,11 @@ geo_source="manual"
 if [ -z "$LON" ] || [ -z "$LAT" ]; then
   if [ "$IP_GEO_FALLBACK" = "1" ]; then
     if ! command -v curl >/dev/null 2>&1; then
-      echo "ERROR: 缺少经纬度，且 curl 不可用，无法做 IP 粗定位。"
+      echo "ERROR: 缺少经纬度，且 curl 不可用，无法做 IP 粗定位。" >&2
       exit 1
     fi
     if ! command -v python3 >/dev/null 2>&1; then
-      echo "ERROR: 缺少经纬度，且 python3 不可用，无法做 IP 粗定位。"
+      echo "ERROR: 缺少经纬度，且 python3 不可用，无法做 IP 粗定位。" >&2
       exit 1
     fi
     loc="$(resolve_ip_geo || true)"
@@ -146,25 +149,27 @@ if [ -z "$LON" ] || [ -z "$LAT" ]; then
       LON="$(printf '%s' "$loc" | awk '{print $1}')"
       LAT="$(printf '%s' "$loc" | awk '{print $2}')"
       geo_source="ip"
-      echo "INFO: 未传经纬度，已使用IP粗定位。lon=$LON lat=$LAT"
+      if [ "$VERBOSE" = "1" ]; then
+        echo "INFO: 未传经纬度，已使用IP粗定位。lon=$LON lat=$LAT" >&2
+      fi
     fi
   fi
 fi
 
 if [ -z "$LON" ] || [ -z "$LAT" ]; then
-  echo "ERROR: 缺少经纬度，且 IP 反查失败。"
-  echo "示例: export LON=YOUR_LON; export LAT=YOUR_LAT; sh run_beijing_subway_py_ashell.sh"
-  echo "示例: sh run_beijing_subway_py_ashell.sh YOUR_LON YOUR_LAT"
-  echo "可选: 设置 AMAP_KEY 提升中国大陆 IP 定位可用性。"
+  echo "ERROR: 缺少经纬度，且 IP 反查失败。" >&2
+  echo "示例: export LON=YOUR_LON; export LAT=YOUR_LAT; sh run_beijing_subway_py_ashell.sh" >&2
+  echo "示例: sh run_beijing_subway_py_ashell.sh YOUR_LON YOUR_LAT" >&2
+  echo "可选: 设置 AMAP_KEY 提升中国大陆 IP 定位可用性。" >&2
   exit 1
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: python3 not found."
+  echo "ERROR: python3 not found." >&2
   exit 1
 fi
 if ! command -v curl >/dev/null 2>&1; then
-  echo "ERROR: curl not found."
+  echo "ERROR: curl not found." >&2
   exit 1
 fi
 
@@ -203,18 +208,24 @@ PY
 fi
 
 if [ "$need_pull" -eq 1 ]; then
-  echo "Pulling py script: $reason"
+  if [ "$VERBOSE" = "1" ]; then
+    echo "Pulling py script: $reason" >&2
+  fi
   tmp="${PY_PATH}.tmp.$$"
   if ! curl -fsSL --connect-timeout 10 --max-time 60 "$SCRIPT_URL" -o "$tmp"; then
     rm -f "$tmp" >/dev/null 2>&1 || true
-    echo "ERROR: failed to download script from:"
-    echo "  $SCRIPT_URL"
+    echo "ERROR: failed to download script from:" >&2
+    echo "  $SCRIPT_URL" >&2
     exit 1
   fi
   mv "$tmp" "$PY_PATH"
-  echo "Updated: $PY_PATH"
+  if [ "$VERBOSE" = "1" ]; then
+    echo "Updated: $PY_PATH" >&2
+  fi
 else
-  echo "Using local py: $PY_PATH"
+  if [ "$VERBOSE" = "1" ]; then
+    echo "Using local py: $PY_PATH" >&2
+  fi
 fi
 
 set +e

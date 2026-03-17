@@ -12,6 +12,9 @@
 
 set -eu
 
+# Verbose logs (0: quiet, 1: print progress to stderr)
+VERBOSE="${VERBOSE:-0}"
+
 # ===== User variables (edit these two) =====
 LON="${LON:-}"
 LAT="${LAT:-}"
@@ -33,7 +36,7 @@ if [ "${1:-}" != "" ] && [ "${2:-}" != "" ]; then
 fi
 
 if ! command -v python3 >/dev/null 2>&1; then
-  echo "ERROR: python3 not found in a-Shell."
+  echo "ERROR: python3 not found in a-Shell." >&2
   exit 1
 fi
 
@@ -128,7 +131,7 @@ geo_source="manual"
 if [ -z "$LON" ] || [ -z "$LAT" ]; then
   if [ "$IP_GEO_FALLBACK" = "1" ]; then
     if ! command -v curl >/dev/null 2>&1; then
-      echo "ERROR: 缺少经纬度，且 curl 不可用，无法做 IP 粗定位。"
+      echo "ERROR: 缺少经纬度，且 curl 不可用，无法做 IP 粗定位。" >&2
       exit 1
     fi
     loc="$(resolve_ip_geo || true)"
@@ -136,16 +139,18 @@ if [ -z "$LON" ] || [ -z "$LAT" ]; then
       LON="$(printf '%s' "$loc" | awk '{print $1}')"
       LAT="$(printf '%s' "$loc" | awk '{print $2}')"
       geo_source="ip"
-      echo "INFO: 未传经纬度，已使用IP粗定位。lon=$LON lat=$LAT"
+      if [ "$VERBOSE" = "1" ]; then
+        echo "INFO: 未传经纬度，已使用IP粗定位。lon=$LON lat=$LAT" >&2
+      fi
     fi
   fi
 fi
 
 if [ -z "$LON" ] || [ -z "$LAT" ]; then
-  echo "ERROR: 缺少经纬度，且 IP 反查失败。"
-  echo "示例: export LON=YOUR_LON; export LAT=YOUR_LAT; sh beijing_subway_ashell.sh"
-  echo "示例: sh beijing_subway_ashell.sh YOUR_LON YOUR_LAT"
-  echo "可选: 设置 AMAP_KEY 提升中国大陆 IP 定位可用性。"
+  echo "ERROR: 缺少经纬度，且 IP 反查失败。" >&2
+  echo "示例: export LON=YOUR_LON; export LAT=YOUR_LAT; sh beijing_subway_ashell.sh" >&2
+  echo "示例: sh beijing_subway_ashell.sh YOUR_LON YOUR_LAT" >&2
+  echo "可选: 设置 AMAP_KEY 提升中国大陆 IP 定位可用性。" >&2
   exit 1
 fi
 
