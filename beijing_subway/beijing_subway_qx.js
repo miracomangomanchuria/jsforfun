@@ -29,6 +29,13 @@ QX backend 配置示例：
 - 返回体：扁平数组，每站 2 段平铺
   [站点头, 站点线路详情, 站点头, 站点线路详情, ...]
 
+QX 重写模式示例（类似 BoxJs 的域名访问，不走 http_backend）：
+- 远程重写 conf 推荐使用“纯规则行”格式（与 BoxJs 一致，不写 [rewrite_local]/[mitm] 分段头）：
+  hostname = beijing.ditie
+  ^https?:\/\/beijing\.ditie\/beijing_subway(\?.*)?$ url script-analyze-echo-response https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/beijing_subway_qx.js
+- 访问示例：
+  http://beijing.ditie/beijing_subway?lon=116.3198123&lat=39.9288123
+
 日志协议：
 - 每个站点拆为两段：PART1（站点头）和 PART2（线路详情）。
 - 分隔符固定，便于下游脚本按段解析。
@@ -898,14 +905,25 @@ function buildStationCoordIndex(catalog) {
 }
 
 function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
-  const ranked = catalog.stations.map((st) => [haversineM(lat, lon, st.lat, st.lon), st]);
-  ranked.sort((a, b) => a[0] - b[0]);
+  const ranked = catalog.stations.map((st) => {
+    const d = haversineM(lat, lon, st.lat, st.lon);
+    const br = bearingDeg(lat, lon, st.lat, st.lon);
+    return { d, br, st };
+  });
+  ranked.sort((a, b) => {
+    const dd = a.d - b.d;
+    if (Math.abs(dd) > 1e-6) return dd;
+    return a.br - b.br;
+  });
   if (!ranked.length) return [];
-  const minD = ranked[0][0];
+  const minD = ranked[0].d;
   const out = [];
-  for (const [d, st] of ranked) {
-    if (d <= minD + threshold || out.length === 0) {
-      out.push(Object.assign({}, st, { distance_m: Math.round(d * 10) / 10 }));
+  for (const it of ranked) {
+    if (it.d <= minD + threshold || out.length === 0) {
+      out.push(Object.assign({}, it.st, {
+        distance_m: Math.round(it.d * 10) / 10,
+        relative_bearing_deg: Math.round(it.br * 10) / 10
+      }));
       if (out.length >= maxN) break;
     } else {
       break;
@@ -980,9 +998,9 @@ function collectScheduleForStations(schedule, stationNorms) {
 function textToArrow8(s) {
   const t = String(s || "");
   const pairs = [
-    ["东北", "↗️"], ["东南", "↘️"], ["西南", "↙️"], ["西北", "↖️"],
-    ["正东", "➡️"], ["正西", "⬅️"], ["正南", "⬇️"], ["正北", "⬆️"],
-    ["东", "➡️"], ["西", "⬅️"], ["南", "⬇️"], ["北", "⬆️"]
+    ["东北", "↗"], ["东南", "↘"], ["西南", "↙"], ["西北", "↖"],
+    ["正东", "→"], ["正西", "←"], ["正南", "↓"], ["正北", "↑"],
+    ["东", "→"], ["西", "←"], ["南", "↓"], ["北", "↑"]
   ];
   for (const [k, a] of pairs) {
     if (t.includes(k)) return a;
@@ -1009,9 +1027,32 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
 }
 
 function bearingToArrow8(bearing) {
-  const arrows = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"];
-  const idx = Math.floor((bearing + 22.5) / 45) % 8;
+  const idx = bearingToDirectionIndex8(bearing);
+  const arrows = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
   return arrows[idx];
+}
+
+function bearingToArrow8Emoji(bearing) {
+  const idx = bearingToDirectionIndex8(bearing);
+  const arrows = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"];
+  return arrows[idx];
+}
+
+function bearingToDirectionIndex8(bearing) {
+  const b = ((Number(bearing) % 360) + 360) % 360;
+  const scaled = (b + 22.5) / 45;
+  const nearestInt = Math.round(scaled);
+  const EPS = 1e-10;
+
+  // 恰好落在角平分线(22.5/67.5/...)时，优先取更“正”的方向(N/E/S/W)
+  if (Math.abs(scaled - nearestInt) <= EPS) {
+    const upper = ((nearestInt % 8) + 8) % 8;
+    const lower = ((nearestInt - 1) % 8 + 8) % 8;
+    if (upper % 2 === 0) return upper;
+    return lower;
+  }
+
+  return ((Math.floor(scaled) % 8) + 8) % 8;
 }
 
 function pickDirectionArrow8(directionText, toText, fromLat, fromLon, terminalNames, stationCoordIndex) {
@@ -1143,6 +1184,18 @@ function terminalLabel(terminals) {
   return `${parts.join(" ")} 方向`;
 }
 
+function toSuperscriptNumber(v) {
+  const map = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "-": "⁻"
+  };
+  const s = String(Math.trunc(Number(v)));
+  let out = "";
+  for (const ch of s) out += map[ch] || ch;
+  return out;
+}
+
 function formatTimeTokens(trips) {
   const out = [];
   let prevHour = null;
@@ -1160,7 +1213,7 @@ function formatTimeTokens(trips) {
       else showTime = `${pad2(h)}:${mm}`;
       prevHour = h;
     }
-    out.push(`${medal}${showTime}(${Math.round(inMin)}分)`);
+    out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
   return out.join(" ");
 }
@@ -1226,39 +1279,60 @@ function sortRuntimeDirectionsClockwise(directions) {
   return dirs;
 }
 
+function groupDirectionsByLine(directions) {
+  const out = [];
+  const idx = {};
+  for (const d of directions || []) {
+    const line = String(d.line_name_display || d.line_name || "").trim() || "未知线路";
+    if (!Object.prototype.hasOwnProperty.call(idx, line)) {
+      idx[line] = out.length;
+      out.push({ line, directions: [] });
+    }
+    out[idx[line]].directions.push(d);
+  }
+  return out;
+}
+
+function cleanLineText(s) {
+  return String(s == null ? "" : s).replace(/[ \t]{2,}/g, " ").trim();
+}
+
 function formatStationText(st) {
   const dirs = (st.runtime && st.runtime.directions) || [];
-  const firstLast = summarizeStationFirstLast(dirs, SERVICE_DAY_CUTOFF_HOUR);
-  let head = `📍${st.name}`;
+  const stationArrow = String(bearingToArrow8Emoji(st.relative_bearing_deg) || "↗️");
+  let head = `${stationArrow}${st.name}`;
   if (Number.isFinite(st.distance_m)) head += ` 📏${Math.round(st.distance_m)}米`;
-  if (firstLast.first) head += ` 🌅${firstLast.first}`;
-  if (firstLast.last) head += ` 🌃${firstLast.last}`;
 
   const lines = [head];
-  for (const d of dirs) {
-    const status = String(d.status || "");
-    const lineTag = String(d.line_name_display || d.line_name || "").trim();
-    let toTag = "";
-    if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
-    else toTag = String(d.to || d.key || "").trim();
-    if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
+  const grouped = groupDirectionsByLine(dirs);
+  for (const g of grouped) {
+    lines.push(`🚇${g.line}`);
+    for (const d of g.directions) {
+      const status = String(d.status || "");
+      let toTag = "";
+      if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
+      else toTag = String(d.to || d.key || "").trim();
+      if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
 
-    const row = ` 🚇${lineTag}${toTag ? ` ${d.arrow || "👉"} ${toTag}` : ""}`;
-    lines.push(row);
+      let row = `${d.arrow || "↘"} ${toTag || "未知方向"}`;
+      if (d.first) row += ` 🌅${d.first}`;
+      if (d.last) row += ` 🌃${d.last}`;
+      lines.push(row);
 
-    if (status === "ended" && d.last) {
-      lines.push(`  错过末班: ${d.last}`);
-      continue;
-    }
-    if (Array.isArray(d.next) && d.next.length) {
-      const tokenLine = formatTimeTokens(d.next);
-      if (tokenLine) lines.push(`  ${tokenLine}`);
-    } else {
-      if (status === "not_started") lines.push("  未到首班");
-      else if (status !== "ended") lines.push("  无可用班次");
+      if (status === "ended" && d.last) {
+        lines.push(`错过末班: ${d.last}`);
+        continue;
+      }
+      if (Array.isArray(d.next) && d.next.length) {
+        const tokenLine = formatTimeTokens(d.next);
+        if (tokenLine) lines.push(tokenLine);
+      } else {
+        if (status === "not_started") lines.push("未到首班");
+        else if (status !== "ended") lines.push("无可用班次");
+      }
     }
   }
-  return lines.join("\n");
+  return lines.map(cleanLineText).join("\n");
 }
 
 function buildStationTwoParts(stations) {
