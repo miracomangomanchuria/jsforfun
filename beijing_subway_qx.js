@@ -4,23 +4,45 @@
 - 输入经纬度（lon/lat），输出最近站点及各方向后续班次信息。
 - 不发送通知，仅输出结构化日志，并通过 $done 返回纯文本结果。
 
-资源致谢：
-- BoyInTheSun 开源时刻表与站点网页数据：
+数据源致敬（感谢提供者）：
+- BoyInTheSun（北京地铁开源时刻表与查询站点）：
   https://github.com/BoyInTheSun/beijing-subway-schedule
   https://bjsubway.boyinthesun.cn/
-- 北京地铁站点地图数据：
+- 北京地铁公开站点地图接口提供方：
   https://dtdata.bjsubway.com/stations/map-app.json
+- NateScarlet（holiday-cn 中国节假日数据）：
+  https://github.com/NateScarlet/holiday-cn
 
 参数格式：
 - 仅需两个参数：lon + lat。
 - 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
+
+QX backend 配置示例：
+- 在 Quantumult X 配置文件中添加（按你的 host/path 修改）：
+  [http_backend]
+  https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/beijing_subway_qx.js, host=127.0.0.1:9999, tag=北京地铁出发时刻测算, path=/beijing_subway, img-url=https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/icons/beijing_subway_logo.png, enabled=true
+- 如果你仓库目录名是 icon 或 incons，请把上面 img-url 的 /icons/ 改成实际目录名。
+- 调用方式（POST body 任一格式均可）：
+  lon,lat
+  lon=<value>&lat=<value>
+  {"lon":116.3198,"lat":39.9288}
+- 返回体：扁平数组，每站 2 段平铺
+  [站点头, 站点线路详情, 站点头, 站点线路详情, ...]
+
+QX 重写模式示例（类似 BoxJs 的域名访问，不走 http_backend）：
+- 远程重写 conf 推荐使用“纯规则行”格式（与 BoxJs 一致，不写 [rewrite_local]/[mitm] 分段头）：
+  hostname = beijing.ditie
+  ^https?:\/\/beijing\.ditie\/beijing_subway(\?.*)?$ url script-analyze-echo-response https://raw.githubusercontent.com/miracomangomanchuria/jsforfun/main/beijing_subway/beijing_subway_qx.js
+- 访问示例：
+  http://beijing.ditie/beijing_subway?lon=116.3198123&lat=39.9288123
 
 日志协议：
 - 每个站点拆为两段：PART1（站点头）和 PART2（线路详情）。
 - 分隔符固定，便于下游脚本按段解析。
 
 缓存策略：
-- 时刻表按“服务日所在周”更新（每周首跑自动刷新）。
+- 时刻表按“服务日所在周（周一起始）”更新（每周首跑自动刷新，且同时刷新工作日/非工作日两份）。
+- 站点地图按“服务日所在周（周一起始）”更新（每周首跑自动刷新）。
 - 节假日按“年份”更新（当年首次请求后复用本地缓存）。
 - 若刷新失败，自动回退到旧缓存，避免脚本不可用。
 */
@@ -36,7 +58,7 @@ const SCHEDULE_WEEKEND_URLS = [
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 
-const SCRIPT_VERSION = "1.1.4";
+const SCRIPT_VERSION = "1.2.0";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -49,6 +71,10 @@ const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
 
 const __MEMORY_STORE__ = {};
+
+function isBackendContext() {
+  return typeof $request !== "undefined" && $request && typeof $request.url === "string";
+}
 
 function storeRead(key) {
   try {
@@ -166,8 +192,31 @@ function writeLargeJsonCache(baseKey, obj) {
 
 function doneOk(extra = "") {
   if (typeof $done === "function") {
+    if (isBackendContext()) {
+      $done({
+        status: "HTTP/1.1 200 OK",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({ ok: true, output: String(extra == null ? "" : extra) })
+      });
+      return;
+    }
     $done(extra);
   }
+}
+
+function doneBackendJson(obj, statusCode = 200) {
+  if (typeof $done !== "function") return;
+  if (!isBackendContext()) {
+    $done(typeof obj === "string" ? obj : JSON.stringify(obj));
+    return;
+  }
+  const code = Number(statusCode) || 200;
+  const reason = code >= 200 && code < 300 ? "OK" : "Bad Request";
+  $done({
+    status: `HTTP/1.1 ${code} ${reason}`,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify(obj, null, 2)
+  });
 }
 
 function doneErr(err) {
@@ -177,6 +226,14 @@ function doneErr(err) {
   const tagged = `[v${SCRIPT_VERSION}] ${msg}`;
   console.log("[ERROR] " + tagged);
   if (typeof $done === "function") {
+    if (isBackendContext()) {
+      $done({
+        status: "HTTP/1.1 400 Bad Request",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify([`ERROR: ${tagged}`])
+      });
+      return;
+    }
     $done("ERROR: " + tagged);
   }
 }
@@ -299,24 +356,22 @@ async function loadHolidayYearData(year) {
   return { data: remote, source: `holiday-cn:${year}` };
 }
 
-async function loadScheduleWithWeeklyCache(isWorkday, weekKey) {
-  const dayKey = isWorkday ? "weekday" : "weekend";
-  const urls = isWorkday ? SCHEDULE_WEEKDAY_URLS : SCHEDULE_WEEKEND_URLS;
-  const cacheKey = `${CACHE_KEY_PREFIX}:schedule:${dayKey}`;
-
+async function loadMapWithWeeklyCache(weekKey) {
+  const cacheKey = `${CACHE_KEY_PREFIX}:map:weekly`;
   const cached = readLargeJsonCache(cacheKey);
   if (
     cached &&
     typeof cached === "object" &&
     cached.week_key === weekKey &&
     cached.data &&
-    typeof cached.data === "object"
+    typeof cached.data === "object" &&
+    Array.isArray(cached.data.stations_data) &&
+    Array.isArray(cached.data.lines_data)
   ) {
     return cached.data;
   }
-
   try {
-    const remote = await fetchJsonWithFallback(urls);
+    const remote = await fetchJson(MAP_APP_URL);
     writeLargeJsonCache(cacheKey, {
       week_key: weekKey,
       updated_at: new Date().toISOString(),
@@ -324,7 +379,51 @@ async function loadScheduleWithWeeklyCache(isWorkday, weekKey) {
     });
     return remote;
   } catch (e) {
-    if (cached && cached.data && typeof cached.data === "object") {
+    if (
+      cached &&
+      cached.data &&
+      typeof cached.data === "object" &&
+      Array.isArray(cached.data.stations_data) &&
+      Array.isArray(cached.data.lines_data)
+    ) {
+      return cached.data;
+    }
+    throw e;
+  }
+}
+
+async function loadScheduleBundleWithWeeklyCache(weekKey) {
+  const cacheKey = `${CACHE_KEY_PREFIX}:schedule:weekly_bundle`;
+  const cached = readLargeJsonCache(cacheKey);
+  const hasValidBundle = !!(
+    cached &&
+    typeof cached === "object" &&
+    cached.data &&
+    typeof cached.data === "object" &&
+    cached.data.weekday &&
+    typeof cached.data.weekday === "object" &&
+    cached.data.weekend &&
+    typeof cached.data.weekend === "object"
+  );
+
+  if (hasValidBundle && cached.week_key === weekKey) {
+    return cached.data;
+  }
+
+  try {
+    const [weekdayRemote, weekendRemote] = await Promise.all([
+      fetchJsonWithFallback(SCHEDULE_WEEKDAY_URLS),
+      fetchJsonWithFallback(SCHEDULE_WEEKEND_URLS)
+    ]);
+    const bundle = { weekday: weekdayRemote, weekend: weekendRemote };
+    writeLargeJsonCache(cacheKey, {
+      week_key: weekKey,
+      updated_at: new Date().toISOString(),
+      data: bundle
+    });
+    return bundle;
+  } catch (e) {
+    if (hasValidBundle) {
       return cached.data;
     }
     throw e;
@@ -493,9 +592,27 @@ function parseArgument(arg, trace) {
   }
   add(`归一化后='${pv(s)}'`);
 
+  // 若是 JSON 字符串，优先按 JSON 解析 lon/lat。
+  if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+    try {
+      const j = JSON.parse(s);
+      const r = fromObj(j);
+      add(`JSON分支: parsed=${r ? "OK" : "FAIL"}`);
+      if (r) return r;
+    } catch (e) {
+      add(`JSON分支: parse_fail=${e && e.message ? e.message : String(e)}`);
+    }
+  }
+
+  // URL 且未包含 lon/lat 键，避免误把 URL 中数字（如端口）当经纬度。
+  if (/^https?:\/\//i.test(s) && !/(?:^|[?&;,\s])(lon|lng|lat)\s*=/i.test(s)) {
+    add("URL分支: 未发现 lon/lat 参数，直接失败");
+    return null;
+  }
+
   if (s.includes("=") && (s.includes("&") || s.includes("lat") || s.includes("lon"))) {
-    const mLon = s.match(/(?:^|[&;,\s])(?:lon|lng)\s*=\s*(-?\d+(?:\.\d+)?)/i);
-    const mLat = s.match(/(?:^|[&;,\s])lat\s*=\s*(-?\d+(?:\.\d+)?)/i);
+    const mLon = s.match(/(?:^|[?&;,\s])(?:lon|lng)\s*=\s*(-?\d+(?:\.\d+)?)/i);
+    const mLat = s.match(/(?:^|[?&;,\s])lat\s*=\s*(-?\d+(?:\.\d+)?)/i);
     const lon = Number(mLon ? mLon[1] : NaN);
     const lat = Number(mLat ? mLat[1] : NaN);
     add(`键值分支: mLon=${mLon ? mLon[1] : "NA"}, mLat=${mLat ? mLat[1] : "NA"}, lon=${lon}, lat=${lat}`);
@@ -578,6 +695,16 @@ function pickInputArgument() {
       const frag = sp.slice(idx + 1).trim();
       if (frag) return frag;
     }
+  }
+  if (typeof $request !== "undefined" && $request && typeof $request.url === "string" && $request.url.trim() !== "") {
+    if ($request.body != null && String($request.body).trim() !== "") {
+      return String($request.body);
+    }
+    const ctype = String(($request.headers && ($request.headers["Content-Type"] || $request.headers["content-type"])) || "");
+    if (/application\/json/i.test(ctype) && $request.body != null && String($request.body).trim() !== "") {
+      return String($request.body);
+    }
+    return $request.url;
   }
 
   // 兜底：扫描常见全局字段，兼容某些快捷指令动作不走 $argument/$environment 的情况。
@@ -778,14 +905,25 @@ function buildStationCoordIndex(catalog) {
 }
 
 function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
-  const ranked = catalog.stations.map((st) => [haversineM(lat, lon, st.lat, st.lon), st]);
-  ranked.sort((a, b) => a[0] - b[0]);
+  const ranked = catalog.stations.map((st) => {
+    const d = haversineM(lat, lon, st.lat, st.lon);
+    const br = bearingDeg(lat, lon, st.lat, st.lon);
+    return { d, br, st };
+  });
+  ranked.sort((a, b) => {
+    const dd = a.d - b.d;
+    if (Math.abs(dd) > 1e-6) return dd;
+    return a.br - b.br;
+  });
   if (!ranked.length) return [];
-  const minD = ranked[0][0];
+  const minD = ranked[0].d;
   const out = [];
-  for (const [d, st] of ranked) {
-    if (d <= minD + threshold || out.length === 0) {
-      out.push(Object.assign({}, st, { distance_m: Math.round(d * 10) / 10 }));
+  for (const it of ranked) {
+    if (it.d <= minD + threshold || out.length === 0) {
+      out.push(Object.assign({}, it.st, {
+        distance_m: Math.round(it.d * 10) / 10,
+        relative_bearing_deg: Math.round(it.br * 10) / 10
+      }));
       if (out.length >= maxN) break;
     } else {
       break;
@@ -860,9 +998,9 @@ function collectScheduleForStations(schedule, stationNorms) {
 function textToArrow8(s) {
   const t = String(s || "");
   const pairs = [
-    ["东北", "↗️"], ["东南", "↘️"], ["西南", "↙️"], ["西北", "↖️"],
-    ["正东", "➡️"], ["正西", "⬅️"], ["正南", "⬇️"], ["正北", "⬆️"],
-    ["东", "➡️"], ["西", "⬅️"], ["南", "⬇️"], ["北", "⬆️"]
+    ["东北", "↗"], ["东南", "↘"], ["西南", "↙"], ["西北", "↖"],
+    ["正东", "→"], ["正西", "←"], ["正南", "↓"], ["正北", "↑"],
+    ["东", "→"], ["西", "←"], ["南", "↓"], ["北", "↑"]
   ];
   for (const [k, a] of pairs) {
     if (t.includes(k)) return a;
@@ -889,9 +1027,32 @@ function bearingDeg(lat1, lon1, lat2, lon2) {
 }
 
 function bearingToArrow8(bearing) {
-  const arrows = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"];
-  const idx = Math.floor((bearing + 22.5) / 45) % 8;
+  const idx = bearingToDirectionIndex8(bearing);
+  const arrows = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"];
   return arrows[idx];
+}
+
+function bearingToArrow8Emoji(bearing) {
+  const idx = bearingToDirectionIndex8(bearing);
+  const arrows = ["⬆️", "↗️", "➡️", "↘️", "⬇️", "↙️", "⬅️", "↖️"];
+  return arrows[idx];
+}
+
+function bearingToDirectionIndex8(bearing) {
+  const b = ((Number(bearing) % 360) + 360) % 360;
+  const scaled = (b + 22.5) / 45;
+  const nearestInt = Math.round(scaled);
+  const EPS = 1e-10;
+
+  // 恰好落在角平分线(22.5/67.5/...)时，优先取更“正”的方向(N/E/S/W)
+  if (Math.abs(scaled - nearestInt) <= EPS) {
+    const upper = ((nearestInt % 8) + 8) % 8;
+    const lower = ((nearestInt - 1) % 8 + 8) % 8;
+    if (upper % 2 === 0) return upper;
+    return lower;
+  }
+
+  return ((Math.floor(scaled) % 8) + 8) % 8;
 }
 
 function pickDirectionArrow8(directionText, toText, fromLat, fromLon, terminalNames, stationCoordIndex) {
@@ -1023,6 +1184,18 @@ function terminalLabel(terminals) {
   return `${parts.join(" ")} 方向`;
 }
 
+function toSuperscriptNumber(v) {
+  const map = {
+    "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
+    "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
+    "-": "⁻"
+  };
+  const s = String(Math.trunc(Number(v)));
+  let out = "";
+  for (const ch of s) out += map[ch] || ch;
+  return out;
+}
+
 function formatTimeTokens(trips) {
   const out = [];
   let prevHour = null;
@@ -1040,7 +1213,7 @@ function formatTimeTokens(trips) {
       else showTime = `${pad2(h)}:${mm}`;
       prevHour = h;
     }
-    out.push(`${medal}${showTime}(${Math.round(inMin)}分)`);
+    out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
   return out.join(" ");
 }
@@ -1106,39 +1279,60 @@ function sortRuntimeDirectionsClockwise(directions) {
   return dirs;
 }
 
+function groupDirectionsByLine(directions) {
+  const out = [];
+  const idx = {};
+  for (const d of directions || []) {
+    const line = String(d.line_name_display || d.line_name || "").trim() || "未知线路";
+    if (!Object.prototype.hasOwnProperty.call(idx, line)) {
+      idx[line] = out.length;
+      out.push({ line, directions: [] });
+    }
+    out[idx[line]].directions.push(d);
+  }
+  return out;
+}
+
+function cleanLineText(s) {
+  return String(s == null ? "" : s).replace(/[ \t]{2,}/g, " ").trim();
+}
+
 function formatStationText(st) {
   const dirs = (st.runtime && st.runtime.directions) || [];
-  const firstLast = summarizeStationFirstLast(dirs, SERVICE_DAY_CUTOFF_HOUR);
-  let head = `📍${st.name}`;
+  const stationArrow = String(bearingToArrow8Emoji(st.relative_bearing_deg) || "↗️");
+  let head = `${stationArrow}${st.name}`;
   if (Number.isFinite(st.distance_m)) head += ` 📏${Math.round(st.distance_m)}米`;
-  if (firstLast.first) head += ` 🌅${firstLast.first}`;
-  if (firstLast.last) head += ` 🌃${firstLast.last}`;
 
   const lines = [head];
-  for (const d of dirs) {
-    const status = String(d.status || "");
-    const lineTag = String(d.line_name_display || d.line_name || "").trim();
-    let toTag = "";
-    if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
-    else toTag = String(d.to || d.key || "").trim();
-    if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
+  const grouped = groupDirectionsByLine(dirs);
+  for (const g of grouped) {
+    lines.push(`🚇${g.line}`);
+    for (const d of g.directions) {
+      const status = String(d.status || "");
+      let toTag = "";
+      if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
+      else toTag = String(d.to || d.key || "").trim();
+      if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
 
-    const row = ` 🚇${lineTag}${toTag ? ` ${d.arrow || "👉"} ${toTag}` : ""}`;
-    lines.push(row);
+      let row = `${d.arrow || "↘"} ${toTag || "未知方向"}`;
+      if (d.first) row += ` 🌅${d.first}`;
+      if (d.last) row += ` 🌃${d.last}`;
+      lines.push(row);
 
-    if (status === "ended" && d.last) {
-      lines.push(`  错过末班: ${d.last}`);
-      continue;
-    }
-    if (Array.isArray(d.next) && d.next.length) {
-      const tokenLine = formatTimeTokens(d.next);
-      if (tokenLine) lines.push(`  ${tokenLine}`);
-    } else {
-      if (status === "not_started") lines.push("  未到首班");
-      else if (status !== "ended") lines.push("  无可用班次");
+      if (status === "ended" && d.last) {
+        lines.push(`错过末班: ${d.last}`);
+        continue;
+      }
+      if (Array.isArray(d.next) && d.next.length) {
+        const tokenLine = formatTimeTokens(d.next);
+        if (tokenLine) lines.push(tokenLine);
+      } else {
+        if (status === "not_started") lines.push("未到首班");
+        else if (status !== "ended") lines.push("无可用班次");
+      }
     }
   }
-  return lines.join("\n");
+  return lines.map(cleanLineText).join("\n");
 }
 
 function buildStationTwoParts(stations) {
@@ -1154,10 +1348,10 @@ function buildStationTwoParts(stations) {
   });
 }
 
-function logStationParts(parts) {
+function logStationParts(parts, emitConsole = true) {
   const outLines = [];
   outLines.push("===QX_SUBWAY_RESULT_BEGIN===");
-  console.log("===QX_SUBWAY_RESULT_BEGIN===");
+  if (emitConsole) console.log("===QX_SUBWAY_RESULT_BEGIN===");
   parts.forEach((p, i) => {
     const n = i + 1;
     outLines.push(`---STATION#${n}---PART1---`);
@@ -1166,13 +1360,15 @@ function logStationParts(parts) {
     outLines.push(p.body || "");
     outLines.push(`---STATION#${n}---END---`);
 
-    console.log(`---STATION#${n}---PART1---`);
-    console.log(p.head || "");
-    console.log(`---STATION#${n}---PART2---`);
-    console.log(p.body || "");
-    console.log(`---STATION#${n}---END---`);
+    if (emitConsole) {
+      console.log(`---STATION#${n}---PART1---`);
+      console.log(p.head || "");
+      console.log(`---STATION#${n}---PART2---`);
+      console.log(p.body || "");
+      console.log(`---STATION#${n}---END---`);
+    }
   });
-  console.log("===QX_SUBWAY_RESULT_END===");
+  if (emitConsole) console.log("===QX_SUBWAY_RESULT_END===");
   outLines.push("===QX_SUBWAY_RESULT_END===");
   return outLines.join("\n");
 }
@@ -1182,12 +1378,15 @@ async function main() {
     throw new Error("This script must run in Quantumult X.");
   }
 
+  const backend = isBackendContext();
   const rawArg = pickInputArgument();
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
-  console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${String(rawArg == null ? "" : rawArg).replace(/\s+/g, " ").slice(0, 200)}'`);
-  for (const t of parseTrace) {
-    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
+  if (!backend) {
+    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${String(rawArg == null ? "" : rawArg).replace(/\s+/g, " ").slice(0, 200)}'`);
+    for (const t of parseTrace) {
+      console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
+    }
   }
   if (!parsed) {
     const rawType = rawArg == null ? "null" : typeof rawArg;
@@ -1205,7 +1404,9 @@ async function main() {
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
-  console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
+  if (!backend) {
+    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
+  }
 
   const now = new Date();
   const serviceDayCtx = serviceDayFor(now, SERVICE_DAY_CUTOFF_HOUR);
@@ -1214,9 +1415,9 @@ async function main() {
   const isWorkday = !!dayType.isWorkday;
   const weekKey = isoWeekKey(serviceDay);
 
-  const [mapObj, scheduleObj] = await Promise.all([
-    fetchJson(MAP_APP_URL),
-    loadScheduleWithWeeklyCache(isWorkday, weekKey)
+  const [mapObj, scheduleBundle] = await Promise.all([
+    loadMapWithWeeklyCache(weekKey),
+    loadScheduleBundleWithWeeklyCache(weekKey)
   ]);
 
   const catalog = buildCatalog(mapObj);
@@ -1226,18 +1427,23 @@ async function main() {
   const aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
   const nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
   if (!nearStations.length) {
-    console.log("===QX_SUBWAY_RESULT_BEGIN===");
-    console.log("---STATION#1---PART1---");
-    console.log("未找到附近站点");
-    console.log("---STATION#1---PART2---");
-    console.log("");
-    console.log("---STATION#1---END---");
-    console.log("===QX_SUBWAY_RESULT_END===");
-    doneOk("");
+    if (backend) {
+      doneBackendJson(["未找到附近站点", ""], 200);
+    } else {
+      console.log("===QX_SUBWAY_RESULT_BEGIN===");
+      console.log("---STATION#1---PART1---");
+      console.log("未找到附近站点");
+      console.log("---STATION#1---PART2---");
+      console.log("");
+      console.log("---STATION#1---END---");
+      console.log("===QX_SUBWAY_RESULT_END===");
+      doneOk("");
+    }
     return;
   }
 
-  const schedule = pickScheduleDay(scheduleObj, isWorkday) || scheduleObj;
+  const dayScheduleRaw = isWorkday ? scheduleBundle.weekday : scheduleBundle.weekend;
+  const schedule = pickScheduleDay(dayScheduleRaw, isWorkday) || dayScheduleRaw;
 
   const stationNorms = nearStations.map((s) => s.norm);
   const schByStation = collectScheduleForStations(schedule, stationNorms);
@@ -1336,9 +1542,18 @@ async function main() {
   }
 
   const parts = buildStationTwoParts(stationsOut);
-  const outputText = logStationParts(parts);
+  const outputText = logStationParts(parts, !backend);
 
-  doneOk(outputText);
+  if (backend) {
+    const flat = [];
+    for (const p of parts) {
+      flat.push(String((p && p.head) || ""));
+      flat.push(String((p && p.body) || ""));
+    }
+    doneBackendJson(flat, 200);
+  } else {
+    doneOk(outputText);
+  }
 }
 
 main().catch(doneErr);
