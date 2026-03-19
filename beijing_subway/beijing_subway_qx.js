@@ -16,6 +16,7 @@
 参数格式：
 - 仅需两个参数：lon + lat。
 - 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
+- 可选附加 amap_key 覆盖内置 key：lon=<value>&lat=<value>&amap_key=<YOUR_WEB_KEY>
 
 QX backend 配置示例：
 - 在 Quantumult X 配置文件中添加（按你的 host/path 修改）：
@@ -41,8 +42,9 @@ QX 重写模式示例（类似 BoxJs 的域名访问，不走 http_backend）：
 - 分隔符固定，便于下游脚本按段解析。
 
 缓存策略：
-- 时刻表按“服务日所在周（周一起始）”更新（每周首跑自动刷新，且同时刷新工作日/非工作日两份）。
-- 站点地图按“服务日所在周（周一起始）”更新（每周首跑自动刷新）。
+- 时刻表按“服务日所在半月”更新（1-15/16-月末），每半月首跑同时刷新工作日+非工作日两份。
+- 时刻表紧凑索引按半月缓存，命中后无需每次全量扫描线路。
+- 站点地图按“服务日所在月份”更新（每月首跑自动刷新）。
 - 节假日按“年份”更新（当年首次请求后复用本地缓存）。
 - 若刷新失败，自动回退到旧缓存，避免脚本不可用。
 */
@@ -57,8 +59,13 @@ const SCHEDULE_WEEKEND_URLS = [
   "https://cdn.jsdelivr.net/gh/BoyInTheSun/beijing-subway-schedule@main/train_schedule_all/schedule_weekend.json"
 ];
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
+const AMAP_WEB_KEY = "50ebc729a87ba59663ef08b377ec24d0";
+const AMAP_ENABLE_EXIT_ETA = true;
+const AMAP_TIMEOUT_MS = 7000;
+const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
+const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.2.0";
+const SCRIPT_VERSION = "1.4.0";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -69,8 +76,15 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
+const SCHEDULE_COMPACT_INDEX_VERSION = 1;
+const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
+const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
+const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
+const AMAP_KEY_CHECK_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:key_check:v1`;
+const AMAP_KEY_CHECK_TTL_MS = 24 * 3600 * 1000;
 
 const __MEMORY_STORE__ = {};
+const __AMAP_KEY_CHECK_CACHE__ = {};
 
 function isBackendContext() {
   return typeof $request !== "undefined" && $request && typeof $request.url === "string";
@@ -170,6 +184,15 @@ function writeLargeTextCache(baseKey, text) {
     len: s.length,
     updated_at: new Date().toISOString()
   });
+}
+
+function clearLargeTextCache(baseKey) {
+  const meta = readJsonCache(baseKey + ":meta");
+  const chunks = meta && Number.isFinite(Number(meta.chunks)) ? Number(meta.chunks) : 0;
+  for (let i = 0; i < chunks; i++) {
+    storeWrite(`${baseKey}:part:${i}`, "");
+  }
+  storeWrite(baseKey + ":meta", "");
 }
 
 function readLargeJsonCache(baseKey) {
@@ -282,6 +305,318 @@ async function fetchJsonWithFallback(urls, headers = {}, timeoutMs = HTTP_TIMEOU
   throw new Error("全部数据源请求失败:\n" + errs.join("\n"));
 }
 
+function buildQueryString(params) {
+  const arr = [];
+  for (const [k, v] of Object.entries(params || {})) {
+    if (v == null || v === "") continue;
+    arr.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+  }
+  return arr.join("&");
+}
+
+function parseLonLat(s) {
+  const m = String(s || "").trim().match(/^(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  const lon = Number(m[1]);
+  const lat = Number(m[2]);
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  return { lon, lat };
+}
+
+function extractAmapKeyOverride(arg) {
+  if (arg && typeof arg === "object") {
+    const ks = ["amap_key", "amapkey", "web_key"];
+    for (const k of ks) {
+      if (Object.prototype.hasOwnProperty.call(arg, k)) {
+        const v = String(arg[k] == null ? "" : arg[k]).trim();
+        if (v) return v;
+      }
+    }
+  }
+  const s = String(arg == null ? "" : arg).trim();
+  if (!s) return "";
+  let x = s;
+  if (x.includes("%")) {
+    try { x = decodeURIComponent(x); } catch (e) { /* ignore */ }
+  }
+  const m = x.match(/(?:^|[?&;,\s])(?:amap_key|amapkey|web_key)\s*=\s*([0-9a-zA-Z]+)/i);
+  return m ? String(m[1] || "").trim() : "";
+}
+
+function amapOkay(obj) {
+  return String(obj && obj.status) === "1";
+}
+
+function readAmapKeyCheckCacheObj() {
+  const obj = readJsonCache(AMAP_KEY_CHECK_CACHE_KEY);
+  if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+  return {};
+}
+
+function writeAmapKeyCheckCacheObj(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return;
+  writeJsonCache(AMAP_KEY_CHECK_CACHE_KEY, obj);
+}
+
+async function ensureAmapWebKeyUsable(amapKey) {
+  const k = String(amapKey || "").trim();
+  if (!k) return false;
+  if (Object.prototype.hasOwnProperty.call(__AMAP_KEY_CHECK_CACHE__, k)) {
+    return !!__AMAP_KEY_CHECK_CACHE__[k];
+  }
+  const nowTs = Date.now();
+  const persisted = readAmapKeyCheckCacheObj();
+  const pe = persisted[k];
+  if (pe && typeof pe === "object") {
+    const ts = Number(pe.ts);
+    const ok = !!pe.ok;
+    if (Number.isFinite(ts) && nowTs - ts >= 0 && nowTs - ts <= AMAP_KEY_CHECK_TTL_MS) {
+      __AMAP_KEY_CHECK_CACHE__[k] = ok;
+      return ok;
+    }
+  }
+
+  const url = `https://restapi.amap.com/v3/ip?${buildQueryString({ key: k })}`;
+  try {
+    const obj = await fetchJson(url, {}, AMAP_TIMEOUT_MS);
+    const ok = amapOkay(obj);
+    __AMAP_KEY_CHECK_CACHE__[k] = ok;
+    persisted[k] = { ok, ts: nowTs };
+    writeAmapKeyCheckCacheObj(persisted);
+    return ok;
+  } catch (e) {
+    __AMAP_KEY_CHECK_CACHE__[k] = false;
+    persisted[k] = { ok: false, ts: nowTs };
+    writeAmapKeyCheckCacheObj(persisted);
+    return false;
+  }
+}
+
+function parseAmapExitLabel(name) {
+  const s = String(name || "").trim();
+  // 例如: 国家图书馆地铁站-A口 / A口 / B2口
+  const m = s.match(/([A-Za-z]\d{0,2})\s*口/);
+  if (!m) return "";
+  return String(m[1] || "").toUpperCase();
+}
+
+function pickAmapDurationSeconds(obj) {
+  const cands = [
+    obj && obj.route && Array.isArray(obj.route.paths) && obj.route.paths[0] && obj.route.paths[0].duration,
+    obj && obj.data && Array.isArray(obj.data.paths) && obj.data.paths[0] && obj.data.paths[0].duration
+  ];
+  for (const x of cands) {
+    const v = Number(x);
+    if (Number.isFinite(v) && v >= 0) return v;
+  }
+  return null;
+}
+
+function secToRoundedMin(sec) {
+  const v = Number(sec);
+  if (!Number.isFinite(v) || v < 0) return null;
+  if (v === 0) return 0;
+  return Math.max(1, Math.round(v / 60));
+}
+
+function loadAmapExitCache() {
+  const raw = readLargeJsonCache(AMAP_EXIT_CACHE_KEY);
+  if (
+    raw &&
+    typeof raw === "object" &&
+    raw.stations &&
+    typeof raw.stations === "object" &&
+    !Array.isArray(raw.stations)
+  ) {
+    return raw;
+  }
+  return {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    stations: {}
+  };
+}
+
+function saveAmapExitCache(cacheObj) {
+  const obj = cacheObj && typeof cacheObj === "object" ? cacheObj : { version: 1, stations: {} };
+  if (!obj.stations || typeof obj.stations !== "object" || Array.isArray(obj.stations)) obj.stations = {};
+  obj.updated_at = new Date().toISOString();
+  writeLargeJsonCache(AMAP_EXIT_CACHE_KEY, obj);
+}
+
+function sanitizeAmapExitRows(rows) {
+  const map = {};
+  const out = [];
+  for (const r of rows || []) {
+    if (!r || typeof r !== "object") continue;
+    const lon = Number(r.lon);
+    const lat = Number(r.lat);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    const name = String(r.name || "").trim();
+    const label = String(r.label || "").trim().toUpperCase();
+    const key = `${label}|${lon.toFixed(6)},${lat.toFixed(6)}`;
+    if (map[key]) continue;
+    map[key] = 1;
+    out.push({ name, label, lon, lat });
+    if (out.length >= AMAP_EXIT_CACHE_MAX_PER_STATION) break;
+  }
+  return out;
+}
+
+function pickNearestExitFromRows(stationName, stationLon, stationLat, userLon, userLat, exits) {
+  const nStation = normName(stationName);
+  const rows = [];
+  for (const e of exits || []) {
+    if (!e || typeof e !== "object") continue;
+    const lon = Number(e.lon);
+    const lat = Number(e.lat);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) continue;
+    const name = String(e.name || "");
+    const label = String(e.label || "").trim().toUpperCase();
+    rows.push({
+      name,
+      label,
+      lon,
+      lat,
+      d_user: haversineM(userLat, userLon, lat, lon),
+      d_station: haversineM(stationLat, stationLon, lat, lon),
+      name_match: !!(nStation && normName(name).includes(nStation))
+    });
+  }
+  if (!rows.length) return null;
+  rows.sort((a, b) => {
+    const ma = Number(a.name_match);
+    const mb = Number(b.name_match);
+    if (ma !== mb) return mb - ma;
+    if (Math.abs(a.d_user - b.d_user) > 1e-6) return a.d_user - b.d_user;
+    return a.d_station - b.d_station;
+  });
+  return rows[0];
+}
+
+async function fetchAmapStationExitsFromWeb(stationName, stationLon, stationLat, amapKey) {
+  const allRows = [];
+  const baseParams = {
+    key: amapKey,
+    location: `${stationLon},${stationLat}`,
+    radius: AMAP_EXIT_SEARCH_RADIUS_M,
+    types: AMAP_EXIT_TYPECODE,
+    sortrule: "distance",
+    offset: 30,
+    page: 1,
+    extensions: "base"
+  };
+
+  const tries = [
+    Object.assign({}, baseParams, { keywords: `${stationName}地铁站` }),
+    Object.assign({}, baseParams, { keywords: stationName }),
+    Object.assign({}, baseParams)
+  ];
+
+  for (const params of tries) {
+    const url = `https://restapi.amap.com/v3/place/around?${buildQueryString(params)}`;
+    let obj = null;
+    try {
+      obj = await fetchJson(url, {}, AMAP_TIMEOUT_MS);
+    } catch (e) {
+      continue;
+    }
+    if (!amapOkay(obj) || !Array.isArray(obj.pois) || !obj.pois.length) continue;
+
+    const thisRows = [];
+    for (const p of obj.pois) {
+      if (!p || typeof p !== "object") continue;
+      const ll = parseLonLat(p.location);
+      if (!ll) continue;
+      const name = String(p.name || "");
+      const label = parseAmapExitLabel(name);
+      thisRows.push({
+        name,
+        label,
+        lon: ll.lon,
+        lat: ll.lat
+      });
+    }
+    if (thisRows.length) {
+      for (const r of thisRows) allRows.push(r);
+      // 性能优先：首个有效结果且已带出口字母时停止继续回退请求
+      if (thisRows.some((r) => String(r.label || "").trim() !== "")) break;
+    }
+  }
+  return sanitizeAmapExitRows(allRows);
+}
+
+async function fetchAmapWalkRideMinutes(originLon, originLat, destLon, destLat, amapKey) {
+  const origin = `${originLon},${originLat}`;
+  const destination = `${destLon},${destLat}`;
+  const walkUrl = `https://restapi.amap.com/v3/direction/walking?${buildQueryString({
+    key: amapKey, origin, destination
+  })}`;
+  const rideUrl = `https://restapi.amap.com/v4/direction/bicycling?${buildQueryString({
+    key: amapKey, origin, destination
+  })}`;
+
+  const [walkObj, rideObj] = await Promise.all([
+    fetchJson(walkUrl, {}, AMAP_TIMEOUT_MS).catch(() => null),
+    fetchJson(rideUrl, {}, AMAP_TIMEOUT_MS).catch(() => null)
+  ]);
+
+  const walkSec = pickAmapDurationSeconds(walkObj);
+  const rideSec = pickAmapDurationSeconds(rideObj);
+  return {
+    walk_min: secToRoundedMin(walkSec),
+    ride_min: secToRoundedMin(rideSec)
+  };
+}
+
+async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCacheCtx) {
+  if (!AMAP_ENABLE_EXIT_ETA || !amapKey) return null;
+  if (!station || !Number.isFinite(station.lon) || !Number.isFinite(station.lat)) return null;
+  const stationNorm = normName(station.name);
+  let exits = [];
+
+  if (
+    exitCacheCtx &&
+    exitCacheCtx.data &&
+    exitCacheCtx.data.stations &&
+    typeof exitCacheCtx.data.stations === "object"
+  ) {
+    const ent = exitCacheCtx.data.stations[stationNorm];
+    if (ent && Array.isArray(ent.exits) && ent.exits.length) {
+      exits = sanitizeAmapExitRows(ent.exits);
+    }
+  }
+
+  if (!exits.length) {
+    exits = await fetchAmapStationExitsFromWeb(station.name, station.lon, station.lat, amapKey);
+    if (
+      exits.length &&
+      exitCacheCtx &&
+      exitCacheCtx.data &&
+      exitCacheCtx.data.stations &&
+      typeof exitCacheCtx.data.stations === "object"
+    ) {
+      exitCacheCtx.data.stations[stationNorm] = {
+        station_name: station.name,
+        fetched_at: new Date().toISOString(),
+        exits
+      };
+      exitCacheCtx.dirty = true;
+    }
+  }
+
+  const exit = pickNearestExitFromRows(station.name, station.lon, station.lat, userLon, userLat, exits);
+  if (!exit) return null;
+  if (!exit.label) return null;
+
+  const eta = await fetchAmapWalkRideMinutes(userLon, userLat, exit.lon, exit.lat, amapKey);
+  return {
+    exit_label: String(exit.label || ""),
+    walk_min: eta.walk_min,
+    ride_min: eta.ride_min
+  };
+}
+
 function pad2(n) {
   const v = Math.trunc(Number(n));
   if (v >= 0 && v < 10) return "0" + String(v);
@@ -332,13 +667,13 @@ function ymd(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 }
 
-function isoWeekKey(d) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const day = x.getDay() || 7;
-  x.setDate(x.getDate() + 4 - day);
-  const yearStart = new Date(x.getFullYear(), 0, 1);
-  const weekNo = Math.ceil((((x - yearStart) / 86400000) + 1) / 7);
-  return `${x.getFullYear()}-W${pad2(weekNo)}`;
+function monthKey(d) {
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}`;
+}
+
+function halfMonthKey(d) {
+  const part = d.getDate() <= 15 ? "H1" : "H2";
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${part}`;
 }
 
 async function loadHolidayYearData(year) {
@@ -356,13 +691,13 @@ async function loadHolidayYearData(year) {
   return { data: remote, source: `holiday-cn:${year}` };
 }
 
-async function loadMapWithWeeklyCache(weekKey) {
-  const cacheKey = `${CACHE_KEY_PREFIX}:map:weekly`;
+async function loadMapWithMonthlyCache(periodKey) {
+  const cacheKey = `${CACHE_KEY_PREFIX}:map:monthly`;
   const cached = readLargeJsonCache(cacheKey);
   if (
     cached &&
     typeof cached === "object" &&
-    cached.week_key === weekKey &&
+    cached.period_key === periodKey &&
     cached.data &&
     typeof cached.data === "object" &&
     Array.isArray(cached.data.stations_data) &&
@@ -373,7 +708,7 @@ async function loadMapWithWeeklyCache(weekKey) {
   try {
     const remote = await fetchJson(MAP_APP_URL);
     writeLargeJsonCache(cacheKey, {
-      week_key: weekKey,
+      period_key: periodKey,
       updated_at: new Date().toISOString(),
       data: remote
     });
@@ -392,39 +727,126 @@ async function loadMapWithWeeklyCache(weekKey) {
   }
 }
 
-async function loadScheduleBundleWithWeeklyCache(weekKey) {
-  const cacheKey = `${CACHE_KEY_PREFIX}:schedule:weekly_bundle`;
-  const cached = readLargeJsonCache(cacheKey);
-  const hasValidBundle = !!(
-    cached &&
-    typeof cached === "object" &&
-    cached.data &&
-    typeof cached.data === "object" &&
-    cached.data.weekday &&
-    typeof cached.data.weekday === "object" &&
-    cached.data.weekend &&
-    typeof cached.data.weekend === "object"
-  );
+function scheduleKindFromWorkday(isWorkday) {
+  return isWorkday ? "weekday" : "weekend";
+}
 
-  if (hasValidBundle && cached.week_key === weekKey) {
-    return cached.data;
+function getScheduleUrlsByKind(dayKind) {
+  return dayKind === "weekend" ? SCHEDULE_WEEKEND_URLS : SCHEDULE_WEEKDAY_URLS;
+}
+
+function scheduleHalfMonthRawCacheKey() {
+  return `${CACHE_KEY_PREFIX}:schedule:halfmonth_bundle`;
+}
+
+function scheduleHalfMonthIndexCacheKey() {
+  return `${CACHE_KEY_PREFIX}:schedule_index:halfmonth_bundle`;
+}
+
+function isValidScheduleDayData(obj) {
+  return !!(obj && typeof obj === "object" && !Array.isArray(obj));
+}
+
+function isValidScheduleRawBundle(bundle) {
+  return !!(
+    bundle &&
+    typeof bundle === "object" &&
+    isValidScheduleDayData(bundle.weekday) &&
+    isValidScheduleDayData(bundle.weekend)
+  );
+}
+
+function isValidCompactScheduleIndex(idx) {
+  return !!(
+    idx &&
+    typeof idx === "object" &&
+    Number(idx.version) === SCHEDULE_COMPACT_INDEX_VERSION &&
+    Array.isArray(idx.line_dirs) &&
+    Array.isArray(idx.terminals) &&
+    Array.isArray(idx.tails) &&
+    idx.stations &&
+    typeof idx.stations === "object" &&
+    !Array.isArray(idx.stations)
+  );
+}
+
+function isValidCompactScheduleIndexBundle(bundle) {
+  return !!(
+    bundle &&
+    typeof bundle === "object" &&
+    isValidCompactScheduleIndex(bundle.weekday) &&
+    isValidCompactScheduleIndex(bundle.weekend)
+  );
+}
+
+function cleanupLegacyCachesOnce() {
+  const mark = readJsonCache(LEGACY_CLEANUP_ONCE_KEY);
+  if (mark && typeof mark === "object" && mark.done === true) return;
+  try {
+    // 旧版周缓存键与历史大包缓存键，改版后不再使用，清理可回收持久化空间。
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:map:weekly`);
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:schedule:weekly_bundle`);
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:schedule:weekday:weekly`);
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:schedule:weekend:weekly`);
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:schedule_index:weekday:weekly`);
+    clearLargeTextCache(`${CACHE_KEY_PREFIX}:schedule_index:weekend:weekly`);
+  } catch (e) {
+    // ignore
+  }
+  writeJsonCache(LEGACY_CLEANUP_ONCE_KEY, {
+    done: true,
+    at: new Date().toISOString()
+  });
+}
+
+async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey) {
+  const rawKey = scheduleHalfMonthRawCacheKey();
+  const idxKey = scheduleHalfMonthIndexCacheKey();
+
+  const cachedRawWrap = readLargeJsonCache(rawKey);
+  const cachedIdxWrap = readLargeJsonCache(idxKey);
+
+  const cachedRawData = cachedRawWrap && typeof cachedRawWrap === "object" && isValidScheduleRawBundle(cachedRawWrap.data)
+    ? cachedRawWrap.data
+    : (isValidScheduleRawBundle(cachedRawWrap) ? cachedRawWrap : null);
+  const cachedIdxData = cachedIdxWrap && typeof cachedIdxWrap === "object" && isValidCompactScheduleIndexBundle(cachedIdxWrap.data)
+    ? cachedIdxWrap.data
+    : (isValidCompactScheduleIndexBundle(cachedIdxWrap) ? cachedIdxWrap : null);
+
+  if (cachedIdxData && cachedIdxWrap && cachedIdxWrap.period_key === periodKey) {
+    return cachedIdxData;
   }
 
   try {
+    // 半月首跑：不区分日期类型，同时拉取并存储 weekday + weekend。
     const [weekdayRemote, weekendRemote] = await Promise.all([
-      fetchJsonWithFallback(SCHEDULE_WEEKDAY_URLS),
-      fetchJsonWithFallback(SCHEDULE_WEEKEND_URLS)
+      fetchJsonWithFallback(getScheduleUrlsByKind("weekday")),
+      fetchJsonWithFallback(getScheduleUrlsByKind("weekend"))
     ]);
-    const bundle = { weekday: weekdayRemote, weekend: weekendRemote };
-    writeLargeJsonCache(cacheKey, {
-      week_key: weekKey,
+    const rawBundle = { weekday: weekdayRemote, weekend: weekendRemote };
+    const idxBundle = {
+      weekday: buildCompactScheduleIndex(rawBundle.weekday),
+      weekend: buildCompactScheduleIndex(rawBundle.weekend)
+    };
+
+    writeLargeJsonCache(rawKey, {
+      period_key: periodKey,
       updated_at: new Date().toISOString(),
-      data: bundle
+      data: rawBundle
     });
-    return bundle;
+    writeLargeJsonCache(idxKey, {
+      period_key: periodKey,
+      updated_at: new Date().toISOString(),
+      data: idxBundle
+    });
+    return idxBundle;
   } catch (e) {
-    if (hasValidBundle) {
-      return cached.data;
+    if (cachedIdxData) return cachedIdxData;
+    if (cachedRawData) {
+      return {
+        weekday: buildCompactScheduleIndex(cachedRawData.weekday),
+        weekend: buildCompactScheduleIndex(cachedRawData.weekend)
+      };
     }
     throw e;
   }
@@ -932,27 +1354,42 @@ function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
   return out;
 }
 
-function pickScheduleDay(scheduleObj, isWorkday) {
-  if (!scheduleObj || typeof scheduleObj !== "object") return null;
-  if ("工作日" in scheduleObj || "双休日" in scheduleObj) {
-    return isWorkday ? scheduleObj["工作日"] : scheduleObj["双休日"];
-  }
-  if ("weekday" in scheduleObj || "weekend" in scheduleObj) {
-    return isWorkday ? scheduleObj.weekday : scheduleObj.weekend;
-  }
-  return scheduleObj;
+function internCompactId(dict, list, val) {
+  const key = String(val == null ? "" : val);
+  if (Object.prototype.hasOwnProperty.call(dict, key)) return dict[key];
+  const id = list.length;
+  list.push(key);
+  dict[key] = id;
+  return id;
 }
 
-function collectScheduleForStations(schedule, stationNorms) {
-  const out = {};
-  for (const n of stationNorms) out[n] = {};
-  if (!schedule || typeof schedule !== "object") return out;
-  const target = new Set(stationNorms);
+function buildCompactScheduleIndex(schedule) {
+  const lineDirIds = {};
+  const lineDirs = [];
+  const terminalIds = {};
+  const terminals = [];
+  const tailIds = {};
+  const tails = [];
+  const stations = {};
+  const normMemo = {};
+
+  if (!schedule || typeof schedule !== "object") {
+    return {
+      version: SCHEDULE_COMPACT_INDEX_VERSION,
+      line_dirs: [],
+      terminals: [],
+      tails: [],
+      stations: {}
+    };
+  }
 
   for (const [lineName, dirs] of Object.entries(schedule)) {
     if (!dirs || typeof dirs !== "object") continue;
     for (const [direction, trains] of Object.entries(dirs)) {
       if (!trains || typeof trains !== "object") continue;
+      const lineDirKey = `${lineName}|||${direction}`;
+      const lineDirId = internCompactId(lineDirIds, lineDirs, lineDirKey);
+
       for (const stops of Object.values(trains)) {
         if (!Array.isArray(stops)) continue;
         const parsed = [];
@@ -971,25 +1408,107 @@ function collectScheduleForStations(schedule, stationNorms) {
         }
         if (!parsed.length) continue;
 
-        const terminal = parsed[parsed.length - 1][0];
-        const terminalMin = parsed[parsed.length - 1][1];
-        const tail = [...parsed].reverse().slice(0, CROSSLINE_LOOKBACK).map((x) => x[0]);
+        const terminal = String(parsed[parsed.length - 1][0] || "").trim();
+        const terminalMin = Number(parsed[parsed.length - 1][1]);
+        const terminalId = terminal ? internCompactId(terminalIds, terminals, terminal) : -1;
+        const tailNames = parsed.slice().reverse().slice(0, CROSSLINE_LOOKBACK).map((x) => String(x[0] || ""));
+        const tailSig = tailNames.join("|");
+        const tailId = tailSig ? internCompactId(tailIds, tails, tailSig) : -1;
 
         for (const [stName, curMin] of parsed) {
-          const n = normName(stName);
-          if (!target.has(n)) continue;
-          const key = `${lineName}|||${direction}`;
-          if (!out[n][key]) out[n][key] = { minutes: [], terminals: {}, trips: [] };
-          const cell = out[n][key];
-          cell.minutes.push(curMin);
-          if (terminal) {
-            cell.terminals[terminal] = (cell.terminals[terminal] || 0) + 1;
+          const rawName = String(stName || "");
+          let stNorm = normMemo[rawName];
+          if (stNorm == null) {
+            stNorm = normName(rawName);
+            normMemo[rawName] = stNorm;
           }
-          let remain = null;
-          if (Number.isFinite(terminalMin - curMin)) remain = terminalMin - curMin;
-          cell.trips.push({ minute: curMin, terminal, tail, remain_min: remain });
+          if (!stNorm) continue;
+
+          if (!Object.prototype.hasOwnProperty.call(stations, stNorm)) {
+            stations[stNorm] = {};
+          }
+          if (!Object.prototype.hasOwnProperty.call(stations[stNorm], lineDirId)) {
+            stations[stNorm][lineDirId] = { m: [], t: [], r: [], z: [] };
+          }
+          const cell = stations[stNorm][lineDirId];
+          cell.m.push(curMin);
+          cell.t.push(terminalId);
+          const remain = terminalMin - curMin;
+          cell.r.push(Number.isFinite(remain) ? remain : -1);
+          cell.z.push(tailId);
         }
       }
+    }
+  }
+
+  for (const stCells of Object.values(stations)) {
+    for (const cell of Object.values(stCells)) {
+      const size = Array.isArray(cell.m) ? cell.m.length : 0;
+      if (size <= 1) continue;
+      const order = [];
+      for (let i = 0; i < size; i++) order.push(i);
+      order.sort((a, b) => Number(cell.m[a]) - Number(cell.m[b]));
+      cell.m = order.map((i) => Number(cell.m[i]));
+      cell.t = order.map((i) => Number(cell.t[i]));
+      cell.r = order.map((i) => Number(cell.r[i]));
+      cell.z = order.map((i) => Number(cell.z[i]));
+    }
+  }
+
+  const tailArray = tails.map((x) => String(x || "").split("|").filter(Boolean));
+  return {
+    version: SCHEDULE_COMPACT_INDEX_VERSION,
+    line_dirs: lineDirs,
+    terminals,
+    tails: tailArray,
+    stations
+  };
+}
+
+function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
+  const out = {};
+  for (const n of stationNorms) out[n] = {};
+  if (!isValidCompactScheduleIndex(indexObj)) return out;
+
+  const lineDirs = indexObj.line_dirs || [];
+  const terminals = indexObj.terminals || [];
+  const tails = indexObj.tails || [];
+  const stations = indexObj.stations || {};
+
+  for (const n of stationNorms) {
+    const row = stations[n];
+    if (!row || typeof row !== "object") continue;
+    for (const [lineDirIdRaw, cell] of Object.entries(row)) {
+      const lineDirId = Number(lineDirIdRaw);
+      const lineDirKey = lineDirs[lineDirId];
+      if (!lineDirKey) continue;
+
+      const mins = Array.isArray(cell && cell.m) ? cell.m : [];
+      const tIds = Array.isArray(cell && cell.t) ? cell.t : [];
+      const remains = Array.isArray(cell && cell.r) ? cell.r : [];
+      const zIds = Array.isArray(cell && cell.z) ? cell.z : [];
+
+      const restored = { minutes: [], terminals: {}, trips: [] };
+      for (let i = 0; i < mins.length; i++) {
+        const minute = Number(mins[i]);
+        if (!Number.isFinite(minute)) continue;
+        const tId = Number(tIds[i]);
+        const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+        const rv = Number(remains[i]);
+        const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
+        const tailId = Number(zIds[i]);
+        const tail = Number.isFinite(tailId) && tailId >= 0 && Array.isArray(tails[tailId]) ? tails[tailId] : [];
+
+        restored.minutes.push(minute);
+        if (terminal) restored.terminals[terminal] = (restored.terminals[terminal] || 0) + 1;
+        restored.trips.push({
+          minute,
+          terminal,
+          tail,
+          remain_min: remainMin
+        });
+      }
+      out[n][lineDirKey] = restored;
     }
   }
   return out;
@@ -1198,7 +1717,6 @@ function toSuperscriptNumber(v) {
 
 function formatTimeTokens(trips) {
   const out = [];
-  let prevHour = null;
   for (const t of trips || []) {
     const medal = String(t.medal || "");
     const timeS = String(t.time || "");
@@ -1209,9 +1727,7 @@ function formatTimeTokens(trips) {
     if (m) {
       const h = Number(m[1]);
       const mm = m[2];
-      if (prevHour != null && h === prevHour) showTime = mm;
-      else showTime = `${pad2(h)}:${mm}`;
-      prevHour = h;
+      showTime = `${pad2(h)}:${mm}`;
     }
     out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
@@ -1302,10 +1818,15 @@ function formatStationText(st) {
   const stationArrow = String(bearingToArrow8Emoji(st.relative_bearing_deg) || "↗️");
   let head = `${stationArrow}${st.name}`;
   if (Number.isFinite(st.distance_m)) head += ` 📏${Math.round(st.distance_m)}米`;
+  const access = st && st.access && typeof st.access === "object" ? st.access : null;
+  if (access && access.exit_label) head += ` ${String(access.exit_label)}`;
+  if (access && Number.isFinite(Number(access.walk_min))) head += ` 🚶${Math.round(Number(access.walk_min))}`;
+  if (access && Number.isFinite(Number(access.ride_min))) head += ` 🚴${Math.round(Number(access.ride_min))}`;
 
   const lines = [head];
   const grouped = groupDirectionsByLine(dirs);
-  for (const g of grouped) {
+  for (let gi = 0; gi < grouped.length; gi++) {
+    const g = grouped[gi];
     lines.push(`🚇${g.line}`);
     for (const d of g.directions) {
       const status = String(d.status || "");
@@ -1331,6 +1852,7 @@ function formatStationText(st) {
         else if (status !== "ended") lines.push("无可用班次");
       }
     }
+    if (gi < grouped.length - 1) lines.push("");
   }
   return lines.map(cleanLineText).join("\n");
 }
@@ -1404,6 +1926,8 @@ async function main() {
   }
   const inputLon = parsed.lon;
   const inputLat = parsed.lat;
+  const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
+  cleanupLegacyCachesOnce();
   if (!backend) {
     console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
   }
@@ -1413,19 +1937,30 @@ async function main() {
   const serviceDay = serviceDayCtx.date;
   const dayType = await isWorkdayByHolidayCN(serviceDay);
   const isWorkday = !!dayType.isWorkday;
-  const weekKey = isoWeekKey(serviceDay);
+  const dayKind = scheduleKindFromWorkday(isWorkday);
+  const mapPeriodKey = monthKey(serviceDay);
+  const schedulePeriodKey = halfMonthKey(serviceDay);
 
-  const [mapObj, scheduleBundle] = await Promise.all([
-    loadMapWithWeeklyCache(weekKey),
-    loadScheduleBundleWithWeeklyCache(weekKey)
+  let mapObj = null;
+  let scheduleIndexBundle = null;
+  let scheduleIndex = null;
+  [mapObj, scheduleIndexBundle] = await Promise.all([
+    loadMapWithMonthlyCache(mapPeriodKey),
+    loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKey)
   ]);
+  scheduleIndex = scheduleIndexBundle && typeof scheduleIndexBundle === "object"
+    ? scheduleIndexBundle[dayKind]
+    : null;
+  scheduleIndexBundle = null;
 
-  const catalog = buildCatalog(mapObj);
+  let catalog = buildCatalog(mapObj);
+  mapObj = null;
   const stationLinesIndex = buildStationLineIndex(catalog);
   const stationCoordIndex = buildStationCoordIndex(catalog);
 
   const aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
   const nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
+  catalog = null;
   if (!nearStations.length) {
     if (backend) {
       doneBackendJson(["未找到附近站点", ""], 200);
@@ -1442,11 +1977,30 @@ async function main() {
     return;
   }
 
-  const dayScheduleRaw = isWorkday ? scheduleBundle.weekday : scheduleBundle.weekend;
-  const schedule = pickScheduleDay(dayScheduleRaw, isWorkday) || dayScheduleRaw;
-
   const stationNorms = nearStations.map((s) => s.norm);
-  const schByStation = collectScheduleForStations(schedule, stationNorms);
+  const schByStation = collectScheduleForStationsFromCompactIndex(scheduleIndex, stationNorms);
+  scheduleIndex = null;
+  const accessByNorm = {};
+  const amapUsable = AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
+  const exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
+  if (amapUsable) {
+    const tasks = nearStations.map(async (st) => {
+      try {
+        const access = await fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx);
+        return [st.norm, access];
+      } catch (e) {
+        return [st.norm, null];
+      }
+    });
+    const pairs = await Promise.all(tasks);
+    for (const [n, access] of pairs) {
+      if (!access || typeof access !== "object") continue;
+      accessByNorm[n] = access;
+    }
+    if (exitCacheCtx && exitCacheCtx.dirty) {
+      saveAmapExitCache(exitCacheCtx.data);
+    }
+  }
 
   const stationsOut = [];
   for (const st of nearStations) {
@@ -1458,6 +2012,7 @@ async function main() {
       distance_m: st.distance_m,
       line_names: st.line_names,
       station_ids: st.station_ids,
+      access: accessByNorm[st.norm] || null,
       runtime: { directions: [] }
     };
 
