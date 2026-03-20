@@ -808,12 +808,18 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
   }
 
   const exit = pickNearestExitFromRows(station.name, station.lon, station.lat, userLon, userLat, exits);
-  if (!exit) return null;
-  if (!exit.label) return null;
-
-  const eta = await fetchAmapWalkRideMinutes(userLon, userLat, exit.lon, exit.lat, amapKey);
+  // 若未匹配到出口，回退到站点中心估算，避免多站时只有一站有路途用时。
+  const destLon = exit && Number.isFinite(exit.lon) ? Number(exit.lon) : Number(station.lon);
+  const destLat = exit && Number.isFinite(exit.lat) ? Number(exit.lat) : Number(station.lat);
+  const directDist =
+    exit && Number.isFinite(Number(exit.d_user))
+      ? Number(exit.d_user)
+      : haversineM(userLat, userLon, destLat, destLon);
+  const eta = await fetchAmapWalkRideMinutes(userLon, userLat, destLon, destLat, amapKey);
+  if (!Number.isFinite(Number(eta.walk_min)) && !Number.isFinite(Number(eta.ride_min))) return null;
   return {
-    exit_label: String(exit.label || ""),
+    exit_label: String((exit && exit.label) || ""),
+    distance_m: Number.isFinite(directDist) ? directDist : null,
     walk_min: eta.walk_min,
     ride_min: eta.ride_min
   };
@@ -1424,6 +1430,19 @@ function discoverGlobalArgCandidates() {
   }
 }
 
+function wantVerboseLog(arg) {
+  try {
+    if (arg && typeof arg === "object" && !Array.isArray(arg)) {
+      const v = arg.debug;
+      if (v === true || String(v).toLowerCase() === "true" || String(v) === "1") return true;
+    }
+  } catch (e) {
+    // ignore
+  }
+  const s = String(arg == null ? "" : arg);
+  return /(?:^|[?&;,\s])debug\s*=\s*(?:1|true|yes)(?:$|[?&;,\s])/i.test(s);
+}
+
 function buildCatalog(mapObj) {
   if (!mapObj || !Array.isArray(mapObj.stations_data) || !Array.isArray(mapObj.lines_data)) {
     throw new Error("map-app.json format unexpected");
@@ -1933,7 +1952,7 @@ function formatTimeTokens(trips) {
     }
     out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
-  return out.join(" ");
+  return out.join("  ");
 }
 
 function hhmmToServiceMin(hhmm, cutoff = 4) {
@@ -2012,18 +2031,38 @@ function groupDirectionsByLine(directions) {
 }
 
 function cleanLineText(s) {
-  return String(s == null ? "" : s).replace(/[ \t]{2,}/g, " ").trim();
+  const raw = String(s == null ? "" : s).trim();
+  // 时间行允许更宽的间隔，提升可读性。
+  const supers = "⁰¹²³⁴⁵⁶⁷⁸⁹⁻";
+  const token = `[🥇🥈🥉🏅]?\\d{2}:\\d{2}[${supers}]*`;
+  const timeLineRe = new RegExp(`^(?:${token})(?:\\s{2,}${token})+$`);
+  if (timeLineRe.test(raw)) {
+    return raw.replace(/\t+/g, " ");
+  }
+  return raw.replace(/[ \t]{2,}/g, " ");
 }
 
 function formatStationText(st) {
   const dirs = (st.runtime && st.runtime.directions) || [];
   const stationArrow = String(bearingToArrow8Emoji(st.relative_bearing_deg) || "↗️");
-  let head = `${stationArrow}${st.name}`;
-  if (Number.isFinite(st.distance_m)) head += ` 📏${Math.round(st.distance_m)}米`;
   const access = st && st.access && typeof st.access === "object" ? st.access : null;
-  if (access && access.exit_label) head += ` ${String(access.exit_label)}`;
-  if (access && Number.isFinite(Number(access.walk_min))) head += ` 🚶${Math.round(Number(access.walk_min))}`;
-  if (access && Number.isFinite(Number(access.ride_min))) head += ` 🚴${Math.round(Number(access.ride_min))}`;
+  const hasAccessDistance = !!(access && Number.isFinite(Number(access.distance_m)));
+  const hasAccessEta = !!(
+    access &&
+    (Number.isFinite(Number(access.walk_min)) || Number.isFinite(Number(access.ride_min)))
+  );
+  const useApiStyle = !!(access && (hasAccessDistance || hasAccessEta || String(access.exit_label || "").trim() !== ""));
+
+  let head = `${stationArrow}${st.name}`;
+  if (useApiStyle) {
+    if (access && access.exit_label) head += `${String(access.exit_label)}`;
+    if (hasAccessDistance) head += ` ${Math.round(Number(access.distance_m))}米`;
+    else if (Number.isFinite(st.distance_m)) head += ` ${Math.round(st.distance_m)}米`;
+  } else {
+    if (Number.isFinite(st.distance_m)) head += ` 📏${Math.round(st.distance_m)}米`;
+  }
+  if (access && Number.isFinite(Number(access.walk_min))) head += ` 🚶‍♀️${Math.round(Number(access.walk_min))}`;
+  if (access && Number.isFinite(Number(access.ride_min))) head += ` 🚴‍♀️${Math.round(Number(access.ride_min))}`;
 
   const lines = [head];
   const grouped = groupDirectionsByLine(dirs);
@@ -2104,15 +2143,20 @@ async function main() {
 
   const backend = isBackendContext();
   const rawArg = pickInputArgument();
+  const verboseActiveLog = !backend && wantVerboseLog(rawArg);
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
   const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
   if (!backend) {
-    console.log(
-      `[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${redactSensitiveText(String(rawArg == null ? "" : rawArg)).replace(/\s+/g, " ").slice(0, 200)}'`
-    );
-    for (const t of parseTrace) {
-      console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
+    if (verboseActiveLog) {
+      console.log(
+        `[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${redactSensitiveText(String(rawArg == null ? "" : rawArg)).replace(/\s+/g, " ").slice(0, 200)}'`
+      );
+      for (const t of parseTrace) {
+        console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
+      }
+    } else {
+      console.log(`[INFO][v${SCRIPT_VERSION}] 主动模式启动`);
     }
   }
   let resolvedCoord = parsed;
@@ -2121,9 +2165,11 @@ async function main() {
       const ipLoc = await resolveLonLatByIp(amapKey);
       if (ipLoc && isValidLonLat(ipLoc.lon, ipLoc.lat)) {
         resolvedCoord = { lon: Number(ipLoc.lon), lat: Number(ipLoc.lat) };
-        console.log(
-          `[ARG_TRACE][v${SCRIPT_VERSION}] 无入参，IP定位回退成功: lon=${resolvedCoord.lon}, lat=${resolvedCoord.lat}, source=${ipLoc.source}${ipLoc.from_cache ? ":cache" : ""}, coord=${ipLoc.coord_hint}`
-        );
+        if (!backend) {
+          console.log(
+            `[INFO][v${SCRIPT_VERSION}] 无入参，IP定位成功 source=${ipLoc.source}${ipLoc.from_cache ? ":cache" : ""}`
+          );
+        }
       }
     }
   }
@@ -2148,7 +2194,7 @@ async function main() {
   const inputLat = Number(resolvedCoord.lat);
   cleanupLegacyCachesOnce();
   if (!backend) {
-    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
+    console.log(`[INFO][v${SCRIPT_VERSION}] 坐标已就绪 lon=${inputLon.toFixed(6)} lat=${inputLat.toFixed(6)}`);
   }
 
   if (!isInServiceRegionBJHebei(inputLon, inputLat)) {
@@ -2327,12 +2373,17 @@ async function main() {
   }
 
   const parts = buildStationTwoParts(stationsOut);
-  const outputText = logStationParts(parts, !backend);
+  const outputText = logStationParts(parts, !!verboseActiveLog);
   const flat = flattenStationParts(parts);
 
   if (backend) {
     doneBackendJson(flat, 200);
   } else {
+    const dirCount = stationsOut.reduce((acc, st) => {
+      const x = st && st.runtime && Array.isArray(st.runtime.directions) ? st.runtime.directions.length : 0;
+      return acc + x;
+    }, 0);
+    console.log(`[INFO][v${SCRIPT_VERSION}] 结果站点=${stationsOut.length} 方向=${dirCount} 通知=1`);
     notifyByBackendFlatList(flat, "北京地铁出发时刻测算");
     doneOk(outputText);
   }
