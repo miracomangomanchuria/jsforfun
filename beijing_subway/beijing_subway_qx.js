@@ -67,12 +67,11 @@ const AMAP_TIMEOUT_MS = 7000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.5.0";
+const SCRIPT_VERSION = "1.5.1";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
 const MAX_STATIONS = 8;
-const SERVICE_DAY_CUTOFF_HOUR = 4;
 const HTTP_TIMEOUT_MS = 60000;
 const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
@@ -85,7 +84,7 @@ const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
 const AMAP_KEY_CHECK_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:key_check:v1`;
 const AMAP_KEY_CHECK_TTL_MS = 24 * 3600 * 1000;
 const IP_LOC_CACHE_KEY = `${CACHE_KEY_PREFIX}:ip_loc:v1`;
-const IP_LOC_TTL_MS = 20 * 60 * 1000;
+const IP_LOC_TTL_MS = 60 * 1000;
 const IP_GEO_TIMEOUT_MS = 5000;
 // 服务区边界（北京+河北并集，来源: OpenStreetMap/Nominatim 行政区 bounding box，2026-03-20）
 const SERVICE_REGION_MIN_LAT = 36.0483981;
@@ -811,6 +810,7 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
   // 若未匹配到出口，回退到站点中心估算，避免多站时只有一站有路途用时。
   const destLon = exit && Number.isFinite(exit.lon) ? Number(exit.lon) : Number(station.lon);
   const destLat = exit && Number.isFinite(exit.lat) ? Number(exit.lat) : Number(station.lat);
+  const destBearing = bearingDeg(userLat, userLon, destLat, destLon);
   const directDist =
     exit && Number.isFinite(Number(exit.d_user))
       ? Number(exit.d_user)
@@ -820,6 +820,8 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
   return {
     exit_label: String((exit && exit.label) || ""),
     distance_m: Number.isFinite(directDist) ? directDist : null,
+    bearing_deg: Number.isFinite(destBearing) ? destBearing : null,
+    uses_exit_coord: !!(exit && Number.isFinite(exit.lon) && Number.isFinite(exit.lat)),
     walk_min: eta.walk_min,
     ride_min: eta.ride_min
   };
@@ -844,15 +846,6 @@ function parseHHMMLoose(s) {
   return [hh, mm];
 }
 
-function parseHHMM(s) {
-  const m = String(s || "").trim().match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
-  const hh = Number(m[1]);
-  const mm = Number(m[2]);
-  if (Number.isNaN(hh) || Number.isNaN(mm) || hh < 0 || hh > 29 || mm < 0 || mm > 59) return null;
-  return [hh, mm];
-}
-
 function normName(s) {
   return String(s || "")
     .replace(/\s+/g, "")
@@ -862,13 +855,80 @@ function normName(s) {
     .replace(/[-－—].*$/, "");
 }
 
-function serviceDayFor(now, cutoffHour = 4) {
-  const d = new Date(now.getTime());
-  if (d.getHours() < cutoffHour) {
-    d.setDate(d.getDate() - 1);
-    return { date: d, shifted: true };
+function dateOnly(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0);
+}
+
+function addDays(d, n) {
+  const x = new Date(d.getTime());
+  x.setDate(x.getDate() + n);
+  return x;
+}
+
+function minuteToDate(baseDate, minute) {
+  return new Date(baseDate.getTime() + Number(minute) * 60000);
+}
+
+function minuteBoundsFromCell(cell) {
+  if (!cell || typeof cell !== "object") return null;
+  const minutes = Array.isArray(cell.minutes) ? cell.minutes : [];
+  let first = Number.POSITIVE_INFINITY;
+  let last = Number.NEGATIVE_INFINITY;
+  for (const x of minutes) {
+    const m = Number(x);
+    if (!Number.isFinite(m)) continue;
+    if (m < first) first = m;
+    if (m > last) last = m;
   }
-  return { date: d, shifted: false };
+  if (!Number.isFinite(first) || !Number.isFinite(last)) return null;
+  return {
+    first_min: first,
+    last_min: last,
+    first_hhmm: hhmmStr(Math.floor(first / 60) % 24, first % 60),
+    last_hhmm: hhmmStr(Math.floor(last / 60) % 24, last % 60)
+  };
+}
+
+function chooseServiceContextForDirection(now, prevDate, currDate, prevCell, currCell) {
+  const prevStart = dateOnly(prevDate);
+  const currStart = dateOnly(currDate);
+  const prevMeta = minuteBoundsFromCell(prevCell);
+  const currMeta = minuteBoundsFromCell(currCell);
+
+  let prevCutoff = null;
+  if (prevMeta) {
+    // 动态切日点：上一运营日末班 + 60 分钟。
+    prevCutoff = minuteToDate(prevStart, prevMeta.last_min + 60);
+  }
+
+  if (prevMeta && prevCutoff && now.getTime() <= prevCutoff.getTime()) {
+    return {
+      cell: prevCell,
+      meta: prevMeta,
+      service_date: prevStart,
+      use_prev_service_day: true,
+      prev_cutoff_at: prevCutoff
+    };
+  }
+  if (currMeta) {
+    return {
+      cell: currCell,
+      meta: currMeta,
+      service_date: currStart,
+      use_prev_service_day: false,
+      prev_cutoff_at: prevCutoff
+    };
+  }
+  if (prevMeta) {
+    return {
+      cell: prevCell,
+      meta: prevMeta,
+      service_date: prevStart,
+      use_prev_service_day: true,
+      prev_cutoff_at: prevCutoff
+    };
+  }
+  return null;
 }
 
 function ymd(d) {
@@ -1780,42 +1840,56 @@ function bearingToArrow8Emoji(bearing) {
 
 function bearingToDirectionIndex8(bearing) {
   const b = ((Number(bearing) % 360) + 360) % 360;
-  const scaled = (b + 22.5) / 45;
-  const nearestInt = Math.round(scaled);
+  const centers = [0, 45, 90, 135, 180, 225, 270, 315];
   const EPS = 1e-10;
+  let bestIdx = 0;
+  let bestDelta = Number.POSITIVE_INFINITY;
 
-  // 恰好落在角平分线(22.5/67.5/...)时，优先取更“正”的方向(N/E/S/W)
-  if (Math.abs(scaled - nearestInt) <= EPS) {
-    const upper = ((nearestInt % 8) + 8) % 8;
-    const lower = ((nearestInt - 1) % 8 + 8) % 8;
-    if (upper % 2 === 0) return upper;
-    return lower;
+  function angDelta(a, c) {
+    const d = Math.abs(a - c) % 360;
+    return d > 180 ? 360 - d : d;
   }
 
-  return ((Math.floor(scaled) % 8) + 8) % 8;
+  for (let i = 0; i < centers.length; i++) {
+    const d = angDelta(b, centers[i]);
+    if (d + EPS < bestDelta) {
+      bestDelta = d;
+      bestIdx = i;
+      continue;
+    }
+    // 边界并列时，优先更“正”的方向（东南西北）。
+    if (Math.abs(d - bestDelta) <= EPS) {
+      const curCard = i % 2 === 0;
+      const bestCard = bestIdx % 2 === 0;
+      if (curCard && !bestCard) bestIdx = i;
+    }
+  }
+  return bestIdx;
 }
 
 function pickDirectionArrow8(directionText, toText, fromLat, fromLon, terminalNames, stationCoordIndex) {
+  if (Number.isFinite(fromLat) && Number.isFinite(fromLon) && Array.isArray(terminalNames) && terminalNames.length) {
+    let vecX = 0;
+    let vecY = 0;
+    for (const name of terminalNames) {
+      const key = normName(name);
+      const tgt = stationCoordIndex[key];
+      if (!tgt) continue;
+      const br = bearingDeg(fromLat, fromLon, tgt[0], tgt[1]);
+      const rad = (br * Math.PI) / 180;
+      vecX += Math.sin(rad);
+      vecY += Math.cos(rad);
+    }
+    if (Math.abs(vecX) >= 1e-9 || Math.abs(vecY) >= 1e-9) {
+      const br = ((Math.atan2(vecX, vecY) * 180) / Math.PI + 360) % 360;
+      return bearingToArrow8(br);
+    }
+  }
   const a1 = textToArrow8(directionText);
   if (a1) return a1;
   const a2 = textToArrow8(toText);
   if (a2) return a2;
-  if (!Number.isFinite(fromLat) || !Number.isFinite(fromLon) || !Array.isArray(terminalNames) || !terminalNames.length) return "";
-
-  let vecX = 0;
-  let vecY = 0;
-  for (const name of terminalNames) {
-    const key = normName(name);
-    const tgt = stationCoordIndex[key];
-    if (!tgt) continue;
-    const br = bearingDeg(fromLat, fromLon, tgt[0], tgt[1]);
-    const rad = (br * Math.PI) / 180;
-    vecX += Math.sin(rad);
-    vecY += Math.cos(rad);
-  }
-  if (Math.abs(vecX) < 1e-9 && Math.abs(vecY) < 1e-9) return "";
-  const br = ((Math.atan2(vecX, vecY) * 180) / Math.PI + 360) % 360;
-  return bearingToArrow8(br);
+  return "";
 }
 
 function detectCrosslineDisplay(curLine, tailStops, stationLinesIndex) {
@@ -1844,16 +1918,12 @@ function detectCrosslineDisplay(curLine, tailStops, stationLinesIndex) {
   return null;
 }
 
-function boundaryStatus(now, firstHHMM, lastHHMM, cutoffHour = 4) {
-  const t1 = parseHHMM(firstHHMM);
-  const t2 = parseHHMM(lastHHMM);
-  if (!t1 || !t2) return "unknown";
-  const sd = serviceDayFor(now, cutoffHour).date;
-  const f = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate(), t1[0] % 24, t1[1], 0, 0);
-  const l = new Date(sd.getFullYear(), sd.getMonth(), sd.getDate(), t2[0] % 24, t2[1], 0, 0);
-  if (l < f) l.setDate(l.getDate() + 1);
-  if (now < f) return "not_started";
-  if (now > l) return "ended";
+function boundaryStatusByMinuteRange(now, serviceDate, firstMin, lastMin) {
+  if (!serviceDate || !Number.isFinite(firstMin) || !Number.isFinite(lastMin)) return "unknown";
+  const firstDt = minuteToDate(serviceDate, firstMin);
+  const lastDt = minuteToDate(serviceDate, lastMin);
+  if (now < firstDt) return "not_started";
+  if (now > lastDt) return "ended";
   return "running";
 }
 
@@ -1894,8 +1964,11 @@ function buildTerminalsForNext(nextTrips, tripsAll) {
   }
   if (nextTerms.length <= 1) return { terms: [], enableMedals: false };
   const ordered = terminalOrderByRemain(tripsAll || [], nextTerms);
-  const medals = ["🥇", "🥈", "🥉"];
-  const out = ordered.map((name, i) => ({ name, medal: medals[i] || "🏅", count: 0 }));
+  const out = ordered.map((name, i) => ({
+    name,
+    marker: toSubscriptNumber(i + 1),
+    count: 0
+  }));
   return { terms: out, enableMedals: true };
 }
 
@@ -1906,7 +1979,7 @@ function applyMedalsToTimes(trips, medals, enable, otherMedal = "") {
   }
   const mm = {};
   for (const m of medals) {
-    if (m && m.name) mm[String(m.name)] = String(m.medal || "");
+    if (m && m.name) mm[String(m.name)] = String(m.marker || "");
   }
   for (const t of trips) {
     const term = String(t.terminal || "");
@@ -1918,10 +1991,10 @@ function terminalLabel(terminals) {
   if (!Array.isArray(terminals) || !terminals.length) return "";
   if (terminals.length === 1) {
     const n = terminals[0].name || "";
-    return n ? `${n}方向` : "";
+    return n ? `${n}` : "";
   }
-  const parts = terminals.map((t) => `${t.medal || ""}${t.name || ""}`.trim()).filter(Boolean);
-  return `${parts.join(" ")} 方向`;
+  const parts = terminals.map((t) => `${t.marker || ""}${t.name || ""}`.trim()).filter(Boolean);
+  return `${parts.join(" ")}`;
 }
 
 function toSuperscriptNumber(v) {
@@ -1929,6 +2002,18 @@ function toSuperscriptNumber(v) {
     "0": "⁰", "1": "¹", "2": "²", "3": "³", "4": "⁴",
     "5": "⁵", "6": "⁶", "7": "⁷", "8": "⁸", "9": "⁹",
     "-": "⁻"
+  };
+  const s = String(Math.trunc(Number(v)));
+  let out = "";
+  for (const ch of s) out += map[ch] || ch;
+  return out;
+}
+
+function toSubscriptNumber(v) {
+  const map = {
+    "0": "₀", "1": "₁", "2": "₂", "3": "₃", "4": "₄",
+    "5": "₅", "6": "₆", "7": "₇", "8": "₈", "9": "₉",
+    "-": "₋"
   };
   const s = String(Math.trunc(Number(v)));
   let out = "";
@@ -1954,36 +2039,7 @@ function formatTimeTokens(trips) {
     }
     out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
-  return out.join(hasMedal ? " " : "  ");
-}
-
-function hhmmToServiceMin(hhmm, cutoff = 4) {
-  const t = parseHHMM(hhmm);
-  if (!t) return null;
-  let v = t[0] * 60 + t[1];
-  if (t[0] < cutoff) v += 1440;
-  return v;
-}
-
-function serviceMinToHHMM(v) {
-  if (!Number.isFinite(v)) return null;
-  const x = ((Math.trunc(v) % 1440) + 1440) % 1440;
-  return `${pad2(Math.floor(x / 60))}:${pad2(x % 60)}`;
-}
-
-function summarizeStationFirstLast(dirs, cutoff = 4) {
-  const firsts = [];
-  const lasts = [];
-  for (const d of dirs || []) {
-    const f = hhmmToServiceMin(d.first, cutoff);
-    const l = hhmmToServiceMin(d.last, cutoff);
-    if (f != null) firsts.push(f);
-    if (l != null) lasts.push(l);
-  }
-  return {
-    first: firsts.length ? serviceMinToHHMM(Math.min(...firsts)) : null,
-    last: lasts.length ? serviceMinToHHMM(Math.max(...lasts)) : null
-  };
+  return out.join(hasMedal ? "   " : "    ");
 }
 
 function directionBearingDeg(d) {
@@ -2034,11 +2090,18 @@ function groupDirectionsByLine(directions) {
 
 function cleanLineText(s) {
   const raw = String(s == null ? "" : s).trim();
-  // 时间行允许更宽的间隔，提升可读性。
+  // 时间行/方向行允许更宽的间隔，提升可读性。
   const supers = "⁰¹²³⁴⁵⁶⁷⁸⁹⁻";
-  const token = `[🥇🥈🥉🏅]?\\d{2}:\\d{2}[${supers}]*`;
+  const subs = "₀₁₂₃₄₅₆₇₈₉₋";
+  const token = `[${subs}]?\\d{2}:\\d{2}[${supers}]*`;
   const timeLineRe = new RegExp(`^(?:${token})(?:\\s{2,}${token})+$`);
+  const dirLineRe = new RegExp(
+    `^[↑↗→↘↓↙←↖]\\s.+\\s{1,}(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2})(?:\\s+(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2}))?$`
+  );
   if (timeLineRe.test(raw)) {
+    return raw.replace(/\t+/g, " ");
+  }
+  if (dirLineRe.test(raw)) {
     return raw.replace(/\t+/g, " ");
   }
   return raw.replace(/[ \t]{2,}/g, " ");
@@ -2046,7 +2109,6 @@ function cleanLineText(s) {
 
 function formatStationText(st) {
   const dirs = (st.runtime && st.runtime.directions) || [];
-  const stationArrow = String(bearingToArrow8Emoji(st.relative_bearing_deg) || "↗️");
   const access = st && st.access && typeof st.access === "object" ? st.access : null;
   const hasAccessDistance = !!(access && Number.isFinite(Number(access.distance_m)));
   const hasAccessEta = !!(
@@ -2054,6 +2116,11 @@ function formatStationText(st) {
     (Number.isFinite(Number(access.walk_min)) || Number.isFinite(Number(access.ride_min)))
   );
   const useApiStyle = !!(access && (hasAccessDistance || hasAccessEta || String(access.exit_label || "").trim() !== ""));
+  const stationBearing =
+    useApiStyle && access && access.uses_exit_coord && Number.isFinite(Number(access.bearing_deg))
+      ? Number(access.bearing_deg)
+      : Number(st.relative_bearing_deg);
+  const stationArrow = String(bearingToArrow8Emoji(stationBearing) || "↗️");
 
   let head = `${stationArrow}${st.name}`;
   if (useApiStyle) {
@@ -2077,10 +2144,25 @@ function formatStationText(st) {
       if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
       else toTag = String(d.to || d.key || "").trim();
       if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
-
+      const hasMarkerInTag = /[₀₁₂₃₄₅₆₇₈₉]/.test(toTag);
       let row = `${d.arrow || "↘"} ${toTag || "未知方向"}`;
-      if (d.first) row += ` 🌅${d.first}`;
-      if (d.last) row += ` 🌃${d.last}`;
+      const leadGap = hasMarkerInTag ? " " : "   ";
+      const termCount = Array.isArray(d.terminals) ? d.terminals.length : 0;
+      // 终点较多时压缩方向行：按该方向“动态切日点”决定展示末班或首班。
+      if (termCount >= 3) {
+        const usePrevServiceDay = !!d.use_prev_service_day;
+        if (usePrevServiceDay) {
+          if (d.last) row += `${leadGap}🌃${d.last}`;
+          else if (d.first) row += `${leadGap}🌅${d.first}`;
+        } else {
+          if (d.first) row += `${leadGap}🌅${d.first}`;
+          else if (d.last) row += `${leadGap}🌃${d.last}`;
+        }
+      } else {
+        if (d.first && d.last) row += `${leadGap}🌅${d.first} 🌃${d.last}`;
+        else if (d.first) row += `${leadGap}🌅${d.first}`;
+        else if (d.last) row += `${leadGap}🌃${d.last}`;
+      }
       lines.push(row);
 
       if (status === "ended" && d.last) {
@@ -2211,25 +2293,34 @@ async function main() {
   }
 
   const now = new Date();
-  const serviceDayCtx = serviceDayFor(now, SERVICE_DAY_CUTOFF_HOUR);
-  const serviceDay = serviceDayCtx.date;
-  const dayType = await isWorkdayByHolidayCN(serviceDay);
-  const isWorkday = !!dayType.isWorkday;
-  const dayKind = scheduleKindFromWorkday(isWorkday);
-  const mapPeriodKey = monthKey(serviceDay);
-  const schedulePeriodKey = halfMonthKey(serviceDay);
+  const today = dateOnly(now);
+  const prevDay = addDays(today, -1);
+
+  const [dayTypePrev, dayTypeToday] = await Promise.all([
+    isWorkdayByHolidayCN(prevDay),
+    isWorkdayByHolidayCN(today)
+  ]);
+  const dayKindPrev = scheduleKindFromWorkday(!!dayTypePrev.isWorkday);
+  const dayKindToday = scheduleKindFromWorkday(!!dayTypeToday.isWorkday);
+
+  const mapPeriodKey = monthKey(today);
+  const schedulePeriodKeyToday = halfMonthKey(today);
 
   let mapObj = null;
-  let scheduleIndexBundle = null;
-  let scheduleIndex = null;
-  [mapObj, scheduleIndexBundle] = await Promise.all([
+  let scheduleBundleToday = null;
+  [mapObj, scheduleBundleToday] = await Promise.all([
     loadMapWithMonthlyCache(mapPeriodKey),
-    loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKey)
+    loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKeyToday)
   ]);
-  scheduleIndex = scheduleIndexBundle && typeof scheduleIndexBundle === "object"
-    ? scheduleIndexBundle[dayKind]
+  const scheduleBundlePrev = scheduleBundleToday;
+
+  const scheduleIndexToday = scheduleBundleToday && typeof scheduleBundleToday === "object"
+    ? scheduleBundleToday[dayKindToday]
     : null;
-  scheduleIndexBundle = null;
+  const scheduleIndexPrev = scheduleBundlePrev && typeof scheduleBundlePrev === "object"
+    ? scheduleBundlePrev[dayKindPrev]
+    : null;
+  scheduleBundleToday = null;
 
   let catalog = buildCatalog(mapObj);
   mapObj = null;
@@ -2256,8 +2347,8 @@ async function main() {
   }
 
   const stationNorms = nearStations.map((s) => s.norm);
-  const schByStation = collectScheduleForStationsFromCompactIndex(scheduleIndex, stationNorms);
-  scheduleIndex = null;
+  const schByStationPrev = collectScheduleForStationsFromCompactIndex(scheduleIndexPrev, stationNorms);
+  const schByStationToday = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
   const accessByNorm = {};
   const amapUsable = AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
   const exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
@@ -2294,22 +2385,30 @@ async function main() {
       runtime: { directions: [] }
     };
 
-    const rows = schByStation[st.norm] || {};
-    for (const [key, cell] of Object.entries(rows)) {
+    const rowsPrev = schByStationPrev[st.norm] || {};
+    const rowsToday = schByStationToday[st.norm] || {};
+    const rowKeys = Array.from(new Set([...Object.keys(rowsPrev), ...Object.keys(rowsToday)]));
+    rowKeys.sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
+
+    for (const key of rowKeys) {
       const [lineName, direction] = key.split("|||");
-      const minutes = (cell.minutes || []).map((x) => Number(x)).filter((x) => Number.isFinite(x)).sort((a, b) => a - b);
+      const prevCell = rowsPrev[key] || null;
+      const todayCell = rowsToday[key] || null;
+      const picked = chooseServiceContextForDirection(now, prevDay, today, prevCell, todayCell);
+      if (!picked || !picked.cell || !picked.meta) continue;
+
+      const cell = picked.cell;
       const trips = (cell.trips || []).filter((x) => x && Number.isFinite(Number(x.minute)));
       const tripsSorted = trips.slice().sort((a, b) => Number(a.minute) - Number(b.minute));
 
-      let first = null;
-      let last = null;
-      if (minutes.length) {
-        first = hhmmStr(Math.floor(minutes[0] / 60) % 24, minutes[0] % 60);
-        const mLast = minutes[minutes.length - 1];
-        last = hhmmStr(Math.floor(mLast / 60) % 24, mLast % 60);
-      }
-
-      const status = first && last ? boundaryStatus(now, first, last, SERVICE_DAY_CUTOFF_HOUR) : "unknown";
+      const first = picked.meta.first_hhmm;
+      const last = picked.meta.last_hhmm;
+      const status = boundaryStatusByMinuteRange(
+        now,
+        picked.service_date,
+        picked.meta.first_min,
+        picked.meta.last_min
+      );
 
       let lastTerminal = "";
       for (let i = tripsSorted.length - 1; i >= 0; i--) {
@@ -2322,11 +2421,11 @@ async function main() {
 
       const nextTrips = [];
       let tails = [];
-      const dayStart = new Date(serviceDay.getFullYear(), serviceDay.getMonth(), serviceDay.getDate(), 0, 0, 0, 0);
+      const dayStart = picked.service_date;
       for (const t of tripsSorted) {
         const minute = Number(t.minute);
         if (!Number.isFinite(minute)) continue;
-        const dtv = new Date(dayStart.getTime() + minute * 60000);
+        const dtv = minuteToDate(dayStart, minute);
         if (dtv >= now) {
           nextTrips.push({
             time: hhmmStr(dtv.getHours(), dtv.getMinutes()),
@@ -2346,7 +2445,7 @@ async function main() {
         toLabel = terminalLabel(tm.terms);
       } else {
         const one = nextTrips.find((x) => String(x.terminal || "").trim());
-        toLabel = one ? `${one.terminal}方向` : String(direction || "unknown");
+        toLabel = one ? `${one.terminal}` : String(direction || "unknown");
       }
 
       const tailStops = tails.length ? tails : (tripsSorted[0] && tripsSorted[0].tail) || [];
@@ -2366,7 +2465,8 @@ async function main() {
         last,
         terminals: tm.terms,
         last_terminal: lastTerminal,
-        arrow
+        arrow,
+        use_prev_service_day: !!picked.use_prev_service_day
       });
     }
 
