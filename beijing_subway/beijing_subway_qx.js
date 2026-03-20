@@ -2,7 +2,8 @@
 用途说明：
 - Quantumult X 北京地铁出发时刻测算脚本。
 - 输入经纬度（lon/lat），输出最近站点及各方向后续班次信息。
-- 不发送通知，仅输出结构化日志，并通过 $done 返回纯文本结果。
+- backend/重写模式返回扁平列表；主动运行模式会发送 QX 通知（正文为该扁平列表文本化结果）。
+- 若经纬度超出京冀边界，仅返回/通知一行提示，不盲目计算。
 
 数据源致敬（感谢提供者）：
 - BoyInTheSun（北京地铁开源时刻表与查询站点）：
@@ -14,9 +15,10 @@
   https://github.com/NateScarlet/holiday-cn
 
 参数格式：
-- 仅需两个参数：lon + lat。
+- backend/重写调用建议传 lon + lat。
 - 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
 - 可选附加 amap_key 覆盖内置 key：lon=<value>&lat=<value>&amap_key=<YOUR_WEB_KEY>
+- 主动运行/定时任务若未传参数，将自动走 IP 反查定位。
 
 QX backend 配置示例：
 - 在 Quantumult X 配置文件中添加（按你的 host/path 修改）：
@@ -65,7 +67,7 @@ const AMAP_TIMEOUT_MS = 7000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.4.0";
+const SCRIPT_VERSION = "1.5.0";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -82,12 +84,27 @@ const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
 const AMAP_KEY_CHECK_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:key_check:v1`;
 const AMAP_KEY_CHECK_TTL_MS = 24 * 3600 * 1000;
+const IP_LOC_CACHE_KEY = `${CACHE_KEY_PREFIX}:ip_loc:v1`;
+const IP_LOC_TTL_MS = 20 * 60 * 1000;
+const IP_GEO_TIMEOUT_MS = 5000;
+// 服务区边界（北京+河北并集，来源: OpenStreetMap/Nominatim 行政区 bounding box，2026-03-20）
+const SERVICE_REGION_MIN_LAT = 36.0483981;
+const SERVICE_REGION_MAX_LAT = 42.6176407;
+const SERVICE_REGION_MIN_LON = 113.4564701;
+const SERVICE_REGION_MAX_LON = 119.9528500;
 
 const __MEMORY_STORE__ = {};
 const __AMAP_KEY_CHECK_CACHE__ = {};
 
 function isBackendContext() {
   return typeof $request !== "undefined" && $request && typeof $request.url === "string";
+}
+
+function redactSensitiveText(v) {
+  let s = String(v == null ? "" : v);
+  s = s.replace(/((?:amap_key|amapkey|web_key)\s*=\s*)([0-9a-zA-Z]+)/ig, "$1***");
+  s = s.replace(/(\"(?:amap_key|amapkey|web_key)\"\s*:\s*\")([^\"]+)(\")/ig, "$1***$3");
+  return s;
 }
 
 function storeRead(key) {
@@ -242,6 +259,38 @@ function doneBackendJson(obj, statusCode = 200) {
   });
 }
 
+function flattenStationParts(parts) {
+  const flat = [];
+  for (const p of parts || []) {
+    flat.push(String((p && p.head) || ""));
+    flat.push(String((p && p.body) || ""));
+  }
+  return flat;
+}
+
+function flatListToNotifyText(flat) {
+  const out = [];
+  for (let i = 0; i < (flat || []).length; i += 2) {
+    const head = String(flat[i] == null ? "" : flat[i]).trim();
+    const body = String(flat[i + 1] == null ? "" : flat[i + 1]).trim();
+    if (head) out.push(head);
+    if (body) out.push(body);
+    if (i + 2 < flat.length) out.push("");
+  }
+  return out.join("\n").trim();
+}
+
+function notifyByBackendFlatList(flat, title = "北京地铁出发时刻测算") {
+  if (typeof $notify !== "function") return;
+  const text = flatListToNotifyText(flat);
+  if (!text) return;
+  try {
+    $notify(title, "", text);
+  } catch (e) {
+    // ignore
+  }
+}
+
 function doneErr(err) {
   const eMsg = err && err.message ? String(err.message) : String(err);
   const eStack = err && err.stack ? String(err.stack) : "";
@@ -319,8 +368,29 @@ function parseLonLat(s) {
   if (!m) return null;
   const lon = Number(m[1]);
   const lat = Number(m[2]);
-  if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+  if (!isValidLonLat(lon, lat)) return null;
   return { lon, lat };
+}
+
+function isValidLonLat(lon, lat) {
+  if (!Number.isFinite(Number(lon)) || !Number.isFinite(Number(lat))) return false;
+  const xLon = Number(lon);
+  const xLat = Number(lat);
+  if (xLon < -180 || xLon > 180) return false;
+  if (xLat < -90 || xLat > 90) return false;
+  return true;
+}
+
+function isInServiceRegionBJHebei(lon, lat) {
+  if (!isValidLonLat(lon, lat)) return false;
+  const xLon = Number(lon);
+  const xLat = Number(lat);
+  return !(
+    xLon < SERVICE_REGION_MIN_LON ||
+    xLon > SERVICE_REGION_MAX_LON ||
+    xLat < SERVICE_REGION_MIN_LAT ||
+    xLat > SERVICE_REGION_MAX_LAT
+  );
 }
 
 function extractAmapKeyOverride(arg) {
@@ -390,6 +460,138 @@ async function ensureAmapWebKeyUsable(amapKey) {
     writeAmapKeyCheckCacheObj(persisted);
     return false;
   }
+}
+
+function parseAmapRectangleCenter(rectangle) {
+  const s = String(rectangle || "").trim();
+  if (!s) return null;
+  const m = s.match(
+    /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*;\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/
+  );
+  if (!m) return null;
+  const lon1 = Number(m[1]);
+  const lat1 = Number(m[2]);
+  const lon2 = Number(m[3]);
+  const lat2 = Number(m[4]);
+  const lon = (lon1 + lon2) / 2;
+  const lat = (lat1 + lat2) / 2;
+  if (!isValidLonLat(lon, lat)) return null;
+  return { lon, lat };
+}
+
+function loadIpLocateCacheObj() {
+  const obj = readJsonCache(IP_LOC_CACHE_KEY);
+  if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+  return null;
+}
+
+function saveIpLocateCacheObj(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return;
+  writeJsonCache(IP_LOC_CACHE_KEY, entry);
+}
+
+async function locateByIpViaAmap(amapKey) {
+  const k = String(amapKey || "").trim();
+  if (!k) return null;
+  const url = `https://restapi.amap.com/v3/ip?${buildQueryString({ key: k })}`;
+  const obj = await fetchJson(url, {}, AMAP_TIMEOUT_MS);
+  if (!amapOkay(obj)) return null;
+
+  const center = parseAmapRectangleCenter(obj.rectangle);
+  if (center) {
+    return {
+      lon: center.lon,
+      lat: center.lat,
+      source: "amap_ip",
+      coord_hint: "gcj02"
+    };
+  }
+
+  const direct = parseLonLat(String(obj.location || ""));
+  if (direct && isValidLonLat(direct.lon, direct.lat)) {
+    return {
+      lon: direct.lon,
+      lat: direct.lat,
+      source: "amap_ip",
+      coord_hint: "gcj02"
+    };
+  }
+  return null;
+}
+
+async function locateByIpViaIpApiCom() {
+  // ip-api 免费层仅支持 HTTP。
+  const obj = await fetchJson("http://ip-api.com/json/?fields=status,message,lat,lon", {}, IP_GEO_TIMEOUT_MS);
+  if (!obj || String(obj.status || "") !== "success") return null;
+  const lon = Number(obj.lon);
+  const lat = Number(obj.lat);
+  if (!isValidLonLat(lon, lat)) return null;
+  return {
+    lon,
+    lat,
+    source: "ip_api_com",
+    coord_hint: "wgs84"
+  };
+}
+
+async function locateByIpViaIpInfoIo() {
+  const obj = await fetchJson("https://ipinfo.io/json", {}, IP_GEO_TIMEOUT_MS);
+  if (!obj || typeof obj !== "object") return null;
+  const loc = String(obj.loc || "").trim();
+  const m = loc.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (!m) return null;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  if (!isValidLonLat(lon, lat)) return null;
+  return {
+    lon,
+    lat,
+    source: "ipinfo_io",
+    coord_hint: "wgs84"
+  };
+}
+
+async function resolveLonLatByIp(amapKey) {
+  const nowTs = Date.now();
+  const cached = loadIpLocateCacheObj();
+  if (
+    cached &&
+    isValidLonLat(cached.lon, cached.lat) &&
+    Number.isFinite(Number(cached.ts)) &&
+    nowTs - Number(cached.ts) >= 0 &&
+    nowTs - Number(cached.ts) <= IP_LOC_TTL_MS
+  ) {
+    return {
+      lon: Number(cached.lon),
+      lat: Number(cached.lat),
+      source: String(cached.source || "cache"),
+      coord_hint: String(cached.coord_hint || "unknown"),
+      from_cache: true
+    };
+  }
+
+  const tries = [
+    () => locateByIpViaAmap(amapKey),
+    () => locateByIpViaIpApiCom(),
+    () => locateByIpViaIpInfoIo()
+  ];
+  for (const fn of tries) {
+    try {
+      const got = await fn();
+      if (!got || !isValidLonLat(got.lon, got.lat)) continue;
+      saveIpLocateCacheObj({
+        ts: nowTs,
+        lon: Number(got.lon),
+        lat: Number(got.lat),
+        source: String(got.source || "ip"),
+        coord_hint: String(got.coord_hint || "unknown")
+      });
+      return Object.assign({}, got, { from_cache: false });
+    } catch (e) {
+      // ignore and continue fallback chain
+    }
+  }
+  return null;
 }
 
 function parseAmapExitLabel(name) {
@@ -953,10 +1155,10 @@ function parseArgument(arg, trace) {
   function pv(v) {
     try {
       if (v == null) return "";
-      if (typeof v === "object") return JSON.stringify(v).slice(0, 160);
-      return String(v).replace(/\s+/g, " ").slice(0, 160);
+      if (typeof v === "object") return redactSensitiveText(JSON.stringify(v)).slice(0, 160);
+      return redactSensitiveText(String(v)).replace(/\s+/g, " ").slice(0, 160);
     } catch (e) {
-      return String(v).slice(0, 160);
+      return redactSensitiveText(String(v)).slice(0, 160);
     }
   }
   function fromObj(o) {
@@ -1169,10 +1371,10 @@ function argumentChannelDebug(rawArg) {
   function pv(v) {
     try {
       if (v == null) return "";
-      if (typeof v === "object") return JSON.stringify(v).slice(0, 120);
-      return String(v).replace(/\s+/g, " ").slice(0, 120);
+      if (typeof v === "object") return redactSensitiveText(JSON.stringify(v)).slice(0, 120);
+      return redactSensitiveText(String(v)).replace(/\s+/g, " ").slice(0, 120);
     } catch (e) {
-      return String(v).slice(0, 120);
+      return redactSensitiveText(String(v)).slice(0, 120);
     }
   }
   const out = [];
@@ -1194,10 +1396,10 @@ function discoverGlobalArgCandidates() {
   function pv(v) {
     try {
       if (v == null) return "";
-      if (typeof v === "object") return JSON.stringify(v).slice(0, 100);
-      return String(v).replace(/\s+/g, " ").slice(0, 100);
+      if (typeof v === "object") return redactSensitiveText(JSON.stringify(v)).slice(0, 100);
+      return redactSensitiveText(String(v)).replace(/\s+/g, " ").slice(0, 100);
     } catch (e) {
-      return String(v).slice(0, 100);
+      return redactSensitiveText(String(v)).slice(0, 100);
     }
   }
   try {
@@ -1904,13 +2106,28 @@ async function main() {
   const rawArg = pickInputArgument();
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
+  const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
   if (!backend) {
-    console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${String(rawArg == null ? "" : rawArg).replace(/\s+/g, " ").slice(0, 200)}'`);
+    console.log(
+      `[ARG_TRACE][v${SCRIPT_VERSION}] picked_type=${rawArg == null ? "null" : typeof rawArg}, picked='${redactSensitiveText(String(rawArg == null ? "" : rawArg)).replace(/\s+/g, " ").slice(0, 200)}'`
+    );
     for (const t of parseTrace) {
       console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] ${t}`);
     }
   }
-  if (!parsed) {
+  let resolvedCoord = parsed;
+  if (!resolvedCoord) {
+    if (!backend) {
+      const ipLoc = await resolveLonLatByIp(amapKey);
+      if (ipLoc && isValidLonLat(ipLoc.lon, ipLoc.lat)) {
+        resolvedCoord = { lon: Number(ipLoc.lon), lat: Number(ipLoc.lat) };
+        console.log(
+          `[ARG_TRACE][v${SCRIPT_VERSION}] 无入参，IP定位回退成功: lon=${resolvedCoord.lon}, lat=${resolvedCoord.lat}, source=${ipLoc.source}${ipLoc.from_cache ? ":cache" : ""}, coord=${ipLoc.coord_hint}`
+        );
+      }
+    }
+  }
+  if (!resolvedCoord) {
     const rawType = rawArg == null ? "null" : typeof rawArg;
     let preview = "";
     try {
@@ -1918,18 +2135,31 @@ async function main() {
     } catch (e) {
       preview = String(rawArg);
     }
-    preview = preview.replace(/\s+/g, " ").slice(0, 200);
+    preview = redactSensitiveText(preview).replace(/\s+/g, " ").slice(0, 200);
     const dbg = argumentChannelDebug(rawArg);
     const glb = discoverGlobalArgCandidates();
     const traceLine = parseTrace.join(" -> ").slice(0, 1200);
-    throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
+    if (backend) {
+      throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
+    }
+    throw new Error(`参数错误且IP反查失败：请传 lon,lat 或配置可用 IP 定位网络 | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
   }
-  const inputLon = parsed.lon;
-  const inputLat = parsed.lat;
-  const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
+  const inputLon = Number(resolvedCoord.lon);
+  const inputLat = Number(resolvedCoord.lat);
   cleanupLegacyCachesOnce();
   if (!backend) {
     console.log(`[ARG_TRACE][v${SCRIPT_VERSION}] 解析成功: lon=${inputLon}, lat=${inputLat}`);
+  }
+
+  if (!isInServiceRegionBJHebei(inputLon, inputLat)) {
+    const msg = "📍所在区域超出北京地铁服务范围";
+    if (backend) {
+      doneBackendJson([msg], 200);
+    } else {
+      notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
+      doneOk(msg);
+    }
+    return;
   }
 
   const now = new Date();
@@ -2098,15 +2328,12 @@ async function main() {
 
   const parts = buildStationTwoParts(stationsOut);
   const outputText = logStationParts(parts, !backend);
+  const flat = flattenStationParts(parts);
 
   if (backend) {
-    const flat = [];
-    for (const p of parts) {
-      flat.push(String((p && p.head) || ""));
-      flat.push(String((p && p.body) || ""));
-    }
     doneBackendJson(flat, 200);
   } else {
+    notifyByBackendFlatList(flat, "北京地铁出发时刻测算");
     doneOk(outputText);
   }
 }
