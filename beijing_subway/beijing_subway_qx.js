@@ -2148,15 +2148,16 @@ function formatStationText(st) {
       let row = `${d.arrow || "↘"} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
       const termCount = Array.isArray(d.terminals) ? d.terminals.length : 0;
-      // 终点较多时压缩方向行：按该方向“动态切日点”决定展示末班或首班。
+      // 终点较多时压缩方向行：
+      // - 仅在“未到首班”时显示首班（用户要看什么时候开始有车）
+      // - 其余状态显示末班（用户更关心什么时候停运）
       if (termCount >= 3) {
-        const usePrevServiceDay = !!d.use_prev_service_day;
-        if (usePrevServiceDay) {
-          if (d.last) row += `${leadGap}🌃${d.last}`;
-          else if (d.first) row += `${leadGap}🌅${d.first}`;
-        } else {
+        if (status === "not_started") {
           if (d.first) row += `${leadGap}🌅${d.first}`;
           else if (d.last) row += `${leadGap}🌃${d.last}`;
+        } else {
+          if (d.last) row += `${leadGap}🌃${d.last}`;
+          else if (d.first) row += `${leadGap}🌅${d.first}`;
         }
       } else {
         if (d.first && d.last) row += `${leadGap}🌅${d.first} 🌃${d.last}`;
