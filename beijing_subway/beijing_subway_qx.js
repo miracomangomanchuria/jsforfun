@@ -1938,8 +1938,10 @@ function toSuperscriptNumber(v) {
 
 function formatTimeTokens(trips) {
   const out = [];
+  let hasMedal = false;
   for (const t of trips || []) {
     const medal = String(t.medal || "");
+    if (medal) hasMedal = true;
     const timeS = String(t.time || "");
     const inMin = Number(t.in_min);
     if (!Number.isFinite(inMin) || !timeS) continue;
@@ -1952,7 +1954,7 @@ function formatTimeTokens(trips) {
     }
     out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
-  return out.join("  ");
+  return out.join(hasMedal ? " " : "  ");
 }
 
 function hhmmToServiceMin(hhmm, cutoff = 4) {
