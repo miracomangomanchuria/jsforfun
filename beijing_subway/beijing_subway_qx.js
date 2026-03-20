@@ -48,6 +48,7 @@ QX 重写模式示例（类似 BoxJs 的域名访问，不走 http_backend）：
 - 时刻表紧凑索引按半月缓存，命中后无需每次全量扫描线路。
 - 站点地图按“服务日所在月份”更新（每月首跑自动刷新）。
 - 节假日按“年份”更新（当年首次请求后复用本地缓存）。
+- 高德“站点出口 + 路途时间（步行/骑行）”支持短期缓存，减少重复请求等待。
 - 若刷新失败，自动回退到旧缓存，避免脚本不可用。
 */
 
@@ -67,20 +68,25 @@ const AMAP_TIMEOUT_MS = 7000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.5.1";
+const SCRIPT_VERSION = "1.5.6";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
-const MAX_STATIONS = 8;
+const MAX_STATIONS = 2;
+const NEAR_STATION_SKIP_ACCESS_M = 50;
+const AMAP_ACCESS_MAX_STATIONS = 2;
 const HTTP_TIMEOUT_MS = 60000;
 const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 1;
+const SCHEDULE_COMPACT_INDEX_VERSION = 2;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
+const AMAP_ACCESS_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:access_eta:v1`;
+const AMAP_ACCESS_CACHE_TTL_MS = 3 * 60 * 1000;
+const AMAP_ACCESS_CACHE_MAX_PER_STATION = 96;
 const AMAP_KEY_CHECK_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:key_check:v1`;
 const AMAP_KEY_CHECK_TTL_MS = 24 * 3600 * 1000;
 const IP_LOC_CACHE_KEY = `${CACHE_KEY_PREFIX}:ip_loc:v1`;
@@ -91,6 +97,11 @@ const SERVICE_REGION_MIN_LAT = 36.0483981;
 const SERVICE_REGION_MAX_LAT = 42.6176407;
 const SERVICE_REGION_MIN_LON = 113.4564701;
 const SERVICE_REGION_MAX_LON = 119.9528500;
+
+const BJ_DISTRICT_PREFIX_2CHAR = new Set([
+  "东城", "西城", "朝阳", "丰台", "海淀", "房山", "通州", "顺义",
+  "昌平", "大兴", "怀柔", "平谷", "密云", "延庆"
+]);
 
 const __MEMORY_STORE__ = {};
 const __AMAP_KEY_CHECK_CACHE__ = {};
@@ -645,6 +656,89 @@ function saveAmapExitCache(cacheObj) {
   writeLargeJsonCache(AMAP_EXIT_CACHE_KEY, obj);
 }
 
+function quantizeCoord(v, digits = 4) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "";
+  const p = Math.pow(10, digits);
+  return String(Math.round(n * p) / p);
+}
+
+function makeAccessCacheLocKey(userLon, userLat) {
+  const qLon = quantizeCoord(userLon, 4);
+  const qLat = quantizeCoord(userLat, 4);
+  if (!qLon || !qLat) return "";
+  return `${qLon},${qLat}`;
+}
+
+function loadAmapAccessCache() {
+  const raw = readLargeJsonCache(AMAP_ACCESS_CACHE_KEY);
+  if (
+    raw &&
+    typeof raw === "object" &&
+    raw.stations &&
+    typeof raw.stations === "object" &&
+    !Array.isArray(raw.stations)
+  ) {
+    return raw;
+  }
+  return {
+    version: 1,
+    updated_at: new Date().toISOString(),
+    stations: {}
+  };
+}
+
+function saveAmapAccessCache(cacheObj) {
+  const obj = cacheObj && typeof cacheObj === "object" ? cacheObj : { version: 1, stations: {} };
+  if (!obj.stations || typeof obj.stations !== "object" || Array.isArray(obj.stations)) obj.stations = {};
+  obj.updated_at = new Date().toISOString();
+  writeLargeJsonCache(AMAP_ACCESS_CACHE_KEY, obj);
+}
+
+function pickAccessCacheHit(accessCacheCtx, stationNorm, locKey, nowTs) {
+  if (!accessCacheCtx || !accessCacheCtx.data || !accessCacheCtx.data.stations) return null;
+  const byStation = accessCacheCtx.data.stations[stationNorm];
+  if (!byStation || typeof byStation !== "object" || Array.isArray(byStation)) return null;
+  const ent = byStation[locKey];
+  if (!ent || typeof ent !== "object") return null;
+  const ts = Number(ent.ts);
+  if (!Number.isFinite(ts) || nowTs - ts < 0 || nowTs - ts > AMAP_ACCESS_CACHE_TTL_MS) return null;
+  const access = ent.access;
+  if (!access || typeof access !== "object") return null;
+  return access;
+}
+
+function writeAccessCacheEntry(accessCacheCtx, stationNorm, locKey, accessObj, nowTs) {
+  if (!accessCacheCtx || !accessCacheCtx.data || !accessCacheCtx.data.stations) return;
+  if (!stationNorm || !locKey || !accessObj || typeof accessObj !== "object") return;
+  const stations = accessCacheCtx.data.stations;
+  if (!stations[stationNorm] || typeof stations[stationNorm] !== "object" || Array.isArray(stations[stationNorm])) {
+    stations[stationNorm] = {};
+  }
+  const byStation = stations[stationNorm];
+  byStation[locKey] = {
+    ts: Number(nowTs),
+    access: accessObj
+  };
+
+  const keys = Object.keys(byStation);
+  if (keys.length > AMAP_ACCESS_CACHE_MAX_PER_STATION) {
+    keys.sort((a, b) => {
+      const ta = Number(byStation[a] && byStation[a].ts);
+      const tb = Number(byStation[b] && byStation[b].ts);
+      if (!Number.isFinite(ta) && !Number.isFinite(tb)) return 0;
+      if (!Number.isFinite(ta)) return -1;
+      if (!Number.isFinite(tb)) return 1;
+      return ta - tb;
+    });
+    const dropN = keys.length - AMAP_ACCESS_CACHE_MAX_PER_STATION;
+    for (let i = 0; i < dropN; i++) {
+      delete byStation[keys[i]];
+    }
+  }
+  accessCacheCtx.dirty = true;
+}
+
 function sanitizeAmapExitRows(rows) {
   const map = {};
   const out = [];
@@ -770,10 +864,16 @@ async function fetchAmapWalkRideMinutes(originLon, originLat, destLon, destLat, 
   };
 }
 
-async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCacheCtx) {
+async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCacheCtx, accessCacheCtx) {
   if (!AMAP_ENABLE_EXIT_ETA || !amapKey) return null;
   if (!station || !Number.isFinite(station.lon) || !Number.isFinite(station.lat)) return null;
   const stationNorm = normName(station.name);
+  const nowTs = Date.now();
+  const locKey = makeAccessCacheLocKey(userLon, userLat);
+  if (stationNorm && locKey) {
+    const cached = pickAccessCacheHit(accessCacheCtx, stationNorm, locKey, nowTs);
+    if (cached) return cached;
+  }
   let exits = [];
 
   if (
@@ -817,7 +917,7 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
       : haversineM(userLat, userLon, destLat, destLon);
   const eta = await fetchAmapWalkRideMinutes(userLon, userLat, destLon, destLat, amapKey);
   if (!Number.isFinite(Number(eta.walk_min)) && !Number.isFinite(Number(eta.ride_min))) return null;
-  return {
+  const out = {
     exit_label: String((exit && exit.label) || ""),
     distance_m: Number.isFinite(directDist) ? directDist : null,
     bearing_deg: Number.isFinite(destBearing) ? destBearing : null,
@@ -825,6 +925,10 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
     walk_min: eta.walk_min,
     ride_min: eta.ride_min
   };
+  if (stationNorm && locKey) {
+    writeAccessCacheEntry(accessCacheCtx, stationNorm, locKey, out, nowTs);
+  }
+  return out;
 }
 
 function pad2(n) {
@@ -1031,6 +1135,7 @@ function isValidCompactScheduleIndex(idx) {
     Number(idx.version) === SCHEDULE_COMPACT_INDEX_VERSION &&
     Array.isArray(idx.line_dirs) &&
     Array.isArray(idx.terminals) &&
+    Array.isArray(idx.next_stations) &&
     Array.isArray(idx.tails) &&
     idx.stations &&
     typeof idx.stations === "object" &&
@@ -1649,6 +1754,8 @@ function buildCompactScheduleIndex(schedule) {
   const lineDirs = [];
   const terminalIds = {};
   const terminals = [];
+  const nextStationIds = {};
+  const nextStations = [];
   const tailIds = {};
   const tails = [];
   const stations = {};
@@ -1659,6 +1766,7 @@ function buildCompactScheduleIndex(schedule) {
       version: SCHEDULE_COMPACT_INDEX_VERSION,
       line_dirs: [],
       terminals: [],
+      next_stations: [],
       tails: [],
       stations: {}
     };
@@ -1696,7 +1804,11 @@ function buildCompactScheduleIndex(schedule) {
         const tailSig = tailNames.join("|");
         const tailId = tailSig ? internCompactId(tailIds, tails, tailSig) : -1;
 
-        for (const [stName, curMin] of parsed) {
+        for (let pi = 0; pi < parsed.length; pi++) {
+          const stName = parsed[pi][0];
+          const curMin = parsed[pi][1];
+          const nextName = pi + 1 < parsed.length ? String(parsed[pi + 1][0] || "").trim() : "";
+          const nextId = nextName ? internCompactId(nextStationIds, nextStations, nextName) : -1;
           const rawName = String(stName || "");
           let stNorm = normMemo[rawName];
           if (stNorm == null) {
@@ -1709,11 +1821,12 @@ function buildCompactScheduleIndex(schedule) {
             stations[stNorm] = {};
           }
           if (!Object.prototype.hasOwnProperty.call(stations[stNorm], lineDirId)) {
-            stations[stNorm][lineDirId] = { m: [], t: [], r: [], z: [] };
+            stations[stNorm][lineDirId] = { m: [], t: [], n: [], r: [], z: [] };
           }
           const cell = stations[stNorm][lineDirId];
           cell.m.push(curMin);
           cell.t.push(terminalId);
+          cell.n.push(nextId);
           const remain = terminalMin - curMin;
           cell.r.push(Number.isFinite(remain) ? remain : -1);
           cell.z.push(tailId);
@@ -1731,6 +1844,7 @@ function buildCompactScheduleIndex(schedule) {
       order.sort((a, b) => Number(cell.m[a]) - Number(cell.m[b]));
       cell.m = order.map((i) => Number(cell.m[i]));
       cell.t = order.map((i) => Number(cell.t[i]));
+      cell.n = order.map((i) => Number((cell.n || [])[i]));
       cell.r = order.map((i) => Number(cell.r[i]));
       cell.z = order.map((i) => Number(cell.z[i]));
     }
@@ -1741,6 +1855,7 @@ function buildCompactScheduleIndex(schedule) {
     version: SCHEDULE_COMPACT_INDEX_VERSION,
     line_dirs: lineDirs,
     terminals,
+    next_stations: nextStations,
     tails: tailArray,
     stations
   };
@@ -1753,6 +1868,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
 
   const lineDirs = indexObj.line_dirs || [];
   const terminals = indexObj.terminals || [];
+  const nextStations = indexObj.next_stations || [];
   const tails = indexObj.tails || [];
   const stations = indexObj.stations || {};
 
@@ -1766,6 +1882,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
 
       const mins = Array.isArray(cell && cell.m) ? cell.m : [];
       const tIds = Array.isArray(cell && cell.t) ? cell.t : [];
+      const nIds = Array.isArray(cell && cell.n) ? cell.n : [];
       const remains = Array.isArray(cell && cell.r) ? cell.r : [];
       const zIds = Array.isArray(cell && cell.z) ? cell.z : [];
 
@@ -1775,6 +1892,8 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
         if (!Number.isFinite(minute)) continue;
         const tId = Number(tIds[i]);
         const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+        const nId = Number(nIds[i]);
+        const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
         const rv = Number(remains[i]);
         const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
         const tailId = Number(zIds[i]);
@@ -1785,6 +1904,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
         restored.trips.push({
           minute,
           terminal,
+          next_station: nextStation,
           tail,
           remain_min: remainMin
         });
@@ -2021,6 +2141,70 @@ function toSubscriptNumber(v) {
   return out;
 }
 
+function simplifyDistrictPrefixedTerminalName(name) {
+  const s = String(name || "").trim();
+  if (!s) return s;
+  const chars = Array.from(s);
+  if (chars.length < 4) return s;
+  const head2 = chars.slice(0, 2).join("");
+  if (!BJ_DISTRICT_PREFIX_2CHAR.has(head2)) return s;
+  return chars.slice(2).join("");
+}
+
+function simplifyTerminalDisplayText(s) {
+  const raw = String(s || "").trim();
+  if (!raw) return raw;
+  const subsRe = /^[₀₁₂₃₄₅₆₇₈₉₋]+$/;
+  const tokens = raw.split(/\s+/).filter(Boolean);
+  const out = tokens.map((tok) => {
+    const chars = Array.from(tok);
+    let i = 0;
+    while (i < chars.length && subsRe.test(chars[i])) i++;
+    const marker = chars.slice(0, i).join("");
+    const body = chars.slice(i).join("");
+    if (!body) return tok;
+    return `${marker}${simplifyDistrictPrefixedTerminalName(body)}`;
+  });
+  return out.join(" ");
+}
+
+function ringMarkFromDirectionText(directionText) {
+  const s = String(directionText || "");
+  if (s.includes("内环")) return "内";
+  if (s.includes("外环")) return "外";
+  return "";
+}
+
+function isRingLineDisplayName(lineName) {
+  const s = String(lineName || "");
+  return s.includes("2号线") || s.includes("10号线");
+}
+
+function buildRingDirectionTag(d, shouldShortenTerminal) {
+  const lineName = String(d.line_name_display || d.line_name || "");
+  if (!isRingLineDisplayName(lineName)) return "";
+  const ringMark = ringMarkFromDirectionText(d.direction || d.key || "");
+  if (!ringMark) return "";
+  const nextTrips = Array.isArray(d.next) ? d.next : [];
+  if (!nextTrips.length) return "";
+  const uniqTerms = [];
+  for (const t of nextTrips) {
+    const term = String((t && t.terminal) || "").trim();
+    if (!term) continue;
+    if (!uniqTerms.includes(term)) uniqTerms.push(term);
+  }
+  if (uniqTerms.length !== 1) return "";
+  let termText = uniqTerms[0];
+  if (shouldShortenTerminal) termText = simplifyDistrictPrefixedTerminalName(termText);
+  const nextStation = String(d.next_station || "").trim();
+  const nextArrow = String(d.next_station_arrow || d.arrow || "↘");
+  const ringEmoji = ringMark === "内" ? "🔃" : "🔄";
+  if (nextStation) {
+    return `${ringEmoji}${ringMark} ${termText} ${nextStation} ${nextArrow}`.trim();
+  }
+  return `${ringEmoji}${ringMark} ${termText}`.trim();
+}
+
 function formatTimeTokens(trips) {
   const out = [];
   let hasMedal = false;
@@ -2140,14 +2324,23 @@ function formatStationText(st) {
     lines.push(`🚇${g.line}`);
     for (const d of g.directions) {
       const status = String(d.status || "");
-      let toTag = "";
-      if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
-      else toTag = String(d.to || d.key || "").trim();
-      if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
-      const hasMarkerInTag = /[₀₁₂₃₄₅₆₇₈₉]/.test(toTag);
-      let row = `${d.arrow || "↘"} ${toTag || "未知方向"}`;
-      const leadGap = hasMarkerInTag ? " " : "   ";
       const termCount = Array.isArray(d.terminals) ? d.terminals.length : 0;
+      const shouldShortenTerminal = termCount >= 2;
+      let toTag = "";
+      let useRingRow = false;
+      const ringTag = buildRingDirectionTag(d, shouldShortenTerminal);
+      if (ringTag && status !== "ended") {
+        toTag = ringTag;
+        useRingRow = true;
+      } else {
+        if (status === "ended") toTag = String(d.last_terminal || d.to || d.key || "").trim();
+        else toTag = String(d.to || d.key || "").trim();
+        if (toTag.endsWith("方向")) toTag = toTag.slice(0, -2).trim();
+        if (shouldShortenTerminal) toTag = simplifyTerminalDisplayText(toTag);
+      }
+      const hasMarkerInTag = /[₀₁₂₃₄₅₆₇₈₉]/.test(toTag);
+      let row = useRingRow ? `${toTag || "未知方向"}` : `${d.arrow || "↘"} ${toTag || "未知方向"}`;
+      const leadGap = hasMarkerInTag ? " " : "   ";
       // 终点较多时压缩方向行：
       // - 仅在“未到首班”时显示首班（用户要看什么时候开始有车）
       // - 其余状态显示末班（用户更关心什么时候停运）
@@ -2167,7 +2360,8 @@ function formatStationText(st) {
       lines.push(row);
 
       if (status === "ended" && d.last) {
-        lines.push(`错过末班: ${d.last}`);
+        const lastShown = shouldShortenTerminal ? simplifyDistrictPrefixedTerminalName(d.last) : String(d.last);
+        lines.push(`错过末班: ${lastShown}`);
         continue;
       }
       if (Array.isArray(d.next) && d.next.length) {
@@ -2227,6 +2421,7 @@ async function main() {
   }
 
   const backend = isBackendContext();
+  const perfT0 = Date.now();
   const rawArg = pickInputArgument();
   const verboseActiveLog = !backend && wantVerboseLog(rawArg);
   const parseTrace = [];
@@ -2277,6 +2472,7 @@ async function main() {
   }
   const inputLon = Number(resolvedCoord.lon);
   const inputLat = Number(resolvedCoord.lat);
+  const perfAfterLocate = Date.now();
   cleanupLegacyCachesOnce();
   if (!backend) {
     console.log(`[INFO][v${SCRIPT_VERSION}] 坐标已就绪 lon=${inputLon.toFixed(6)} lat=${inputLat.toFixed(6)}`);
@@ -2322,6 +2518,7 @@ async function main() {
     ? scheduleBundlePrev[dayKindPrev]
     : null;
   scheduleBundleToday = null;
+  const perfAfterBaseData = Date.now();
 
   let catalog = buildCatalog(mapObj);
   mapObj = null;
@@ -2348,15 +2545,27 @@ async function main() {
   }
 
   const stationNorms = nearStations.map((s) => s.norm);
-  const schByStationPrev = collectScheduleForStationsFromCompactIndex(scheduleIndexPrev, stationNorms);
-  const schByStationToday = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
+  let schByStationPrev = null;
+  let schByStationToday = null;
+  if (scheduleIndexPrev === scheduleIndexToday) {
+    const one = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
+    schByStationPrev = one;
+    schByStationToday = one;
+  } else {
+    schByStationPrev = collectScheduleForStationsFromCompactIndex(scheduleIndexPrev, stationNorms);
+    schByStationToday = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
+  }
   const accessByNorm = {};
-  const amapUsable = AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
+  const nearStationSkipAccess = nearStations.some((s) => Number.isFinite(Number(s.distance_m)) && Number(s.distance_m) <= NEAR_STATION_SKIP_ACCESS_M);
+  const shouldFetchAmapAccess = !nearStationSkipAccess;
+  const amapUsable = shouldFetchAmapAccess && AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
   const exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
+  const accessCacheCtx = amapUsable ? { data: loadAmapAccessCache(), dirty: false } : null;
   if (amapUsable) {
-    const tasks = nearStations.map(async (st) => {
+    const accessStations = nearStations.slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
+    const tasks = accessStations.map(async (st) => {
       try {
-        const access = await fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx);
+        const access = await fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx);
         return [st.norm, access];
       } catch (e) {
         return [st.norm, null];
@@ -2370,7 +2579,11 @@ async function main() {
     if (exitCacheCtx && exitCacheCtx.dirty) {
       saveAmapExitCache(exitCacheCtx.data);
     }
+    if (accessCacheCtx && accessCacheCtx.dirty) {
+      saveAmapAccessCache(accessCacheCtx.data);
+    }
   }
+  const perfAfterAccess = Date.now();
 
   const stationsOut = [];
   for (const st of nearStations) {
@@ -2431,10 +2644,29 @@ async function main() {
           nextTrips.push({
             time: hhmmStr(dtv.getHours(), dtv.getMinutes()),
             in_min: Math.round((dtv.getTime() - now.getTime()) / 60000),
-            terminal: t.terminal || ""
+            terminal: t.terminal || "",
+            next_station: t.next_station || ""
           });
           if (!tails.length && Array.isArray(t.tail) && t.tail.length) tails = t.tail.slice();
           if (nextTrips.length >= 4) break;
+        }
+      }
+
+      let nextStationName = "";
+      for (const t of nextTrips) {
+        const nm = String((t && t.next_station) || "").trim();
+        if (nm) {
+          nextStationName = nm;
+          break;
+        }
+      }
+      if (!nextStationName) {
+        for (const t of tripsSorted) {
+          const nm = String((t && t.next_station) || "").trim();
+          if (nm) {
+            nextStationName = nm;
+            break;
+          }
         }
       }
 
@@ -2453,6 +2685,9 @@ async function main() {
       const lineNameDisplay = detectCrosslineDisplay(lineName, tailStops, stationLinesIndex) || lineName;
       const termNames = tm.terms.map((x) => String(x.name || "").trim()).filter(Boolean);
       const arrow = pickDirectionArrow8(direction, toLabel, st.lat, st.lon, termNames, stationCoordIndex);
+      const nextStationArrow = nextStationName
+        ? pickDirectionArrow8(direction, nextStationName, st.lat, st.lon, [nextStationName], stationCoordIndex)
+        : "";
 
       item.runtime.directions.push({
         line_name: lineName,
@@ -2467,6 +2702,8 @@ async function main() {
         terminals: tm.terms,
         last_terminal: lastTerminal,
         arrow,
+        next_station: nextStationName,
+        next_station_arrow: nextStationArrow,
         use_prev_service_day: !!picked.use_prev_service_day
       });
     }
@@ -2487,6 +2724,10 @@ async function main() {
       return acc + x;
     }, 0);
     console.log(`[INFO][v${SCRIPT_VERSION}] 结果站点=${stationsOut.length} 方向=${dirCount} 通知=1`);
+    if (verboseActiveLog) {
+      const tNow = Date.now();
+      console.log(`[PERF][v${SCRIPT_VERSION}] 定位解析=${perfAfterLocate - perfT0}ms 基础数据=${perfAfterBaseData - perfAfterLocate}ms 高德路途=${perfAfterAccess - perfAfterBaseData}ms 后处理=${tNow - perfAfterAccess}ms 总计=${tNow - perfT0}ms`);
+    }
     notifyByBackendFlatList(flat, "北京地铁出发时刻测算");
     doneOk(outputText);
   }
