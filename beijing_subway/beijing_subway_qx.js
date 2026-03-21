@@ -2626,10 +2626,9 @@ function formatStationText(st) {
         if (shouldShortenTerminal) toTag = simplifyTerminalDisplayText(toTag);
       }
       const hasMarkerInTag = /[₀₁₂₃₄₅₆₇₈₉]/.test(toTag);
-      const useFarthestArrow = !!d.use_farthest_terminal_arrow;
-      const nonRingArrow = useFarthestArrow
-        ? String(d.arrow || d.next_station_arrow || "↘")
-        : String(d.next_station_arrow || d.arrow || "↘");
+      // 非环线方向箭头优先使用“下一站相对本站”的方向；
+      // 仅在 next_station 缺失时回退到旧逻辑箭头。
+      const nonRingArrow = String(d.next_station_arrow || d.arrow || "↘");
       let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
       // 终点较多时压缩方向行：
