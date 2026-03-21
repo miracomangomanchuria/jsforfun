@@ -18,7 +18,11 @@
 - backend/重写调用建议传 lon + lat。
 - 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
 - 可选附加 amap_key 覆盖内置 key：lon=<value>&lat=<value>&amap_key=<YOUR_WEB_KEY>
-- 主动运行/定时任务若未传参数，将自动走 IP 反查定位。
+- 预热模式（无需经纬度）：prewarm=1
+- 强制刷新（可与 prewarm 组合）：force_refresh=1
+- 主动运行/定时任务若未传参数：
+  - 缓存周期已过期时：自动执行一次预热并静默结束（适合 cron）。
+  - 缓存周期未过期时：自动走 IP 反查定位并返回地铁信息。
 
 QX backend 配置示例：
 - 在 Quantumult X 配置文件中添加（按你的 host/path 修改）：
@@ -48,7 +52,8 @@ QX 重写模式示例（类似 BoxJs 的域名访问，不走 http_backend）：
 - 时刻表紧凑索引按半月缓存，命中后无需每次全量扫描线路。
 - 站点地图按“服务日所在月份”更新（每月首跑自动刷新）。
 - 节假日按“年份”更新（当年首次请求后复用本地缓存）。
-- 高德“站点出口 + 路途时间（步行/骑行）”支持短期缓存，减少重复请求等待。
+- 高德“站点出口 + 路途时间（步行/骑行）”支持缓存，减少重复请求等待。
+- 出口坐标为长期缓存（无 TTL），查询过即复用。
 - 若刷新失败，自动回退到旧缓存，避免脚本不可用。
 */
 
@@ -64,11 +69,12 @@ const SCHEDULE_WEEKEND_URLS = [
 const HOLIDAY_CN_URL = "https://raw.githubusercontent.com/NateScarlet/holiday-cn/master/{year}.json";
 const AMAP_WEB_KEY = "50ebc729a87ba59663ef08b377ec24d0";
 const AMAP_ENABLE_EXIT_ETA = true;
-const AMAP_TIMEOUT_MS = 7000;
+const AMAP_TIMEOUT_MS = 3000;
+const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.5.6";
+const SCRIPT_VERSION = "1.6.1";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -80,10 +86,11 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 2;
+const SCHEDULE_COMPACT_INDEX_VERSION = 3;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
+const AMAP_EXIT_CACHE_PERSIST_FOREVER = true;
 const AMAP_ACCESS_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:access_eta:v1`;
 const AMAP_ACCESS_CACHE_TTL_MS = 3 * 60 * 1000;
 const AMAP_ACCESS_CACHE_MAX_PER_STATION = 96;
@@ -92,6 +99,8 @@ const AMAP_KEY_CHECK_TTL_MS = 24 * 3600 * 1000;
 const IP_LOC_CACHE_KEY = `${CACHE_KEY_PREFIX}:ip_loc:v1`;
 const IP_LOC_TTL_MS = 60 * 1000;
 const IP_GEO_TIMEOUT_MS = 5000;
+const MAP_PERIOD_MARKER_KEY = `${CACHE_KEY_PREFIX}:map:monthly:period_marker`;
+const SCHEDULE_PERIOD_MARKER_KEY = `${CACHE_KEY_PREFIX}:schedule_index:halfmonth:period_marker`;
 // 服务区边界（北京+河北并集，来源: OpenStreetMap/Nominatim 行政区 bounding box，2026-03-20）
 const SERVICE_REGION_MIN_LAT = 36.0483981;
 const SERVICE_REGION_MAX_LAT = 42.6176407;
@@ -364,6 +373,29 @@ async function fetchJsonWithFallback(urls, headers = {}, timeoutMs = HTTP_TIMEOU
   throw new Error("全部数据源请求失败:\n" + errs.join("\n"));
 }
 
+function withTimeoutIgnore(promise, timeoutMs) {
+  const ms = Math.max(100, Number(timeoutMs) || 0);
+  return new Promise((resolve) => {
+    let done = false;
+    const tid = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve(null);
+    }, ms);
+    Promise.resolve(promise).then((v) => {
+      if (done) return;
+      done = true;
+      clearTimeout(tid);
+      resolve(v);
+    }).catch(() => {
+      if (done) return;
+      done = true;
+      clearTimeout(tid);
+      resolve(null);
+    });
+  });
+}
+
 function buildQueryString(params) {
   const arr = [];
   for (const [k, v] of Object.entries(params || {})) {
@@ -421,6 +453,37 @@ function extractAmapKeyOverride(arg) {
   }
   const m = x.match(/(?:^|[?&;,\s])(?:amap_key|amapkey|web_key)\s*=\s*([0-9a-zA-Z]+)/i);
   return m ? String(m[1] || "").trim() : "";
+}
+
+function parseBoolLike(v) {
+  if (v === true) return true;
+  if (v === false) return false;
+  const s = String(v == null ? "" : v).trim().toLowerCase();
+  if (!s) return false;
+  return s === "1" || s === "true" || s === "yes" || s === "on";
+}
+
+function extractBooleanOption(arg, keys) {
+  const ks = Array.isArray(keys) ? keys.map((x) => String(x || "").trim().toLowerCase()).filter(Boolean) : [];
+  if (!ks.length) return false;
+  if (arg && typeof arg === "object") {
+    for (const k of ks) {
+      if (Object.prototype.hasOwnProperty.call(arg, k) && parseBoolLike(arg[k])) return true;
+      const up = k.toUpperCase();
+      if (Object.prototype.hasOwnProperty.call(arg, up) && parseBoolLike(arg[up])) return true;
+    }
+  }
+  let s = String(arg == null ? "" : arg).trim();
+  if (!s) return false;
+  if (s.includes("%")) {
+    try { s = decodeURIComponent(s); } catch (e) { /* ignore */ }
+  }
+  for (const k of ks) {
+    const re = new RegExp(`(?:^|[?&;,\\s])${k}\\s*=\\s*([^&;,\\s]+)`, "i");
+    const m = s.match(re);
+    if (m && parseBoolLike(m[1])) return true;
+  }
+  return false;
 }
 
 function amapOkay(obj) {
@@ -902,6 +965,8 @@ async function fetchStationExitEta(station, userLon, userLat, amapKey, exitCache
         fetched_at: new Date().toISOString(),
         exits
       };
+      // 出口缓存为长期缓存（无 TTL）：查到一次即可长期复用；仅在脚本版本迁移或用户清理持久化时失效。
+      // 站内最多保留 AMAP_EXIT_CACHE_MAX_PER_STATION 条去重出口记录。
       exitCacheCtx.dirty = true;
     }
   }
@@ -1048,6 +1113,30 @@ function halfMonthKey(d) {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${part}`;
 }
 
+function readPeriodMarker(key) {
+  const v = readJsonCache(key);
+  if (!v || typeof v !== "object") return "";
+  const p = String(v.period_key || "").trim();
+  return p || "";
+}
+
+function writePeriodMarker(key, periodKey) {
+  const p = String(periodKey || "").trim();
+  if (!p) return;
+  writeJsonCache(key, {
+    period_key: p,
+    updated_at: new Date().toISOString()
+  });
+}
+
+function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
+  const mapHit = readPeriodMarker(MAP_PERIOD_MARKER_KEY);
+  const schHit = readPeriodMarker(SCHEDULE_PERIOD_MARKER_KEY);
+  const needMap = !mapHit || mapHit !== String(mapPeriodKey || "");
+  const needSch = !schHit || schHit !== String(schedulePeriodKey || "");
+  return needMap || needSch;
+}
+
 async function loadHolidayYearData(year) {
   const key = `${CACHE_KEY_PREFIX}:holiday:${year}`;
   const cached = readJsonCache(key);
@@ -1063,10 +1152,11 @@ async function loadHolidayYearData(year) {
   return { data: remote, source: `holiday-cn:${year}` };
 }
 
-async function loadMapWithMonthlyCache(periodKey) {
+async function loadMapWithMonthlyCache(periodKey, forceRefresh = false) {
   const cacheKey = `${CACHE_KEY_PREFIX}:map:monthly`;
   const cached = readLargeJsonCache(cacheKey);
   if (
+    !forceRefresh &&
     cached &&
     typeof cached === "object" &&
     cached.period_key === periodKey &&
@@ -1075,6 +1165,7 @@ async function loadMapWithMonthlyCache(periodKey) {
     Array.isArray(cached.data.stations_data) &&
     Array.isArray(cached.data.lines_data)
   ) {
+    writePeriodMarker(MAP_PERIOD_MARKER_KEY, periodKey);
     return cached.data;
   }
   try {
@@ -1084,6 +1175,7 @@ async function loadMapWithMonthlyCache(periodKey) {
       updated_at: new Date().toISOString(),
       data: remote
     });
+    writePeriodMarker(MAP_PERIOD_MARKER_KEY, periodKey);
     return remote;
   } catch (e) {
     if (
@@ -1172,21 +1264,18 @@ function cleanupLegacyCachesOnce() {
   });
 }
 
-async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey) {
+async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey, forceRefresh = false) {
   const rawKey = scheduleHalfMonthRawCacheKey();
   const idxKey = scheduleHalfMonthIndexCacheKey();
 
-  const cachedRawWrap = readLargeJsonCache(rawKey);
+  // 热路径提速：先只读取“紧凑索引”缓存；原始大包仅在降级重建时再按需读取。
   const cachedIdxWrap = readLargeJsonCache(idxKey);
-
-  const cachedRawData = cachedRawWrap && typeof cachedRawWrap === "object" && isValidScheduleRawBundle(cachedRawWrap.data)
-    ? cachedRawWrap.data
-    : (isValidScheduleRawBundle(cachedRawWrap) ? cachedRawWrap : null);
   const cachedIdxData = cachedIdxWrap && typeof cachedIdxWrap === "object" && isValidCompactScheduleIndexBundle(cachedIdxWrap.data)
     ? cachedIdxWrap.data
     : (isValidCompactScheduleIndexBundle(cachedIdxWrap) ? cachedIdxWrap : null);
 
-  if (cachedIdxData && cachedIdxWrap && cachedIdxWrap.period_key === periodKey) {
+  if (!forceRefresh && cachedIdxData && cachedIdxWrap && cachedIdxWrap.period_key === periodKey) {
+    writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
     return cachedIdxData;
   }
 
@@ -1212,10 +1301,19 @@ async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey) {
       updated_at: new Date().toISOString(),
       data: idxBundle
     });
+    writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
     return idxBundle;
   } catch (e) {
-    if (cachedIdxData) return cachedIdxData;
+    if (cachedIdxData) {
+      writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
+      return cachedIdxData;
+    }
+    const cachedRawWrap = readLargeJsonCache(rawKey);
+    const cachedRawData = cachedRawWrap && typeof cachedRawWrap === "object" && isValidScheduleRawBundle(cachedRawWrap.data)
+      ? cachedRawWrap.data
+      : (isValidScheduleRawBundle(cachedRawWrap) ? cachedRawWrap : null);
     if (cachedRawData) {
+      writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
       return {
         weekday: buildCompactScheduleIndex(cachedRawData.weekday),
         weekend: buildCompactScheduleIndex(cachedRawData.weekend)
@@ -1235,8 +1333,14 @@ async function isWorkdayByHolidayCN(nowDate) {
     return { isWorkday: nowDate.getDay() >= 1 && nowDate.getDay() <= 5, source: "weekday_heuristic" };
   }
   const days = Array.isArray(obj && obj.days) ? obj.days : [];
+  const one = evalWorkdayFromHolidayDays(nowDate, days);
+  if (one) return one;
+  return { isWorkday: nowDate.getDay() >= 1 && nowDate.getDay() <= 5, source: "weekday_heuristic" };
+}
+
+function evalWorkdayFromHolidayDays(nowDate, days) {
   const today = ymd(nowDate);
-  for (const r of days) {
+  for (const r of days || []) {
     if (!r || typeof r !== "object") continue;
     if (r.date !== today) continue;
     if (r.isOffDay === true) {
@@ -1246,7 +1350,38 @@ async function isWorkdayByHolidayCN(nowDate) {
       return { isWorkday: true, source: `holiday-cn:${r.name || "workday"}` };
     }
   }
-  return { isWorkday: nowDate.getDay() >= 1 && nowDate.getDay() <= 5, source: "weekday_heuristic" };
+  return null;
+}
+
+async function resolveWorkdayFlagsPair(prevDate, currDate) {
+  const y1 = prevDate.getFullYear();
+  const y2 = currDate.getFullYear();
+  if (y1 !== y2) {
+    const [prev, curr] = await Promise.all([
+      isWorkdayByHolidayCN(prevDate),
+      isWorkdayByHolidayCN(currDate)
+    ]);
+    return { prev, curr };
+  }
+  try {
+    const loaded = await loadHolidayYearData(y1);
+    const days = Array.isArray(loaded && loaded.data && loaded.data.days) ? loaded.data.days : [];
+    const p = evalWorkdayFromHolidayDays(prevDate, days) || {
+      isWorkday: prevDate.getDay() >= 1 && prevDate.getDay() <= 5,
+      source: "weekday_heuristic"
+    };
+    const c = evalWorkdayFromHolidayDays(currDate, days) || {
+      isWorkday: currDate.getDay() >= 1 && currDate.getDay() <= 5,
+      source: "weekday_heuristic"
+    };
+    return { prev: p, curr: c };
+  } catch (e) {
+    const [prev, curr] = await Promise.all([
+      isWorkdayByHolidayCN(prevDate),
+      isWorkdayByHolidayCN(currDate)
+    ]);
+    return { prev, curr };
+  }
 }
 
 function outOfChina(lat, lon) {
@@ -1712,6 +1847,28 @@ function buildStationCoordIndex(catalog) {
   return idx;
 }
 
+function ensureStationCoordInIndex(coordIndex, catalog, stationName) {
+  if (!coordIndex || typeof coordIndex !== "object" || !catalog || !catalog.nameIndex) return;
+  const n = normName(stationName);
+  if (!n || coordIndex[n]) return;
+  const rows = catalog.nameIndex[n];
+  if (!Array.isArray(rows) || !rows.length) return;
+  const st = rows[0];
+  if (!st || !Number.isFinite(st.lat) || !Number.isFinite(st.lon)) return;
+  coordIndex[n] = [st.lat, st.lon];
+}
+
+function getStationCoordFromCatalog(catalog, stationName) {
+  if (!catalog || !catalog.nameIndex) return null;
+  const n = normName(stationName);
+  if (!n) return null;
+  const rows = catalog.nameIndex[n];
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const st = rows[0];
+  if (!st || !Number.isFinite(st.lat) || !Number.isFinite(st.lon)) return null;
+  return [st.lat, st.lon];
+}
+
 function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
   const ranked = catalog.stations.map((st) => {
     const d = haversineM(lat, lon, st.lat, st.lon);
@@ -1747,6 +1904,44 @@ function internCompactId(dict, list, val) {
   list.push(key);
   dict[key] = id;
   return id;
+}
+
+function compactIntEncode(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "~";
+  return Math.trunc(n).toString(36);
+}
+
+function compactIntDecode(s) {
+  const t = String(s == null ? "" : s).trim();
+  if (!t || t === "~") return NaN;
+  const n = parseInt(t, 36);
+  return Number.isFinite(n) ? n : NaN;
+}
+
+function packCompactCellArrays(cell) {
+  const mins = Array.isArray(cell && cell.m) ? cell.m : [];
+  const ts = Array.isArray(cell && cell.t) ? cell.t : [];
+  const ns = Array.isArray(cell && cell.n) ? cell.n : [];
+  const rs = Array.isArray(cell && cell.r) ? cell.r : [];
+  const zs = Array.isArray(cell && cell.z) ? cell.z : [];
+  if (!mins.length) return "";
+  const out = [];
+  let prev = 0;
+  for (let i = 0; i < mins.length; i++) {
+    const m = Number(mins[i]);
+    if (!Number.isFinite(m)) continue;
+    const dm = i === 0 ? m : (m - prev);
+    prev = m;
+    out.push([
+      compactIntEncode(dm),
+      compactIntEncode(ts[i]),
+      compactIntEncode(ns[i]),
+      compactIntEncode(rs[i]),
+      compactIntEncode(zs[i])
+    ].join("."));
+  }
+  return out.join(",");
 }
 
 function buildCompactScheduleIndex(schedule) {
@@ -1850,6 +2045,19 @@ function buildCompactScheduleIndex(schedule) {
     }
   }
 
+  // 进一步压缩索引体积：把每站每方向的数组编码为紧凑字符串（minute 用增量编码）。
+  for (const stCells of Object.values(stations)) {
+    for (const cell of Object.values(stCells)) {
+      const q = packCompactCellArrays(cell);
+      cell.q = q;
+      delete cell.m;
+      delete cell.t;
+      delete cell.n;
+      delete cell.r;
+      delete cell.z;
+    }
+  }
+
   const tailArray = tails.map((x) => String(x || "").split("|").filter(Boolean));
   return {
     version: SCHEDULE_COMPACT_INDEX_VERSION,
@@ -1880,34 +2088,71 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
       const lineDirKey = lineDirs[lineDirId];
       if (!lineDirKey) continue;
 
-      const mins = Array.isArray(cell && cell.m) ? cell.m : [];
-      const tIds = Array.isArray(cell && cell.t) ? cell.t : [];
-      const nIds = Array.isArray(cell && cell.n) ? cell.n : [];
-      const remains = Array.isArray(cell && cell.r) ? cell.r : [];
-      const zIds = Array.isArray(cell && cell.z) ? cell.z : [];
-
       const restored = { minutes: [], terminals: {}, trips: [] };
-      for (let i = 0; i < mins.length; i++) {
-        const minute = Number(mins[i]);
-        if (!Number.isFinite(minute)) continue;
-        const tId = Number(tIds[i]);
-        const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
-        const nId = Number(nIds[i]);
-        const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
-        const rv = Number(remains[i]);
-        const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
-        const tailId = Number(zIds[i]);
-        const tail = Number.isFinite(tailId) && tailId >= 0 && Array.isArray(tails[tailId]) ? tails[tailId] : [];
+      const packed = typeof (cell && cell.q) === "string" ? String(cell.q) : "";
+      if (packed) {
+        let prevMin = 0;
+        const rows = packed.split(",");
+        for (let i = 0; i < rows.length; i++) {
+          const seg = String(rows[i] || "");
+          if (!seg) continue;
+          const parts = seg.split(".");
+          if (parts.length < 5) continue;
 
-        restored.minutes.push(minute);
-        if (terminal) restored.terminals[terminal] = (restored.terminals[terminal] || 0) + 1;
-        restored.trips.push({
-          minute,
-          terminal,
-          next_station: nextStation,
-          tail,
-          remain_min: remainMin
-        });
+          const dm = compactIntDecode(parts[0]);
+          if (!Number.isFinite(dm)) continue;
+          const minute = i === 0 ? dm : (prevMin + dm);
+          prevMin = minute;
+
+          const tId = compactIntDecode(parts[1]);
+          const nId = compactIntDecode(parts[2]);
+          const rv = compactIntDecode(parts[3]);
+          const tailId = compactIntDecode(parts[4]);
+
+          const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+          const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
+          const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
+          const tail = Number.isFinite(tailId) && tailId >= 0 && Array.isArray(tails[tailId]) ? tails[tailId] : [];
+
+          restored.minutes.push(minute);
+          if (terminal) restored.terminals[terminal] = (restored.terminals[terminal] || 0) + 1;
+          restored.trips.push({
+            minute,
+            terminal,
+            next_station: nextStation,
+            tail,
+            remain_min: remainMin
+          });
+        }
+      } else {
+        // 兼容旧缓存格式（v2 或历史临时对象）
+        const mins = Array.isArray(cell && cell.m) ? cell.m : [];
+        const tIds = Array.isArray(cell && cell.t) ? cell.t : [];
+        const nIds = Array.isArray(cell && cell.n) ? cell.n : [];
+        const remains = Array.isArray(cell && cell.r) ? cell.r : [];
+        const zIds = Array.isArray(cell && cell.z) ? cell.z : [];
+        for (let i = 0; i < mins.length; i++) {
+          const minute = Number(mins[i]);
+          if (!Number.isFinite(minute)) continue;
+          const tId = Number(tIds[i]);
+          const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+          const nId = Number(nIds[i]);
+          const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
+          const rv = Number(remains[i]);
+          const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
+          const tailId = Number(zIds[i]);
+          const tail = Number.isFinite(tailId) && tailId >= 0 && Array.isArray(tails[tailId]) ? tails[tailId] : [];
+
+          restored.minutes.push(minute);
+          if (terminal) restored.terminals[terminal] = (restored.terminals[terminal] || 0) + 1;
+          restored.trips.push({
+            minute,
+            terminal,
+            next_station: nextStation,
+            tail,
+            remain_min: remainMin
+          });
+        }
       }
       out[n][lineDirKey] = restored;
     }
@@ -2076,6 +2321,43 @@ function terminalOrderByRemain(trips, terminalNames) {
   });
 }
 
+function uniqueTerminalNamesFromTrips(trips) {
+  const seen = new Set();
+  const out = [];
+  for (const t of trips || []) {
+    const term = String((t && t.terminal) || "").trim();
+    if (!term || seen.has(term)) continue;
+    seen.add(term);
+    out.push(term);
+  }
+  return out;
+}
+
+function pickFarthestTerminalByRemain(trips, terminalNames) {
+  if (!Array.isArray(terminalNames) || !terminalNames.length) return "";
+  const allow = new Set(terminalNames.map((x) => String(x || "").trim()).filter(Boolean));
+  const far = {};
+  for (const t of trips || []) {
+    if (!t || typeof t !== "object") continue;
+    const term = String(t.terminal || "").trim();
+    if (!allow.has(term)) continue;
+    const rv = Number(t.remain_min);
+    if (!Number.isFinite(rv)) continue;
+    if (far[term] == null || rv > far[term]) far[term] = rv;
+  }
+  let bestTerm = "";
+  let bestVal = Number.NEGATIVE_INFINITY;
+  for (const term of allow) {
+    const v = far[term];
+    if (Number.isFinite(v) && v > bestVal) {
+      bestVal = v;
+      bestTerm = term;
+    }
+  }
+  if (bestTerm) return bestTerm;
+  return terminalNames[terminalNames.length - 1] || terminalNames[0] || "";
+}
+
 function buildTerminalsForNext(nextTrips, tripsAll) {
   const nextTerms = [];
   for (const t of nextTrips || []) {
@@ -2197,12 +2479,16 @@ function buildRingDirectionTag(d, shouldShortenTerminal) {
   let termText = uniqTerms[0];
   if (shouldShortenTerminal) termText = simplifyDistrictPrefixedTerminalName(termText);
   const nextStation = String(d.next_station || "").trim();
-  const nextArrow = String(d.next_station_arrow || d.arrow || "↘");
+  const nextArrow = String(d.next_station_arrow || "").trim();
   const ringEmoji = ringMark === "内" ? "🔃" : "🔄";
   if (nextStation) {
-    return `${ringEmoji}${ringMark} ${termText} ${nextStation} ${nextArrow}`.trim();
+    return `${ringMark}${ringEmoji}${termText} ${nextStation}${nextArrow}`.trim();
   }
-  return `${ringEmoji}${ringMark} ${termText}`.trim();
+  return `${ringMark}${ringEmoji}${termText}`.trim();
+}
+
+function isNonRingLineDisplayName(lineName) {
+  return !isRingLineDisplayName(lineName);
 }
 
 function formatTimeTokens(trips) {
@@ -2325,7 +2611,8 @@ function formatStationText(st) {
     for (const d of g.directions) {
       const status = String(d.status || "");
       const termCount = Array.isArray(d.terminals) ? d.terminals.length : 0;
-      const shouldShortenTerminal = termCount >= 2;
+      const allTermCount = Array.isArray(d.all_terminals) ? d.all_terminals.length : termCount;
+      const shouldShortenTerminal = allTermCount >= 2;
       let toTag = "";
       let useRingRow = false;
       const ringTag = buildRingDirectionTag(d, shouldShortenTerminal);
@@ -2339,7 +2626,11 @@ function formatStationText(st) {
         if (shouldShortenTerminal) toTag = simplifyTerminalDisplayText(toTag);
       }
       const hasMarkerInTag = /[₀₁₂₃₄₅₆₇₈₉]/.test(toTag);
-      let row = useRingRow ? `${toTag || "未知方向"}` : `${d.arrow || "↘"} ${toTag || "未知方向"}`;
+      const useFarthestArrow = !!d.use_farthest_terminal_arrow;
+      const nonRingArrow = useFarthestArrow
+        ? String(d.arrow || d.next_station_arrow || "↘")
+        : String(d.next_station_arrow || d.arrow || "↘");
+      let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
       // 终点较多时压缩方向行：
       // - 仅在“未到首班”时显示首班（用户要看什么时候开始有车）
@@ -2423,10 +2714,19 @@ async function main() {
   const backend = isBackendContext();
   const perfT0 = Date.now();
   const rawArg = pickInputArgument();
+  const rawArgText = String(rawArg == null ? "" : rawArg).trim();
+  const prewarmOnly = extractBooleanOption(rawArg, ["prewarm", "warmup", "preheat"]);
+  const forceRefresh = extractBooleanOption(rawArg, ["force_refresh", "force_update", "refresh"]);
   const verboseActiveLog = !backend && wantVerboseLog(rawArg);
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
   const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
+  const nowForMode = new Date();
+  const todayForMode = dateOnly(nowForMode);
+  const prevDayForMode = addDays(todayForMode, -1);
+  const mapPeriodKeyForMode = monthKey(todayForMode);
+  const schedulePeriodKeyForMode = halfMonthKey(todayForMode);
+  const autoPrewarmNoArg = !backend && !rawArgText && needAutoPrewarmForNoArgRun(mapPeriodKeyForMode, schedulePeriodKeyForMode);
   if (!backend) {
     if (verboseActiveLog) {
       console.log(
@@ -2439,6 +2739,29 @@ async function main() {
       console.log(`[INFO][v${SCRIPT_VERSION}] 主动模式启动`);
     }
   }
+  if (prewarmOnly || autoPrewarmNoArg) {
+    const doForceRefresh = prewarmOnly && forceRefresh;
+    // 预热范围：节假日（今日+昨日）、站点地图（月）、时刻索引（半月）。
+    await resolveWorkdayFlagsPair(prevDayForMode, todayForMode);
+    await Promise.all([
+      loadMapWithMonthlyCache(mapPeriodKeyForMode, doForceRefresh),
+      loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKeyForMode, doForceRefresh)
+    ]);
+
+    const msg = doForceRefresh
+      ? "✅ 预热完成（已强制刷新当月地图与半月时刻索引）"
+      : (autoPrewarmNoArg
+        ? "✅ 检测到缓存周期更新，已自动预热完成"
+        : "✅ 预热完成（已确保当月地图与半月时刻索引可用）");
+    if (backend) {
+      doneBackendJson([msg], 200);
+    } else {
+      console.log(`[INFO][v${SCRIPT_VERSION}] ${msg}`);
+      doneOk(msg);
+    }
+    return;
+  }
+
   let resolvedCoord = parsed;
   if (!resolvedCoord) {
     if (!backend) {
@@ -2493,10 +2816,9 @@ async function main() {
   const today = dateOnly(now);
   const prevDay = addDays(today, -1);
 
-  const [dayTypePrev, dayTypeToday] = await Promise.all([
-    isWorkdayByHolidayCN(prevDay),
-    isWorkdayByHolidayCN(today)
-  ]);
+  const dayTypePair = await resolveWorkdayFlagsPair(prevDay, today);
+  const dayTypePrev = dayTypePair.prev;
+  const dayTypeToday = dayTypePair.curr;
   const dayKindPrev = scheduleKindFromWorkday(!!dayTypePrev.isWorkday);
   const dayKindToday = scheduleKindFromWorkday(!!dayTypeToday.isWorkday);
 
@@ -2506,8 +2828,8 @@ async function main() {
   let mapObj = null;
   let scheduleBundleToday = null;
   [mapObj, scheduleBundleToday] = await Promise.all([
-    loadMapWithMonthlyCache(mapPeriodKey),
-    loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKeyToday)
+    loadMapWithMonthlyCache(mapPeriodKey, forceRefresh),
+    loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKeyToday, forceRefresh)
   ]);
   const scheduleBundlePrev = scheduleBundleToday;
 
@@ -2522,13 +2844,17 @@ async function main() {
 
   let catalog = buildCatalog(mapObj);
   mapObj = null;
-  const stationLinesIndex = buildStationLineIndex(catalog);
-  const stationCoordIndex = buildStationCoordIndex(catalog);
-
   const aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
   const nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
-  catalog = null;
+  let stationLinesIndex = {};
+  let stationCoordIndex = {};
+  if (nearStations.length) {
+    if (nearStations.length > 1) {
+      stationLinesIndex = buildStationLineIndex(catalog);
+    }
+  }
   if (!nearStations.length) {
+    catalog = null;
     if (backend) {
       doneBackendJson(["未找到附近站点", ""], 200);
     } else {
@@ -2565,7 +2891,10 @@ async function main() {
     const accessStations = nearStations.slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
     const tasks = accessStations.map(async (st) => {
       try {
-        const access = await fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx);
+        const access = await withTimeoutIgnore(
+          fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx),
+          AMAP_PER_STATION_BUDGET_MS
+        );
         return [st.norm, access];
       } catch (e) {
         return [st.norm, null];
@@ -2613,7 +2942,8 @@ async function main() {
 
       const cell = picked.cell;
       const trips = (cell.trips || []).filter((x) => x && Number.isFinite(Number(x.minute)));
-      const tripsSorted = trips.slice().sort((a, b) => Number(a.minute) - Number(b.minute));
+      // 索引恢复结果已按 minute 升序，无需再次排序。
+      const tripsSorted = trips;
 
       const first = picked.meta.first_hhmm;
       const last = picked.meta.last_hhmm;
@@ -2672,22 +3002,43 @@ async function main() {
 
       const tm = buildTerminalsForNext(nextTrips, tripsSorted);
       applyMedalsToTimes(nextTrips, tm.terms, tm.enableMedals, tm.enableMedals ? "🏅" : "");
+      const displayTerms = terminalOrderByRemain(tripsSorted, uniqueTerminalNamesFromTrips(nextTrips));
 
       let toLabel = "";
       if (tm.enableMedals) {
         toLabel = terminalLabel(tm.terms);
       } else {
-        const one = nextTrips.find((x) => String(x.terminal || "").trim());
-        toLabel = one ? `${one.terminal}` : String(direction || "unknown");
+        if (displayTerms.length >= 2 && isNonRingLineDisplayName(lineName)) {
+          toLabel = displayTerms.join(" ");
+        } else {
+          const one = nextTrips.find((x) => String(x.terminal || "").trim());
+          toLabel = one ? `${one.terminal}` : String(direction || "unknown");
+        }
       }
 
       const tailStops = tails.length ? tails : (tripsSorted[0] && tripsSorted[0].tail) || [];
       const lineNameDisplay = detectCrosslineDisplay(lineName, tailStops, stationLinesIndex) || lineName;
-      const termNames = tm.terms.map((x) => String(x.name || "").trim()).filter(Boolean);
+      let termNames = tm.terms.map((x) => String(x.name || "").trim()).filter(Boolean);
+      if (!termNames.length) termNames = displayTerms.slice();
+      const useFarthestTerminalArrow = isNonRingLineDisplayName(lineName) && displayTerms.length >= 2;
+      if (useFarthestTerminalArrow) {
+        const farTerm = pickFarthestTerminalByRemain(tripsSorted, displayTerms);
+        if (farTerm) termNames = [farTerm];
+      }
+      for (const tn of termNames) ensureStationCoordInIndex(stationCoordIndex, catalog, tn);
+      if (nextStationName) ensureStationCoordInIndex(stationCoordIndex, catalog, nextStationName);
       const arrow = pickDirectionArrow8(direction, toLabel, st.lat, st.lon, termNames, stationCoordIndex);
-      const nextStationArrow = nextStationName
-        ? pickDirectionArrow8(direction, nextStationName, st.lat, st.lon, [nextStationName], stationCoordIndex)
-        : "";
+      let nextStationArrow = "";
+      if (nextStationName) {
+        const nextCoord = getStationCoordFromCatalog(catalog, nextStationName);
+        if (nextCoord) {
+          const br = bearingDeg(st.lat, st.lon, nextCoord[0], nextCoord[1]);
+          nextStationArrow = bearingToArrow8(br);
+        }
+        if (!nextStationArrow) {
+          nextStationArrow = pickDirectionArrow8(direction, nextStationName, st.lat, st.lon, [nextStationName], stationCoordIndex);
+        }
+      }
 
       item.runtime.directions.push({
         line_name: lineName,
@@ -2700,10 +3051,12 @@ async function main() {
         first,
         last,
         terminals: tm.terms,
+        all_terminals: displayTerms,
         last_terminal: lastTerminal,
         arrow,
         next_station: nextStationName,
         next_station_arrow: nextStationArrow,
+        use_farthest_terminal_arrow: useFarthestTerminalArrow,
         use_prev_service_day: !!picked.use_prev_service_day
       });
     }
@@ -2711,6 +3064,7 @@ async function main() {
     item.runtime.directions = sortRuntimeDirectionsClockwise(item.runtime.directions);
     stationsOut.push(item);
   }
+  catalog = null;
 
   const parts = buildStationTwoParts(stationsOut);
   const outputText = logStationParts(parts, !!verboseActiveLog);
