@@ -74,7 +74,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.1";
+const SCRIPT_VERSION = "1.6.3";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -2712,6 +2712,49 @@ async function main() {
 
   const backend = isBackendContext();
   const perfT0 = Date.now();
+  let perfAfterMode = NaN;
+  let perfAfterPrewarm = NaN;
+  let perfAfterLocate = NaN;
+  let perfAfterDayType = NaN;
+  let perfAfterBaseData = NaN;
+  let perfAfterSchedulePrep = NaN;
+  let perfAfterAccess = NaN;
+  let perfAfterAssemble = NaN;
+  let didPrewarm = false;
+  let prewarmMs = 0;
+  function msOrDash(v) {
+    return Number.isFinite(v) ? `${Math.max(0, Math.round(v))}ms` : "-";
+  }
+  function logStepPerf(extra = "") {
+    if (backend) return;
+    const tNow = Number.isFinite(perfAfterAssemble) ? perfAfterAssemble : Date.now();
+    const modeMs = Number.isFinite(perfAfterMode) ? perfAfterMode - perfT0 : NaN;
+    const prewarmStepMs = didPrewarm ? prewarmMs : 0;
+    const locateMs = Number.isFinite(perfAfterLocate) && Number.isFinite(perfAfterPrewarm)
+      ? perfAfterLocate - perfAfterPrewarm
+      : NaN;
+    const dayTypeMs = Number.isFinite(perfAfterDayType) && Number.isFinite(perfAfterLocate)
+      ? perfAfterDayType - perfAfterLocate
+      : NaN;
+    const baseDataMs = Number.isFinite(perfAfterBaseData) && Number.isFinite(perfAfterDayType)
+      ? perfAfterBaseData - perfAfterDayType
+      : NaN;
+    const prepMs = Number.isFinite(perfAfterSchedulePrep) && Number.isFinite(perfAfterBaseData)
+      ? perfAfterSchedulePrep - perfAfterBaseData
+      : NaN;
+    const accessMs = Number.isFinite(perfAfterAccess) && Number.isFinite(perfAfterSchedulePrep)
+      ? perfAfterAccess - perfAfterSchedulePrep
+      : NaN;
+    const assembleMs = Number.isFinite(perfAfterAssemble) && Number.isFinite(perfAfterAccess)
+      ? perfAfterAssemble - perfAfterAccess
+      : NaN;
+    const totalMs = tNow - perfT0;
+    const tail = extra ? ` | ${extra}` : "";
+    console.log(
+      `[STEP][v${SCRIPT_VERSION}] 模式=${msOrDash(modeMs)} 预热=${msOrDash(prewarmStepMs)} 定位=${msOrDash(locateMs)} 节假日=${msOrDash(dayTypeMs)} 基础数据=${msOrDash(baseDataMs)} 站点处理=${msOrDash(prepMs)} 高德路途=${msOrDash(accessMs)} 结果组装=${msOrDash(assembleMs)} 总计=${msOrDash(totalMs)}${tail}`
+    );
+    console.log(`[TOTAL][v${SCRIPT_VERSION}] 脚本总用时=${msOrDash(totalMs)}`);
+  }
   const rawArg = pickInputArgument();
   const rawArgText = String(rawArg == null ? "" : rawArg).trim();
   const prewarmOnly = extractBooleanOption(rawArg, ["prewarm", "warmup", "preheat"]);
@@ -2726,6 +2769,7 @@ async function main() {
   const mapPeriodKeyForMode = monthKey(todayForMode);
   const schedulePeriodKeyForMode = halfMonthKey(todayForMode);
   const autoPrewarmNoArg = !backend && !rawArgText && needAutoPrewarmForNoArgRun(mapPeriodKeyForMode, schedulePeriodKeyForMode);
+  perfAfterMode = Date.now();
   if (!backend) {
     if (verboseActiveLog) {
       console.log(
@@ -2737,15 +2781,22 @@ async function main() {
     } else {
       console.log(`[INFO][v${SCRIPT_VERSION}] 主动模式启动`);
     }
+    if (!rawArgText && !autoPrewarmNoArg) {
+      console.log(`[INFO][v${SCRIPT_VERSION}] 缓存周期有效，本次跳过预热`);
+    }
   }
   if (prewarmOnly || autoPrewarmNoArg) {
     const doForceRefresh = prewarmOnly && forceRefresh;
+    const tPrewarmStart = Date.now();
     // 预热范围：节假日（今日+昨日）、站点地图（月）、时刻索引（半月）。
     await resolveWorkdayFlagsPair(prevDayForMode, todayForMode);
     await Promise.all([
       loadMapWithMonthlyCache(mapPeriodKeyForMode, doForceRefresh),
       loadScheduleCompactIndexBundleWithHalfMonthCache(schedulePeriodKeyForMode, doForceRefresh)
     ]);
+    didPrewarm = true;
+    prewarmMs = Date.now() - tPrewarmStart;
+    perfAfterPrewarm = Date.now();
 
     const msg = doForceRefresh
       ? "✅ 预热完成（已强制刷新当月地图与半月时刻索引）"
@@ -2754,11 +2805,17 @@ async function main() {
         : "✅ 预热完成（已确保当月地图与半月时刻索引可用）");
     if (backend) {
       doneBackendJson([msg], 200);
-    } else {
-      console.log(`[INFO][v${SCRIPT_VERSION}] ${msg}`);
-      doneOk(msg);
+      return;
     }
-    return;
+    console.log(`[INFO][v${SCRIPT_VERSION}] ${msg} 耗时=${prewarmMs}ms`);
+    if (prewarmOnly) {
+      perfAfterAssemble = Date.now();
+      logStepPerf("预热专用模式结束");
+      doneOk(msg);
+      return;
+    }
+  } else {
+    perfAfterPrewarm = Date.now();
   }
 
   let resolvedCoord = parsed;
@@ -2794,7 +2851,7 @@ async function main() {
   }
   const inputLon = Number(resolvedCoord.lon);
   const inputLat = Number(resolvedCoord.lat);
-  const perfAfterLocate = Date.now();
+  perfAfterLocate = Date.now();
   cleanupLegacyCachesOnce();
   if (!backend) {
     console.log(`[INFO][v${SCRIPT_VERSION}] 坐标已就绪 lon=${inputLon.toFixed(6)} lat=${inputLat.toFixed(6)}`);
@@ -2805,6 +2862,12 @@ async function main() {
     if (backend) {
       doneBackendJson([msg], 200);
     } else {
+      perfAfterDayType = Date.now();
+      perfAfterBaseData = Date.now();
+      perfAfterSchedulePrep = Date.now();
+      perfAfterAccess = Date.now();
+      perfAfterAssemble = Date.now();
+      logStepPerf("超出服务范围");
       notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
       doneOk(msg);
     }
@@ -2820,6 +2883,7 @@ async function main() {
   const dayTypeToday = dayTypePair.curr;
   const dayKindPrev = scheduleKindFromWorkday(!!dayTypePrev.isWorkday);
   const dayKindToday = scheduleKindFromWorkday(!!dayTypeToday.isWorkday);
+  perfAfterDayType = Date.now();
 
   const mapPeriodKey = monthKey(today);
   const schedulePeriodKeyToday = halfMonthKey(today);
@@ -2839,7 +2903,7 @@ async function main() {
     ? scheduleBundlePrev[dayKindPrev]
     : null;
   scheduleBundleToday = null;
-  const perfAfterBaseData = Date.now();
+  perfAfterBaseData = Date.now();
 
   let catalog = buildCatalog(mapObj);
   mapObj = null;
@@ -2864,6 +2928,10 @@ async function main() {
       console.log("");
       console.log("---STATION#1---END---");
       console.log("===QX_SUBWAY_RESULT_END===");
+      perfAfterSchedulePrep = Date.now();
+      perfAfterAccess = Date.now();
+      perfAfterAssemble = Date.now();
+      logStepPerf("未找到附近站点");
       doneOk("");
     }
     return;
@@ -2880,6 +2948,7 @@ async function main() {
     schByStationPrev = collectScheduleForStationsFromCompactIndex(scheduleIndexPrev, stationNorms);
     schByStationToday = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
   }
+  perfAfterSchedulePrep = Date.now();
   const accessByNorm = {};
   const nearStationSkipAccess = nearStations.some((s) => Number.isFinite(Number(s.distance_m)) && Number(s.distance_m) <= NEAR_STATION_SKIP_ACCESS_M);
   const shouldFetchAmapAccess = !nearStationSkipAccess;
@@ -2911,7 +2980,7 @@ async function main() {
       saveAmapAccessCache(accessCacheCtx.data);
     }
   }
-  const perfAfterAccess = Date.now();
+  perfAfterAccess = Date.now();
 
   const stationsOut = [];
   for (const st of nearStations) {
@@ -3068,6 +3137,7 @@ async function main() {
   const parts = buildStationTwoParts(stationsOut);
   const outputText = logStationParts(parts, !!verboseActiveLog);
   const flat = flattenStationParts(parts);
+  perfAfterAssemble = Date.now();
 
   if (backend) {
     doneBackendJson(flat, 200);
@@ -3077,6 +3147,7 @@ async function main() {
       return acc + x;
     }, 0);
     console.log(`[INFO][v${SCRIPT_VERSION}] 结果站点=${stationsOut.length} 方向=${dirCount} 通知=1`);
+    logStepPerf(didPrewarm ? "已预热后查询并通知" : "直接查询并通知");
     if (verboseActiveLog) {
       const tNow = Date.now();
       console.log(`[PERF][v${SCRIPT_VERSION}] 定位解析=${perfAfterLocate - perfT0}ms 基础数据=${perfAfterBaseData - perfAfterLocate}ms 高德路途=${perfAfterAccess - perfAfterBaseData}ms 后处理=${tNow - perfAfterAccess}ms 总计=${tNow - perfT0}ms`);
