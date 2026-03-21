@@ -2513,12 +2513,23 @@ function formatTimeTokens(trips) {
 }
 
 function directionBearingDeg(d) {
-  let b = arrow8ToBearing(d.arrow);
+  // 排序与展示保持一致：优先用“下一站相对本站”的箭头。
+  let b = arrow8ToBearing(d.next_station_arrow);
+  if (b == null) b = arrow8ToBearing(d.arrow);
   if (b == null) {
     const a = textToArrow8(d.direction) || textToArrow8(d.to) || textToArrow8(d.key);
     b = arrow8ToBearing(a);
   }
   return b == null ? 9999 : b;
+}
+
+function ringClockwiseRank(d) {
+  const lineName = String(d.line_name_display || d.line_name || "");
+  if (!isRingLineDisplayName(lineName)) return 2;
+  const s = `${String(d.direction || "")} ${String(d.key || "")}`.trim();
+  if (/顺时针/i.test(s) || /clockwise/i.test(s)) return 0;
+  if (/逆时针/i.test(s) || /counter\s*clockwise|anticlockwise/i.test(s)) return 1;
+  return 2;
 }
 
 function sortRuntimeDirectionsClockwise(directions) {
@@ -2533,8 +2544,8 @@ function sortRuntimeDirectionsClockwise(directions) {
     const lb = String(b.line_name_display || b.line_name || "");
     const oa = Object.prototype.hasOwnProperty.call(lineOrder, la) ? lineOrder[la] : 9999;
     const ob = Object.prototype.hasOwnProperty.call(lineOrder, lb) ? lineOrder[lb] : 9999;
-    const ka = [oa, directionBearingDeg(a), String(a.to || ""), String(a.key || "")];
-    const kb = [ob, directionBearingDeg(b), String(b.to || ""), String(b.key || "")];
+    const ka = [oa, ringClockwiseRank(a), directionBearingDeg(a), String(a.to || ""), String(a.key || "")];
+    const kb = [ob, ringClockwiseRank(b), directionBearingDeg(b), String(b.to || ""), String(b.key || "")];
     for (let i = 0; i < ka.length; i++) {
       if (ka[i] < kb[i]) return -1;
       if (ka[i] > kb[i]) return 1;
