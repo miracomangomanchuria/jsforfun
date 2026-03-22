@@ -74,12 +74,12 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.3";
+const SCRIPT_VERSION = "1.6.7";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
 const MAX_STATIONS = 2;
-const NEAR_STATION_SKIP_ACCESS_M = 50;
+const NEAR_STATION_SKIP_ACCESS_M = 200;
 const AMAP_ACCESS_MAX_STATIONS = 2;
 const HTTP_TIMEOUT_MS = 60000;
 const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
@@ -2482,7 +2482,12 @@ function buildRingDirectionTag(d, shouldShortenTerminal) {
   const nextArrow = String(d.next_station_arrow || "").trim();
   const ringEmoji = ringMark === "内" ? "🔃" : "🔄";
   if (nextStation) {
-    return `${ringMark}${ringEmoji}${termText} ${nextStation}${nextArrow}`.trim();
+    // 若终点与下一站同名，仅显示一次站名，避免“积水潭 积水潭”。
+    if (normName(termText) === normName(nextStation)) {
+      return `${ringMark}${ringEmoji}${termText}\u2060${nextArrow}`.trim();
+    }
+    // 用 word joiner 防止“下一站+箭头”在窄屏被自动断行分开。
+    return `${ringMark}${ringEmoji}${termText} ${nextStation}\u2060${nextArrow}`.trim();
   }
   return `${ringMark}${ringEmoji}${termText}`.trim();
 }
@@ -2642,21 +2647,16 @@ function formatStationText(st) {
       const nonRingArrow = String(d.next_station_arrow || d.arrow || "↘");
       let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
-      // 终点较多时压缩方向行：
-      // - 仅在“未到首班”时显示首班（用户要看什么时候开始有车）
-      // - 其余状态显示末班（用户更关心什么时候停运）
-      if (termCount >= 3) {
-        if (status === "not_started") {
-          if (d.first) row += `${leadGap}🌅${d.first}`;
-          else if (d.last) row += `${leadGap}🌃${d.last}`;
-        } else {
-          if (d.last) row += `${leadGap}🌃${d.last}`;
-          else if (d.first) row += `${leadGap}🌅${d.first}`;
-        }
-      } else {
-        if (d.first && d.last) row += `${leadGap}🌅${d.first} 🌃${d.last}`;
-        else if (d.first) row += `${leadGap}🌅${d.first}`;
+      // 统一单边时间显示，压缩行宽并贴合查询时段心智：
+      // - 未到首班：显示首班
+      // - 开行中/已结束：显示末班
+      // chooseServiceContextForDirection 已实现“末班+60分钟后切到次日”。
+      if (status === "not_started") {
+        if (d.first) row += `${leadGap}🌅${d.first}`;
         else if (d.last) row += `${leadGap}🌃${d.last}`;
+      } else {
+        if (d.last) row += `${leadGap}🌃${d.last}`;
+        else if (d.first) row += `${leadGap}🌅${d.first}`;
       }
       lines.push(row);
 
@@ -2920,6 +2920,12 @@ async function main() {
   mapObj = null;
   const aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
   const nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
+  const systemDistByNorm = {};
+  for (const st of nearStations) {
+    const sd = haversineM(inputLat, inputLon, st.lat, st.lon);
+    st.system_distance_m = Math.round(sd * 10) / 10;
+    systemDistByNorm[st.norm] = st.system_distance_m;
+  }
   let stationLinesIndex = {};
   let stationCoordIndex = {};
   if (nearStations.length) {
@@ -2961,14 +2967,32 @@ async function main() {
   }
   perfAfterSchedulePrep = Date.now();
   const accessByNorm = {};
-  const nearStationSkipAccess = nearStations.some((s) => Number.isFinite(Number(s.distance_m)) && Number(s.distance_m) <= NEAR_STATION_SKIP_ACCESS_M);
-  const shouldFetchAmapAccess = !nearStationSkipAccess;
+  const minSystemDist = nearStations.reduce((best, s) => {
+    const d = Number(s.system_distance_m);
+    if (!Number.isFinite(d)) return best;
+    if (!Number.isFinite(best)) return d;
+    return Math.min(best, d);
+  }, NaN);
+  const globalSkipAccess = Number.isFinite(minSystemDist) && minSystemDist <= NEAR_STATION_SKIP_ACCESS_M;
+  // 路途/出口查询仅由“系统定位到站点中心距离”控制，避免被高德结果反向触发。
+  const accessCandidates = nearStations
+    .filter((s) => {
+      const baseDist = Number.isFinite(Number(s.system_distance_m)) ? Number(s.system_distance_m) : Number(s.distance_m);
+      return Number.isFinite(baseDist) && baseDist > NEAR_STATION_SKIP_ACCESS_M;
+    })
+    .slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
+  // 若最近站已在近站阈值内（<=200m），整次查询都不做出口/路途请求，避免无用加载。
+  const shouldFetchAmapAccess = !globalSkipAccess && accessCandidates.length > 0;
+  if (!backend && globalSkipAccess) {
+    console.log(
+      `[INFO][v${SCRIPT_VERSION}] 最近站系统距离=${Math.round(minSystemDist)}米<=${NEAR_STATION_SKIP_ACCESS_M}米，已跳过口字母与路途请求`
+    );
+  }
   const amapUsable = shouldFetchAmapAccess && AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
   const exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
   const accessCacheCtx = amapUsable ? { data: loadAmapAccessCache(), dirty: false } : null;
   if (amapUsable) {
-    const accessStations = nearStations.slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
-    const tasks = accessStations.map(async (st) => {
+    const tasks = accessCandidates.map(async (st) => {
       try {
         const access = await withTimeoutIgnore(
           fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx),
@@ -2982,6 +3006,18 @@ async function main() {
     const pairs = await Promise.all(tasks);
     for (const [n, access] of pairs) {
       if (!access || typeof access !== "object") continue;
+      const baseDist = Number(systemDistByNorm[n]);
+      const accessDist = Number(access.distance_m);
+      // 规则：若系统距离已判定为近站（<=阈值），或者系统>阈值但高德<阈值，均不采用口与路途信息。
+      if (Number.isFinite(baseDist) && baseDist <= NEAR_STATION_SKIP_ACCESS_M) continue;
+      if (
+        Number.isFinite(baseDist) &&
+        baseDist > NEAR_STATION_SKIP_ACCESS_M &&
+        Number.isFinite(accessDist) &&
+        accessDist < NEAR_STATION_SKIP_ACCESS_M
+      ) {
+        continue;
+      }
       accessByNorm[n] = access;
     }
     if (exitCacheCtx && exitCacheCtx.dirty) {
@@ -3000,7 +3036,7 @@ async function main() {
       norm: st.norm,
       lat: st.lat,
       lon: st.lon,
-      distance_m: st.distance_m,
+      distance_m: Number.isFinite(Number(st.system_distance_m)) ? Number(st.system_distance_m) : st.distance_m,
       line_names: st.line_names,
       station_ids: st.station_ids,
       access: accessByNorm[st.norm] || null,
