@@ -74,7 +74,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.8";
+const SCRIPT_VERSION = "1.6.11";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -2648,12 +2648,23 @@ function formatStationText(st) {
       let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
       const toTagLen = Array.from(toTag || "").length;
+      const isRingLine = isRingLineDisplayName(String(d.line_name_display || d.line_name || ""));
+      const markerNameLen = hasMarkerInTag
+        ? Array.from(String(toTag || "").replace(/[₀₁₂₃₄₅₆₇₈₉₋\s]/g, "")).length
+        : 0;
+      const shortMarkerTwoTerminals =
+        !isRingLine && termCount === 2 && hasMarkerInTag && markerNameLen > 0 && markerNameLen <= 6;
+      const shortMarkerThreeTerminals =
+        !isRingLine && termCount === 3 && hasMarkerInTag && markerNameLen > 0 && markerNameLen <= 6;
       // 仅在“拥挤行”压缩到单边时间：
       // - 三终点
       // - 两终点且已带终点标记（₁₂）或方向文本过长
+      //   但若非环线且带标记且两站名总长度<=6，则恢复首末双时间
+      // - 三终点同理：若非环线且三站名总长度<=6，也恢复首末双时间
       // 其他（尤其单终点）保留首末双时间。
       const compactBoundaryTime =
-        termCount >= 3 || (termCount === 2 && (hasMarkerInTag || toTagLen >= 12));
+        (termCount >= 3 && !shortMarkerThreeTerminals) ||
+        (termCount === 2 && ((hasMarkerInTag && !shortMarkerTwoTerminals) || toTagLen >= 12));
       if (compactBoundaryTime) {
         // chooseServiceContextForDirection 已实现“末班+60分钟后切到次日”。
         if (status === "not_started") {
