@@ -74,7 +74,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.7";
+const SCRIPT_VERSION = "1.6.8";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -2647,16 +2647,26 @@ function formatStationText(st) {
       const nonRingArrow = String(d.next_station_arrow || d.arrow || "↘");
       let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
-      // 统一单边时间显示，压缩行宽并贴合查询时段心智：
-      // - 未到首班：显示首班
-      // - 开行中/已结束：显示末班
-      // chooseServiceContextForDirection 已实现“末班+60分钟后切到次日”。
-      if (status === "not_started") {
-        if (d.first) row += `${leadGap}🌅${d.first}`;
-        else if (d.last) row += `${leadGap}🌃${d.last}`;
+      const toTagLen = Array.from(toTag || "").length;
+      // 仅在“拥挤行”压缩到单边时间：
+      // - 三终点
+      // - 两终点且已带终点标记（₁₂）或方向文本过长
+      // 其他（尤其单终点）保留首末双时间。
+      const compactBoundaryTime =
+        termCount >= 3 || (termCount === 2 && (hasMarkerInTag || toTagLen >= 12));
+      if (compactBoundaryTime) {
+        // chooseServiceContextForDirection 已实现“末班+60分钟后切到次日”。
+        if (status === "not_started") {
+          if (d.first) row += `${leadGap}🌅${d.first}`;
+          else if (d.last) row += `${leadGap}🌃${d.last}`;
+        } else {
+          if (d.last) row += `${leadGap}🌃${d.last}`;
+          else if (d.first) row += `${leadGap}🌅${d.first}`;
+        }
       } else {
-        if (d.last) row += `${leadGap}🌃${d.last}`;
+        if (d.first && d.last) row += `${leadGap}🌅${d.first} 🌃${d.last}`;
         else if (d.first) row += `${leadGap}🌅${d.first}`;
+        else if (d.last) row += `${leadGap}🌃${d.last}`;
       }
       lines.push(row);
 
