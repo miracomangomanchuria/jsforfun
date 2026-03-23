@@ -74,7 +74,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.11";
+const SCRIPT_VERSION = "1.6.14";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -2496,6 +2496,46 @@ function isNonRingLineDisplayName(lineName) {
   return !isRingLineDisplayName(lineName);
 }
 
+function estimateTimeTokenLineWidth(text) {
+  const digitWidthMap = {
+    "0": 0.90, "1": 0.52, "2": 0.84, "3": 0.84, "4": 0.86,
+    "5": 0.84, "6": 0.86, "7": 0.78, "8": 0.90, "9": 0.88
+  };
+  const superscriptWidthMap = {
+    "⁰": 0.58, "¹": 0.34, "²": 0.48, "³": 0.48, "⁴": 0.50,
+    "⁵": 0.48, "⁶": 0.50, "⁷": 0.46, "⁸": 0.52, "⁹": 0.50, "⁻": 0.42
+  };
+  const subscriptWidthMap = {
+    "₀": 0.78, "₁": 0.50, "₂": 0.68, "₃": 0.68, "₄": 0.70,
+    "₅": 0.68, "₆": 0.70, "₇": 0.66, "₈": 0.72, "₉": 0.70, "₋": 0.50
+  };
+  let width = 0;
+  for (const ch of Array.from(String(text || ""))) {
+    if (ch === " ") {
+      width += 0.50;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(digitWidthMap, ch)) {
+      width += digitWidthMap[ch];
+      continue;
+    }
+    if (ch === ":") {
+      width += 0.38;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(superscriptWidthMap, ch)) {
+      width += superscriptWidthMap[ch];
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(subscriptWidthMap, ch)) {
+      width += subscriptWidthMap[ch];
+      continue;
+    }
+    width += 1.0;
+  }
+  return width;
+}
+
 function formatTimeTokens(trips) {
   const out = [];
   let hasMedal = false;
@@ -2514,7 +2554,14 @@ function formatTimeTokens(trips) {
     }
     out.push(`${medal}${showTime}${toSuperscriptNumber(inMin)}`);
   }
-  return out.join(hasMedal ? "   " : "    ");
+  if (!out.length) return "";
+  const gapCandidates = hasMedal ? ["   ", "  ", " "] : ["    ", "   ", "  ", " "];
+  const maxDisplayWidth = hasMedal ? 23.9 : 24.0;
+  for (const gap of gapCandidates) {
+    const line = out.join(gap);
+    if (estimateTimeTokenLineWidth(line) <= maxDisplayWidth) return line;
+  }
+  return out.join(" ");
 }
 
 function directionBearingDeg(d) {
