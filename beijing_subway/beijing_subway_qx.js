@@ -74,7 +74,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.14";
+const SCRIPT_VERSION = "1.6.16";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -86,7 +86,7 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 3;
+const SCHEDULE_COMPACT_INDEX_VERSION = 5;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
@@ -1227,6 +1227,7 @@ function isValidCompactScheduleIndex(idx) {
     Number(idx.version) === SCHEDULE_COMPACT_INDEX_VERSION &&
     Array.isArray(idx.line_dirs) &&
     Array.isArray(idx.terminals) &&
+    Array.isArray(idx.origins) &&
     Array.isArray(idx.next_stations) &&
     Array.isArray(idx.tails) &&
     idx.stations &&
@@ -1922,6 +1923,7 @@ function compactIntDecode(s) {
 function packCompactCellArrays(cell) {
   const mins = Array.isArray(cell && cell.m) ? cell.m : [];
   const ts = Array.isArray(cell && cell.t) ? cell.t : [];
+  const os = Array.isArray(cell && cell.o) ? cell.o : [];
   const ns = Array.isArray(cell && cell.n) ? cell.n : [];
   const rs = Array.isArray(cell && cell.r) ? cell.r : [];
   const zs = Array.isArray(cell && cell.z) ? cell.z : [];
@@ -1936,6 +1938,7 @@ function packCompactCellArrays(cell) {
     out.push([
       compactIntEncode(dm),
       compactIntEncode(ts[i]),
+      compactIntEncode(os[i]),
       compactIntEncode(ns[i]),
       compactIntEncode(rs[i]),
       compactIntEncode(zs[i])
@@ -1949,6 +1952,8 @@ function buildCompactScheduleIndex(schedule) {
   const lineDirs = [];
   const terminalIds = {};
   const terminals = [];
+  const originIds = {};
+  const origins = [];
   const nextStationIds = {};
   const nextStations = [];
   const tailIds = {};
@@ -1961,6 +1966,7 @@ function buildCompactScheduleIndex(schedule) {
       version: SCHEDULE_COMPACT_INDEX_VERSION,
       line_dirs: [],
       terminals: [],
+      origins: [],
       next_stations: [],
       tails: [],
       stations: {}
@@ -1995,6 +2001,8 @@ function buildCompactScheduleIndex(schedule) {
         const terminal = String(parsed[parsed.length - 1][0] || "").trim();
         const terminalMin = Number(parsed[parsed.length - 1][1]);
         const terminalId = terminal ? internCompactId(terminalIds, terminals, terminal) : -1;
+        const origin = String(parsed[0][0] || "").trim();
+        const originId = origin ? internCompactId(originIds, origins, origin) : -1;
         const tailNames = parsed.slice().reverse().slice(0, CROSSLINE_LOOKBACK).map((x) => String(x[0] || ""));
         const tailSig = tailNames.join("|");
         const tailId = tailSig ? internCompactId(tailIds, tails, tailSig) : -1;
@@ -2003,6 +2011,8 @@ function buildCompactScheduleIndex(schedule) {
           const stName = parsed[pi][0];
           const curMin = parsed[pi][1];
           const nextName = pi + 1 < parsed.length ? String(parsed[pi + 1][0] || "").trim() : "";
+          // “出发提醒”只保留还有下一站的记录；列车终到本站的末站时刻是到站，不是可乘发车。
+          if (!nextName) continue;
           const nextId = nextName ? internCompactId(nextStationIds, nextStations, nextName) : -1;
           const rawName = String(stName || "");
           let stNorm = normMemo[rawName];
@@ -2016,11 +2026,12 @@ function buildCompactScheduleIndex(schedule) {
             stations[stNorm] = {};
           }
           if (!Object.prototype.hasOwnProperty.call(stations[stNorm], lineDirId)) {
-            stations[stNorm][lineDirId] = { m: [], t: [], n: [], r: [], z: [] };
+            stations[stNorm][lineDirId] = { m: [], t: [], o: [], n: [], r: [], z: [] };
           }
           const cell = stations[stNorm][lineDirId];
           cell.m.push(curMin);
           cell.t.push(terminalId);
+          cell.o.push(originId);
           cell.n.push(nextId);
           const remain = terminalMin - curMin;
           cell.r.push(Number.isFinite(remain) ? remain : -1);
@@ -2039,6 +2050,7 @@ function buildCompactScheduleIndex(schedule) {
       order.sort((a, b) => Number(cell.m[a]) - Number(cell.m[b]));
       cell.m = order.map((i) => Number(cell.m[i]));
       cell.t = order.map((i) => Number(cell.t[i]));
+      cell.o = order.map((i) => Number((cell.o || [])[i]));
       cell.n = order.map((i) => Number((cell.n || [])[i]));
       cell.r = order.map((i) => Number(cell.r[i]));
       cell.z = order.map((i) => Number(cell.z[i]));
@@ -2052,6 +2064,7 @@ function buildCompactScheduleIndex(schedule) {
       cell.q = q;
       delete cell.m;
       delete cell.t;
+      delete cell.o;
       delete cell.n;
       delete cell.r;
       delete cell.z;
@@ -2063,6 +2076,7 @@ function buildCompactScheduleIndex(schedule) {
     version: SCHEDULE_COMPACT_INDEX_VERSION,
     line_dirs: lineDirs,
     terminals,
+    origins,
     next_stations: nextStations,
     tails: tailArray,
     stations
@@ -2076,6 +2090,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
 
   const lineDirs = indexObj.line_dirs || [];
   const terminals = indexObj.terminals || [];
+  const origins = indexObj.origins || [];
   const nextStations = indexObj.next_stations || [];
   const tails = indexObj.tails || [];
   const stations = indexObj.stations || {};
@@ -2097,7 +2112,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
           const seg = String(rows[i] || "");
           if (!seg) continue;
           const parts = seg.split(".");
-          if (parts.length < 5) continue;
+          if (parts.length < 6) continue;
 
           const dm = compactIntDecode(parts[0]);
           if (!Number.isFinite(dm)) continue;
@@ -2105,11 +2120,13 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
           prevMin = minute;
 
           const tId = compactIntDecode(parts[1]);
-          const nId = compactIntDecode(parts[2]);
-          const rv = compactIntDecode(parts[3]);
-          const tailId = compactIntDecode(parts[4]);
+          const oId = compactIntDecode(parts[2]);
+          const nId = compactIntDecode(parts[3]);
+          const rv = compactIntDecode(parts[4]);
+          const tailId = compactIntDecode(parts[5]);
 
           const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+          const origin = Number.isFinite(oId) && oId >= 0 ? String(origins[oId] || "") : "";
           const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
           const remainMin = Number.isFinite(rv) && rv >= 0 ? rv : null;
           const tail = Number.isFinite(tailId) && tailId >= 0 && Array.isArray(tails[tailId]) ? tails[tailId] : [];
@@ -2119,6 +2136,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
           restored.trips.push({
             minute,
             terminal,
+            origin,
             next_station: nextStation,
             tail,
             remain_min: remainMin
@@ -2128,6 +2146,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
         // 兼容旧缓存格式（v2 或历史临时对象）
         const mins = Array.isArray(cell && cell.m) ? cell.m : [];
         const tIds = Array.isArray(cell && cell.t) ? cell.t : [];
+        const oIds = Array.isArray(cell && cell.o) ? cell.o : [];
         const nIds = Array.isArray(cell && cell.n) ? cell.n : [];
         const remains = Array.isArray(cell && cell.r) ? cell.r : [];
         const zIds = Array.isArray(cell && cell.z) ? cell.z : [];
@@ -2136,6 +2155,8 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
           if (!Number.isFinite(minute)) continue;
           const tId = Number(tIds[i]);
           const terminal = Number.isFinite(tId) && tId >= 0 ? String(terminals[tId] || "") : "";
+          const oId = Number(oIds[i]);
+          const origin = Number.isFinite(oId) && oId >= 0 ? String(origins[oId] || "") : "";
           const nId = Number(nIds[i]);
           const nextStation = Number.isFinite(nId) && nId >= 0 ? String(nextStations[nId] || "") : "";
           const rv = Number(remains[i]);
@@ -2148,6 +2169,7 @@ function collectScheduleForStationsFromCompactIndex(indexObj, stationNorms) {
           restored.trips.push({
             minute,
             terminal,
+            origin,
             next_station: nextStation,
             tail,
             remain_min: remainMin
@@ -2360,15 +2382,18 @@ function pickFarthestTerminalByRemain(trips, terminalNames) {
 
 function buildTerminalsForNext(nextTrips, tripsAll) {
   const nextTerms = [];
+  const fullRingMap = {};
   for (const t of nextTrips || []) {
     const nm = String((t && t.terminal) || "").trim();
     if (nm && !nextTerms.includes(nm)) nextTerms.push(nm);
+    if (nm && t && t.is_full_ring) fullRingMap[nm] = true;
   }
   if (nextTerms.length <= 1) return { terms: [], enableMedals: false };
   const ordered = terminalOrderByRemain(tripsAll || [], nextTerms);
   const out = ordered.map((name, i) => ({
     name,
     marker: toSubscriptNumber(i + 1),
+    is_full_ring: !!fullRingMap[name],
     count: 0
   }));
   return { terms: out, enableMedals: true };
@@ -2387,6 +2412,13 @@ function applyMedalsToTimes(trips, medals, enable, otherMedal = "") {
     const term = String(t.terminal || "");
     t.medal = mm[term] || (otherMedal && term ? otherMedal : "");
   }
+}
+
+function isTripFullRing(trip) {
+  if (!trip || typeof trip !== "object") return false;
+  const origin = String(trip.origin || "").trim();
+  const terminal = String(trip.terminal || "").trim();
+  return !!(origin && terminal && normName(origin) === normName(terminal));
 }
 
 function terminalLabel(terminals) {
@@ -2476,20 +2508,57 @@ function buildRingDirectionTag(d, shouldShortenTerminal) {
     if (!uniqTerms.includes(term)) uniqTerms.push(term);
   }
   if (uniqTerms.length !== 1) return "";
+  const ringTrips = nextTrips.filter((t) => String((t && t.terminal) || "").trim() === uniqTerms[0]);
+  const hasFullRing = ringTrips.some((t) => isTripFullRing(t));
+  if (!hasFullRing) return "";
   let termText = uniqTerms[0];
   if (shouldShortenTerminal) termText = simplifyDistrictPrefixedTerminalName(termText);
   const nextStation = String(d.next_station || "").trim();
   const nextArrow = String(d.next_station_arrow || "").trim();
   const ringEmoji = ringMark === "内" ? "🔃" : "🔄";
-  if (nextStation) {
-    // 若终点与下一站同名，仅显示一次站名，避免“积水潭 积水潭”。
+  if (nextStation && nextArrow) {
+    // 环线改成“终点|箭头下一站”，避免出现“双井→”这类歧义。
+    // 若终点与下一站同名，仅保留一次站名。
     if (normName(termText) === normName(nextStation)) {
-      return `${ringMark}${ringEmoji}${termText}\u2060${nextArrow}`.trim();
+      return `${ringMark}${ringEmoji}${termText}`.trim();
     }
-    // 用 word joiner 防止“下一站+箭头”在窄屏被自动断行分开。
-    return `${ringMark}${ringEmoji}${termText} ${nextStation}\u2060${nextArrow}`.trim();
+    return `${ringMark}${ringEmoji}${termText}|${nextArrow}\u2060${nextStation}`.trim();
   }
+  if (nextStation) return `${ringMark}${ringEmoji}${termText}|${nextStation}`.trim();
+  if (nextArrow) return `${ringMark}${ringEmoji}${termText}`.trim();
   return `${ringMark}${ringEmoji}${termText}`.trim();
+}
+
+function buildRingMixedTerminalLabel(d, terminals, shouldShortenTerminal) {
+  const lineName = String(d.line_name_display || d.line_name || "");
+  if (!isRingLineDisplayName(lineName)) return "";
+  if (!Array.isArray(terminals) || terminals.length < 2) return "";
+  const ringMark = ringMarkFromDirectionText(d.direction || d.key || "");
+  if (!ringMark) return "";
+  const nextStation = String(d.next_station || "").trim();
+  if (!nextStation) return "";
+
+  const ringEmoji = ringMark === "内" ? "🔃" : "🔄";
+  const nextArrow = String(d.next_station_arrow || d.arrow || "").trim();
+  const items = [];
+  let fullRingCount = 0;
+
+  for (const t of terminals) {
+    if (!t || typeof t !== "object") continue;
+    let name = String(t.name || "").trim();
+    if (!name) continue;
+    if (shouldShortenTerminal) name = simplifyDistrictPrefixedTerminalName(name);
+    const marker = String(t.marker || "").trim();
+    const isFullRing = !!t.is_full_ring;
+    if (isFullRing) fullRingCount += 1;
+    const prefix = isFullRing ? ringEmoji : nextArrow;
+    items.push(`${prefix}${marker}${name}`.trim());
+  }
+
+  // 只有出现真环时，才逐个终点打标；
+  // 若全是区间车，维持原来的单箭头写法，节省宽度。
+  if (fullRingCount <= 0) return "";
+  return items.join(" ");
 }
 
 function isNonRingLineDisplayName(lineName) {
@@ -2536,6 +2605,94 @@ function estimateTimeTokenLineWidth(text) {
   return width;
 }
 
+function estimateDirectionRowWidth(text) {
+  const digitWidthMap = {
+    "0": 0.90, "1": 0.52, "2": 0.84, "3": 0.84, "4": 0.86,
+    "5": 0.84, "6": 0.86, "7": 0.78, "8": 0.90, "9": 0.88
+  };
+  const superscriptWidthMap = {
+    "⁰": 0.58, "¹": 0.34, "²": 0.48, "³": 0.48, "⁴": 0.50,
+    "⁵": 0.48, "⁶": 0.50, "⁷": 0.46, "⁸": 0.52, "⁹": 0.50, "⁻": 0.42
+  };
+  const subscriptWidthMap = {
+    "₀": 0.78, "₁": 0.50, "₂": 0.68, "₃": 0.68, "₄": 0.70,
+    "₅": 0.68, "₆": 0.70, "₇": 0.66, "₈": 0.72, "₉": 0.70, "₋": 0.50
+  };
+  let width = 0;
+  for (const ch of Array.from(String(text || ""))) {
+    if (ch === " ") {
+      width += 0.50;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(digitWidthMap, ch)) {
+      width += digitWidthMap[ch];
+      continue;
+    }
+    if (ch === ":") {
+      width += 0.38;
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(superscriptWidthMap, ch)) {
+      width += superscriptWidthMap[ch];
+      continue;
+    }
+    if (Object.prototype.hasOwnProperty.call(subscriptWidthMap, ch)) {
+      width += subscriptWidthMap[ch];
+      continue;
+    }
+    if (/[\u4E00-\u9FFF]/.test(ch)) {
+      width += 1.62;
+      continue;
+    }
+    if (/[\u2190-\u21FF\u2B00-\u2BFF]/u.test(ch)) {
+      width += 1.12;
+      continue;
+    }
+    if (/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/u.test(ch)) {
+      width += 1.85;
+      continue;
+    }
+    if (ch === "\u2060") continue;
+    width += 1.0;
+  }
+  return width;
+}
+
+function uniqueNonEmptyStrings(items) {
+  const out = [];
+  const seen = new Set();
+  for (const x of items || []) {
+    const s = String(x || "");
+    if (seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+function buildDirectionRowBoundarySuffixes(d, leadGap, compactBoundaryTime) {
+  const status = String((d && d.status) || "");
+  const first = String((d && d.first) || "").trim();
+  const last = String((d && d.last) || "").trim();
+  const full = first && last ? `${leadGap}🌅${first} 🌃${last}` : (first ? `${leadGap}🌅${first}` : (last ? `${leadGap}🌃${last}` : ""));
+  let current = "";
+  if (status === "not_started") current = first ? `${leadGap}🌅${first}` : (last ? `${leadGap}🌃${last}` : "");
+  else current = last ? `${leadGap}🌃${last}` : (first ? `${leadGap}🌅${first}` : "");
+  return compactBoundaryTime
+    ? uniqueNonEmptyStrings([current, ""])
+    : uniqueNonEmptyStrings([full, current, ""]);
+}
+
+function fitDirectionRow(baseRow, d, leadGap, compactBoundaryTime) {
+  const maxDisplayWidth = 23.4;
+  const suffixes = buildDirectionRowBoundarySuffixes(d, leadGap, compactBoundaryTime);
+  for (const suffix of suffixes) {
+    const row = `${baseRow}${suffix}`;
+    if (estimateDirectionRowWidth(row) <= maxDisplayWidth) return row;
+  }
+  return baseRow;
+}
+
 function formatTimeTokens(trips) {
   const out = [];
   let hasMedal = false;
@@ -2556,7 +2713,7 @@ function formatTimeTokens(trips) {
   }
   if (!out.length) return "";
   const gapCandidates = hasMedal ? ["   ", "  ", " "] : ["    ", "   ", "  ", " "];
-  const maxDisplayWidth = hasMedal ? 23.9 : 24.0;
+  const maxDisplayWidth = hasMedal ? 23.4 : 23.3;
   for (const gap of gapCandidates) {
     const line = out.join(gap);
     if (estimateTimeTokenLineWidth(line) <= maxDisplayWidth) return line;
@@ -2629,7 +2786,7 @@ function cleanLineText(s) {
   const token = `[${subs}]?\\d{2}:\\d{2}[${supers}]*`;
   const timeLineRe = new RegExp(`^(?:${token})(?:\\s{2,}${token})+$`);
   const dirLineRe = new RegExp(
-    `^[↑↗→↘↓↙←↖]\\s.+\\s{1,}(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2})(?:\\s+(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2}))?$`
+    `^[↑↗→↘↓↙←↖]\\s*.+\\s{1,}(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2})(?:\\s+(?:🌅\\d{2}:\\d{2}|🌃\\d{2}:\\d{2}))?$`
   );
   if (timeLineRe.test(raw)) {
     return raw.replace(/\t+/g, " ");
@@ -2678,8 +2835,12 @@ function formatStationText(st) {
       const shouldShortenTerminal = allTermCount >= 2;
       let toTag = "";
       let useRingRow = false;
+      const ringMixedTag = buildRingMixedTerminalLabel(d, d.terminals, shouldShortenTerminal);
       const ringTag = buildRingDirectionTag(d, shouldShortenTerminal);
-      if (ringTag && status !== "ended") {
+      if (ringMixedTag && status !== "ended") {
+        toTag = ringMixedTag;
+        useRingRow = true;
+      } else if (ringTag && status !== "ended") {
         toTag = ringTag;
         useRingRow = true;
       } else {
@@ -2692,7 +2853,7 @@ function formatStationText(st) {
       // 非环线方向箭头优先使用“下一站相对本站”的方向；
       // 仅在 next_station 缺失时回退到旧逻辑箭头。
       const nonRingArrow = String(d.next_station_arrow || d.arrow || "↘");
-      let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow} ${toTag || "未知方向"}`;
+      let row = useRingRow ? `${toTag || "未知方向"}` : `${nonRingArrow}${toTag || "未知方向"}`;
       const leadGap = hasMarkerInTag ? " " : "   ";
       const toTagLen = Array.from(toTag || "").length;
       const isRingLine = isRingLineDisplayName(String(d.line_name_display || d.line_name || ""));
@@ -2712,20 +2873,7 @@ function formatStationText(st) {
       const compactBoundaryTime =
         (termCount >= 3 && !shortMarkerThreeTerminals) ||
         (termCount === 2 && ((hasMarkerInTag && !shortMarkerTwoTerminals) || toTagLen >= 12));
-      if (compactBoundaryTime) {
-        // chooseServiceContextForDirection 已实现“末班+60分钟后切到次日”。
-        if (status === "not_started") {
-          if (d.first) row += `${leadGap}🌅${d.first}`;
-          else if (d.last) row += `${leadGap}🌃${d.last}`;
-        } else {
-          if (d.last) row += `${leadGap}🌃${d.last}`;
-          else if (d.first) row += `${leadGap}🌅${d.first}`;
-        }
-      } else {
-        if (d.first && d.last) row += `${leadGap}🌅${d.first} 🌃${d.last}`;
-        else if (d.first) row += `${leadGap}🌅${d.first}`;
-        else if (d.last) row += `${leadGap}🌃${d.last}`;
-      }
+      row = fitDirectionRow(row, d, leadGap, compactBoundaryTime);
       lines.push(row);
 
       if (status === "ended" && d.last) {
@@ -3158,6 +3306,8 @@ async function main() {
             time: hhmmStr(dtv.getHours(), dtv.getMinutes()),
             in_min: Math.round((dtv.getTime() - now.getTime()) / 60000),
             terminal: t.terminal || "",
+            origin: t.origin || "",
+            is_full_ring: isTripFullRing(t),
             next_station: t.next_station || ""
           });
           if (!tails.length && Array.isArray(t.tail) && t.tail.length) tails = t.tail.slice();
