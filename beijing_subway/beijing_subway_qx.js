@@ -1130,10 +1130,43 @@ function writePeriodMarker(key, periodKey) {
 }
 
 function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
+  const mapPeriod = String(mapPeriodKey || "");
+  const schPeriod = String(schedulePeriodKey || "");
   const mapHit = readPeriodMarker(MAP_PERIOD_MARKER_KEY);
   const schHit = readPeriodMarker(SCHEDULE_PERIOD_MARKER_KEY);
-  const needMap = !mapHit || mapHit !== String(mapPeriodKey || "");
-  const needSch = !schHit || schHit !== String(schedulePeriodKey || "");
+  const needMapMarker = !mapHit || mapHit !== mapPeriod;
+  const needSchMarker = !schHit || schHit !== schPeriod;
+
+  let needMapCache = true;
+  const cachedMap = readLargeJsonCache(`${CACHE_KEY_PREFIX}:map:monthly`);
+  if (
+    cachedMap &&
+    typeof cachedMap === "object" &&
+    cachedMap.period_key === mapPeriod &&
+    cachedMap.data &&
+    typeof cachedMap.data === "object" &&
+    Array.isArray(cachedMap.data.stations_data) &&
+    Array.isArray(cachedMap.data.lines_data)
+  ) {
+    needMapCache = false;
+  }
+
+  let needSchCache = true;
+  const cachedIdxWrap = readLargeJsonCache(scheduleHalfMonthIndexCacheKey());
+  const cachedIdxData = cachedIdxWrap && typeof cachedIdxWrap === "object" && isValidCompactScheduleIndexBundle(cachedIdxWrap.data)
+    ? cachedIdxWrap.data
+    : (isValidCompactScheduleIndexBundle(cachedIdxWrap) ? cachedIdxWrap : null);
+  if (
+    cachedIdxData &&
+    cachedIdxWrap &&
+    typeof cachedIdxWrap === "object" &&
+    cachedIdxWrap.period_key === schPeriod
+  ) {
+    needSchCache = false;
+  }
+
+  const needMap = needMapMarker || needMapCache;
+  const needSch = needSchMarker || needSchCache;
   return needMap || needSch;
 }
 
