@@ -1129,7 +1129,7 @@ function writePeriodMarker(key, periodKey) {
   });
 }
 
-function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
+function analyzeAutoPrewarmNeed(mapPeriodKey, schedulePeriodKey) {
   const mapPeriod = String(mapPeriodKey || "");
   const schPeriod = String(schedulePeriodKey || "");
   const mapHit = readPeriodMarker(MAP_PERIOD_MARKER_KEY);
@@ -1153,6 +1153,14 @@ function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
 
   let needSchCache = true;
   const cachedIdxWrap = readLargeJsonCache(scheduleHalfMonthIndexCacheKey());
+  let cachedIdxVersion = null;
+  if (cachedIdxWrap && typeof cachedIdxWrap === "object") {
+    const weekdayIdx = cachedIdxWrap.data && typeof cachedIdxWrap.data === "object"
+      ? cachedIdxWrap.data.weekday
+      : cachedIdxWrap.weekday;
+    const vv = weekdayIdx && Number(weekdayIdx.version);
+    if (Number.isFinite(vv)) cachedIdxVersion = vv;
+  }
   const cachedIdxData = cachedIdxWrap && typeof cachedIdxWrap === "object" && isValidCompactScheduleIndexBundle(cachedIdxWrap.data)
     ? cachedIdxWrap.data
     : (isValidCompactScheduleIndexBundle(cachedIdxWrap) ? cachedIdxWrap : null);
@@ -1167,7 +1175,43 @@ function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
 
   const needMap = needMapMarker || needMapCache;
   const needSch = needSchMarker || needSchCache;
-  return needMap || needSch;
+  return {
+    need: needMap || needSch,
+    map: {
+      period: mapPeriod,
+      marker: mapHit,
+      marker_ok: !needMapMarker,
+      cache_ok: !needMapCache
+    },
+    schedule: {
+      period: schPeriod,
+      marker: schHit,
+      marker_ok: !needSchMarker,
+      cache_ok: !needSchCache,
+      cache_version: cachedIdxVersion,
+      expected_version: SCHEDULE_COMPACT_INDEX_VERSION
+    }
+  };
+}
+
+function needAutoPrewarmForNoArgRun(mapPeriodKey, schedulePeriodKey) {
+  return !!analyzeAutoPrewarmNeed(mapPeriodKey, schedulePeriodKey).need;
+}
+
+function formatAutoPrewarmReason(info) {
+  if (!info || typeof info !== "object") return "自动预热判定=未知";
+  const map = info.map || {};
+  const sch = info.schedule || {};
+  const parts = [
+    `地图marker=${map.marker_ok ? "OK" : "MISS"}(${map.marker || "-"}/${map.period || "-"})`,
+    `地图cache=${map.cache_ok ? "OK" : "MISS"}`,
+    `时刻marker=${sch.marker_ok ? "OK" : "MISS"}(${sch.marker || "-"}/${sch.period || "-"})`,
+    `时刻cache=${sch.cache_ok ? "OK" : "MISS"}`,
+    `索引版本=${sch.cache_version == null ? "-" : sch.cache_version}/${sch.expected_version == null ? "-" : sch.expected_version}`
+  ];
+  return info.need
+    ? `自动预热=需要 | ${parts.join(" | ")}`
+    : `自动预热=跳过 | 原因=${parts.join(" | ")}`;
 }
 
 async function loadHolidayYearData(year) {
@@ -3028,7 +3072,8 @@ async function main() {
   const prevDayForMode = addDays(todayForMode, -1);
   const mapPeriodKeyForMode = monthKey(todayForMode);
   const schedulePeriodKeyForMode = halfMonthKey(todayForMode);
-  const autoPrewarmNoArg = !backend && !rawArgText && needAutoPrewarmForNoArgRun(mapPeriodKeyForMode, schedulePeriodKeyForMode);
+  const autoPrewarmInfo = analyzeAutoPrewarmNeed(mapPeriodKeyForMode, schedulePeriodKeyForMode);
+  const autoPrewarmNoArg = !backend && !rawArgText && !!autoPrewarmInfo.need;
   perfAfterMode = Date.now();
   if (!backend) {
     if (verboseActiveLog) {
@@ -3040,6 +3085,7 @@ async function main() {
       }
     } else {
       console.log(`[INFO][v${SCRIPT_VERSION}] 主动模式启动`);
+      console.log(`[INFO][v${SCRIPT_VERSION}] ${formatAutoPrewarmReason(autoPrewarmInfo)}`);
     }
     if (!rawArgText && !autoPrewarmNoArg) {
       console.log(`[INFO][v${SCRIPT_VERSION}] 缓存周期有效，本次跳过预热`);
