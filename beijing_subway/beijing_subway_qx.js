@@ -2799,7 +2799,10 @@ function formatTimeTokens(trips) {
 }
 
 function directionBearingDeg(d) {
-  // 排序与展示保持一致：优先用“下一站相对本站”的箭头。
+  // 排序优先用预先计算好的“代表终点宏观方位”；
+  // 缺失时再回退到“下一站相对本站”的局部箭头。
+  const sortBearing = Number(d && d.sort_bearing_deg);
+  if (Number.isFinite(sortBearing)) return sortBearing;
   let b = arrow8ToBearing(d.next_station_arrow);
   if (b == null) b = arrow8ToBearing(d.arrow);
   if (b == null) {
@@ -2807,6 +2810,33 @@ function directionBearingDeg(d) {
     b = arrow8ToBearing(a);
   }
   return b == null ? 9999 : b;
+}
+
+function computeDirectionSortBearingDeg(fromLat, fromLon, terminalNames, stationCoordIndex, nextStationArrow, fallbackArrow) {
+  const names = Array.isArray(terminalNames) ? terminalNames : [];
+  for (const nm of names) {
+    const key = normName(nm);
+    const tgt = key && stationCoordIndex && stationCoordIndex[key];
+    if (!tgt || !Array.isArray(tgt) || tgt.length < 2) continue;
+    const br = bearingDeg(fromLat, fromLon, Number(tgt[0]), Number(tgt[1]));
+    if (Number.isFinite(br)) return br;
+  }
+  let b = arrow8ToBearing(nextStationArrow);
+  if (b == null) b = arrow8ToBearing(fallbackArrow);
+  return b == null ? 9999 : b;
+}
+
+function computeDirectionSortTargetCoord(terminalNames, stationCoordIndex) {
+  const names = Array.isArray(terminalNames) ? terminalNames : [];
+  for (const nm of names) {
+    const key = normName(nm);
+    const tgt = key && stationCoordIndex && stationCoordIndex[key];
+    if (!tgt || !Array.isArray(tgt) || tgt.length < 2) continue;
+    const lat = Number(tgt[0]);
+    const lon = Number(tgt[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return [lat, lon];
+  }
+  return null;
 }
 
 function ringClockwiseRank(d) {
@@ -2818,6 +2848,50 @@ function ringClockwiseRank(d) {
   return 2;
 }
 
+function buildNonRingLineAxisMap(directions) {
+  const buckets = {};
+  for (const d of directions || []) {
+    const line = String(d.line_name_display || d.line_name || "");
+    if (!line || !isNonRingLineDisplayName(line)) continue;
+    const lat = Number(d.sort_target_lat);
+    const lon = Number(d.sort_target_lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+    if (!buckets[line]) buckets[line] = [];
+    buckets[line].push([lat, lon]);
+  }
+  const out = {};
+  for (const [line, pts] of Object.entries(buckets)) {
+    if (!Array.isArray(pts) || pts.length < 2) continue;
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    for (const p of pts) {
+      const lat = Number(p[0]);
+      const lon = Number(p[1]);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+    }
+    const latSpan = maxLat - minLat;
+    const lonSpan = maxLon - minLon;
+    out[line] = latSpan >= lonSpan ? "lat" : "lon";
+  }
+  return out;
+}
+
+function compareNonRingDirectionsByAxis(a, b, axis) {
+  if (axis === "lat") {
+    const av = Number(a && a.sort_target_lat);
+    const bv = Number(b && b.sort_target_lat);
+    if (Number.isFinite(av) && Number.isFinite(bv) && av !== bv) return bv - av > 0 ? 1 : -1;
+  } else if (axis === "lon") {
+    const av = Number(a && a.sort_target_lon);
+    const bv = Number(b && b.sort_target_lon);
+    if (Number.isFinite(av) && Number.isFinite(bv) && av !== bv) return bv - av > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
 function sortRuntimeDirectionsClockwise(directions) {
   const dirs = (directions || []).filter((x) => x && typeof x === "object");
   const lineOrder = {};
@@ -2825,11 +2899,18 @@ function sortRuntimeDirectionsClockwise(directions) {
     const ln = String(d.line_name_display || d.line_name || "");
     if (!(ln in lineOrder)) lineOrder[ln] = Object.keys(lineOrder).length;
   }
+  const nonRingAxisMap = buildNonRingLineAxisMap(dirs);
   dirs.sort((a, b) => {
     const la = String(a.line_name_display || a.line_name || "");
     const lb = String(b.line_name_display || b.line_name || "");
     const oa = Object.prototype.hasOwnProperty.call(lineOrder, la) ? lineOrder[la] : 9999;
     const ob = Object.prototype.hasOwnProperty.call(lineOrder, lb) ? lineOrder[lb] : 9999;
+    if (oa !== ob) return oa - ob;
+    if (la === lb && isNonRingLineDisplayName(la)) {
+      const axis = nonRingAxisMap[la] || "";
+      const cmp = compareNonRingDirectionsByAxis(a, b, axis);
+      if (cmp !== 0) return cmp;
+    }
     const ka = [oa, ringClockwiseRank(a), directionBearingDeg(a), String(a.to || ""), String(a.key || "")];
     const kb = [ob, ringClockwiseRank(b), directionBearingDeg(b), String(b.to || ""), String(b.key || "")];
     for (let i = 0; i < ka.length; i++) {
@@ -3451,6 +3532,12 @@ async function main() {
           nextStationArrow = pickDirectionArrow8(direction, nextStationName, st.lat, st.lon, [nextStationName], stationCoordIndex);
         }
       }
+      const sortTargetCoord = isNonRingLineDisplayName(lineName)
+        ? computeDirectionSortTargetCoord(termNames, stationCoordIndex)
+        : null;
+      const sortBearingDeg = isNonRingLineDisplayName(lineName)
+        ? computeDirectionSortBearingDeg(st.lat, st.lon, termNames, stationCoordIndex, nextStationArrow, arrow)
+        : null;
 
       item.runtime.directions.push({
         line_name: lineName,
@@ -3468,6 +3555,9 @@ async function main() {
         arrow,
         next_station: nextStationName,
         next_station_arrow: nextStationArrow,
+        sort_bearing_deg: sortBearingDeg,
+        sort_target_lat: sortTargetCoord ? Number(sortTargetCoord[0]) : null,
+        sort_target_lon: sortTargetCoord ? Number(sortTargetCoord[1]) : null,
         use_farthest_terminal_arrow: useFarthestTerminalArrow,
         use_prev_service_day: !!picked.use_prev_service_day
       });
