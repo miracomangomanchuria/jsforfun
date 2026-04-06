@@ -23,10 +23,11 @@ hostname = chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.3.6';
+const VER = 'v1.4.0';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
+const ACT_DISCOVERY_KEY = 'elife_lottery_activity_discovery_v1';
 const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
 
 const CAPTURE_QX = String.raw`[rewrite_local]
@@ -43,14 +44,14 @@ elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\
 hostname = chp.icbc.com.cn`;
 
 const ACTS = [
-  { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20251230091958948510' },
-  { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260104140832936109' },
-  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260104095117513209' },
-  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260104093807607845' },
-  { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260104102512423965' },
-  { key: 'food', name: '美食刮刮乐', actId: 'LOT20251231142538552213' },
-  { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054' },
-  { key: 'movie', name: '电影刮刮乐', actId: 'LOT20260104114622189618' },
+  { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20251230091958948510', groupActId: 'LPARK20250801152144809773', hdActId: 'HD888813cZxswuh65d', groupSlot: 0 },
+  { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260104140832936109', groupActId: 'LPARK20260104152747703010', hdActId: 'HD888813cNCaaMeLDu', groupSlot: 0 },
+  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260104095117513209', groupActId: 'LPARK20260104095652618118', hdActId: 'HD888813cNzezmCe9d', groupSlot: 1 },
+  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260104093807607845', groupActId: 'LPARK20260104095652618118', hdActId: 'HD888813cNzezmCe9d', groupSlot: 0 },
+  { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260104102512423965', groupActId: 'LPARK20260104105132312187', hdActId: 'HD888813iP1oQnhPJX', groupSlot: 0 },
+  { key: 'food', name: '美食刮刮乐', actId: 'LOT20251231142538552213', groupActId: 'LPARK20251231162233106731', hdActId: 'HD888813cMutfHbQXh', groupSlot: 0 },
+  { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054', groupActId: 'LPARK20260104094508989099', hdActId: 'HD888813cNHeYjjaVu', groupSlot: 0 },
+  { key: 'movie', name: '电影刮刮乐', actId: 'LOT20260104114622189618', groupActId: 'LPARK20260104135441483600', hdActId: 'HD888813V9svtYS24w', groupSlot: 0 },
 ];
 const DAILY_THRESHOLD_RULES = {
   cashback: { '0.18': '20', '0.88': '20', '8.8': '100' },
@@ -60,6 +61,7 @@ const DAILY_THRESHOLD_RULES = {
 const arg = parseArg(typeof $argument === 'string' ? $argument : '');
 const CFG = {
   queryOnly: toBool(arg.query_only, false),
+  discoveryToken: txt(arg.discovery_token),
   maxDrawEach: Math.max(1, toInt(arg.max_draw_each, 3)),
   verifyAfterDraw: toBool(arg.verify_after_draw, false),
   mappingViewLimit: Math.max(1, toInt(arg.mapping_view_limit, 12)),
@@ -88,13 +90,28 @@ Promise.resolve().then(async () => {
     return;
   }
 
+  let acts = hydrateActsFromRuntime(st);
   const lines = [];
   const prizeRows = [];
   const poolRows = [];
   let authExpired = null;
-  for (let i = 0; i < ACTS.length; i++) {
-    const a = ACTS[i];
-    const rs = await runOneActivity(st, a);
+  let discoveryTriggered = false;
+  for (let i = 0; i < acts.length; i++) {
+    let a = acts[i];
+    let rs = await runOneActivity(st, a);
+    if (rs && rs.category === 'expired' && !discoveryTriggered) {
+      discoveryTriggered = true;
+      log('🧭 命中过期活动，启动活动发现器');
+      const refreshed = await refreshActsByDiscovery(st, acts);
+      if (refreshed.changed) {
+        acts = refreshed.acts;
+        a = findActByKey(acts, a.key) || a;
+        log('🔄 活动装填: ' + a.name + ' | actId=' + a.actId + ' | source=' + txt(a.discoverySource || 'discovery'));
+        rs = await runOneActivity(st, a);
+      } else {
+        log('⚠️ 活动发现器未拿到新 actId，继续按当前结果输出');
+      }
+    }
     lines.push(formatActLine(a.name, rs));
     if (rs && rs.authExpired) {
       authExpired = { actName: a.name, reason: friendlyMsg(rs.reason) || 'HTTP 401' };
@@ -141,6 +158,9 @@ async function runOneActivity(st, act) {
   const detail = parseDetail(await reqDetail(st, act.actId));
   if (!detail.ok) return { category: 'error', reason: detail.msg, prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: !!detail.authExpired };
   log('📊 状态: drawFlag=' + detail.drawFlag + ' | drawCount=' + detail.drawCount + ' | totalCount=' + detail.totalCount + ' | errCode=' + detail.errCode + ' | errMsg=' + detail.errMsg);
+  if (isActivityExpired(detail)) {
+    return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+  }
 
   if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
   if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
@@ -172,6 +192,7 @@ async function runOneActivity(st, act) {
 function formatActLine(name, rs) {
   const reason = friendlyMsg(rs && rs.reason);
   if (rs && rs.authExpired) return '⚠️ ' + name + ': 接口401，Cookie已过期，请重新抓包';
+  if (rs && rs.category === 'expired') return '⚠️ ' + name + ': 活动已结束/过期 | ' + (reason || '活动发现器未装填到新活动');
   if (rs.category === 'ok') return '✅ ' + name + ': 已刮' + rs.done + '次 | 本次=' + (rs.prizes.length ? rs.prizes.join('、') : '奖励名未返回') + fmtRemain(rs.remain);
   if (rs.category === 'already_done') return '⏭️ ' + name + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (reason || '已刮过');
   if (rs.category === 'query_only') return '🧪 ' + name + ': 状态可刮，query_only跳过' + fmtRemain(rs.remain);
@@ -286,6 +307,184 @@ function prizeDisplayName(x) {
   return name || '未知奖品';
 }
 
+function hydrateActsFromRuntime(st) {
+  const rt = getActDiscoveryState(st);
+  const byKey = rt.byKey || {};
+  return ACTS.map(function (x) {
+    const cached = byKey[x.key] || {};
+    return Object.assign({}, x, {
+      actId: txt(cached.actId) || x.actId,
+      groupActId: txt(cached.groupActId) || x.groupActId,
+      discoverySource: txt(cached.source) || '',
+      discoveryAt: txt(cached.updateAt) || '',
+    });
+  });
+}
+
+function findActByKey(acts, key) {
+  for (let i = 0; i < (acts || []).length; i++) if (txt(acts[i] && acts[i].key) === txt(key)) return acts[i];
+  return null;
+}
+
+function getActDiscoveryState(st) {
+  st.runtime = st.runtime || {};
+  if (!st.runtime[ACT_DISCOVERY_KEY] || typeof st.runtime[ACT_DISCOVERY_KEY] !== 'object') {
+    st.runtime[ACT_DISCOVERY_KEY] = { byKey: {}, token: '', tokenAt: '', updateAt: '' };
+  }
+  if (!st.runtime[ACT_DISCOVERY_KEY].byKey || typeof st.runtime[ACT_DISCOVERY_KEY].byKey !== 'object') {
+    st.runtime[ACT_DISCOVERY_KEY].byKey = {};
+  }
+  return st.runtime[ACT_DISCOVERY_KEY];
+}
+
+function saveActDiscovery(st, discovered) {
+  const rt = getActDiscoveryState(st);
+  let changed = false;
+  const byKey = rt.byKey || {};
+  const keys = Object.keys(discovered || {});
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i];
+    const item = discovered[key] || {};
+    if (!txt(item.actId)) continue;
+    const old = byKey[key] || {};
+    const next = {
+      actId: txt(item.actId),
+      groupActId: txt(item.groupActId) || txt(old.groupActId),
+      source: txt(item.source) || txt(old.source) || 'discovery',
+      groupName: txt(item.groupName) || txt(old.groupName),
+      updateAt: now(),
+    };
+    if (JSON.stringify(old) !== JSON.stringify(next)) {
+      byKey[key] = next;
+      changed = true;
+    }
+  }
+  if (changed) {
+    rt.byKey = byKey;
+    rt.updateAt = now();
+    st.runtime[ACT_DISCOVERY_KEY] = rt;
+    saveState(st);
+  }
+  return changed;
+}
+
+function findDiscoveryToken(st) {
+  const cands = [
+    CFG.discoveryToken,
+    txt(st.lottery && st.lottery.discoveryToken),
+    txt(st.lottery && st.lottery.activityToken),
+    txt(getActDiscoveryState(st).token),
+  ];
+  for (let i = 0; i < cands.length; i++) {
+    const v = txt(cands[i]);
+    if (v) return v;
+  }
+  return '';
+}
+
+function isActivityExpired(detail) {
+  const code = toInt(detail && detail.errCode, 0);
+  const msg = txt(detail && detail.errMsg);
+  if (code === 200011) return true;
+  if (!msg) return false;
+  return /活动已结束|活动结束|活动过期|活动已过期|下次活动/.test(msg);
+}
+
+async function refreshActsByDiscovery(st, acts) {
+  const discovered = {};
+  const logs = [];
+  await resolveActsFromGroupDetail(st, acts, discovered, logs);
+  if (!allActsResolved(acts, discovered)) {
+    await resolveActsFromActJump(st, acts, discovered, logs);
+  }
+  for (let i = 0; i < logs.length; i++) log(logs[i]);
+  const changed = saveActDiscovery(st, discovered);
+  return { changed, acts: hydrateActsFromRuntime(st), discovered };
+}
+
+function allActsResolved(acts, discovered) {
+  for (let i = 0; i < (acts || []).length; i++) {
+    const a = acts[i] || {};
+    if (!txt(discovered[a.key] && discovered[a.key].actId)) return false;
+  }
+  return true;
+}
+
+async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
+  const groupMap = {};
+  for (let i = 0; i < (acts || []).length; i++) {
+    const a = acts[i] || {};
+    const gid = txt(a.groupActId);
+    if (!gid) continue;
+    if (!groupMap[gid]) groupMap[gid] = [];
+    groupMap[gid].push(a);
+  }
+  const groupIds = Object.keys(groupMap);
+  for (let i = 0; i < groupIds.length; i++) {
+    const gid = groupIds[i];
+    const raw = await reqActGroupDetail(st, gid);
+    const parsed = parseActGroupDetail(raw);
+    if (!parsed.ok) {
+      logs.push('🧭 组详情失败: ' + gid + ' | ' + (parsed.msg || '未知错误'));
+      continue;
+    }
+    const groupActs = groupMap[gid] || [];
+    for (let j = 0; j < groupActs.length; j++) {
+      const a = groupActs[j];
+      const actId = selectActIdFromGroup(a, parsed);
+      if (!actId) continue;
+      discovered[a.key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
+      logs.push('🧭 组装填: ' + a.name + ' | group=' + gid + ' | actId=' + actId);
+    }
+  }
+}
+
+async function resolveActsFromActJump(st, acts, discovered, logs) {
+  const token = findDiscoveryToken(st);
+  if (!token) {
+    logs.push('🧭 缺少发现 token，跳过 HD -> LPARK 刷新');
+    return;
+  }
+  const hdMap = {};
+  for (let i = 0; i < (acts || []).length; i++) {
+    const a = acts[i] || {};
+    const hd = txt(a.hdActId);
+    if (!hd) continue;
+    if (!hdMap[hd]) hdMap[hd] = [];
+    hdMap[hd].push(a);
+  }
+  const hds = Object.keys(hdMap);
+  for (let i = 0; i < hds.length; i++) {
+    const hd = hds[i];
+    const jump = parseActJump(await reqActJump(st, hd, token));
+    if (!jump.ok || !txt(jump.groupActId)) {
+      logs.push('🧭 ActJump失败: ' + hd + ' | ' + (jump.msg || '未解析到 LPARK'));
+      continue;
+    }
+    const parsed = parseActGroupDetail(await reqActGroupDetail(st, jump.groupActId));
+    if (!parsed.ok) {
+      logs.push('🧭 新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
+      continue;
+    }
+    const groupActs = hdMap[hd] || [];
+    for (let j = 0; j < groupActs.length; j++) {
+      const a = groupActs[j];
+      const actId = selectActIdFromGroup(a, parsed);
+      if (!actId) continue;
+      discovered[a.key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
+      logs.push('🧭 ActJump装填: ' + a.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+    }
+  }
+}
+
+function selectActIdFromGroup(act, parsed) {
+  const ids = Array.isArray(parsed && parsed.actIds) ? parsed.actIds.filter(Boolean) : [];
+  if (!ids.length) return '';
+  if (ids.length === 1) return ids[0];
+  const slot = toInt(act && act.groupSlot, 0);
+  return txt(ids[slot]) || txt(ids[0]);
+}
+
 async function reqDetail(st, actId) {
   const l = st.lottery || {};
   const url = 'https://chp.icbc.com.cn/bmcs/api-bmcs/' + txt(l.version || 'v3') + '/lott/h5/getActivityDetail?corpId=' + encodeURIComponent(txt(l.corpId || '2000000882')) + '&actId=' + encodeURIComponent(actId) + '&roccSwt=' + encodeURIComponent(txt(l.roccSwt || '0'));
@@ -311,6 +510,132 @@ async function reqDraw(st, actId) {
     Origin: txt(l.origin || 'https://chp.icbc.com.cn'),
     Cookie: txt(l.cookie),
   }, JSON.stringify(payload), CFG.drawTimeout);
+}
+
+async function reqActGroupDetail(st, groupActId) {
+  const l = st.lottery || {};
+  const url = 'https://chp.icbc.com.cn/bmcs/api-bmcs/' + txt(l.version || 'v3') + '/h5/lotActGroup/detail?corpId=' + encodeURIComponent(txt(l.corpId || '2000000882')) + '&actGroupId=' + encodeURIComponent(groupActId);
+  return httpJSON('GET', url, {
+    Accept: 'application/json',
+    'Content-Type': txt(l.contentType || 'application/json; charset=UTF-8'),
+    'User-Agent': txt(l.ua),
+    Referer: txt(l.referer),
+    Origin: txt(l.origin || 'https://chp.icbc.com.cn'),
+    Cookie: txt(l.cookie),
+  }, '', CFG.detailTimeout);
+}
+
+async function reqActJump(st, hdActId, token) {
+  const l = st.lottery || {};
+  const url = 'https://elife.icbc.com.cn/OFSTNEWBASE/actjump/getActJump.do';
+  const body = JSON.stringify({
+    actId: hdActId,
+    t_k: token,
+    channelNo: '315',
+    h5: '1',
+    needCisno: '1',
+  });
+  return httpJSON('POST', url, {
+    Accept: 'application/json',
+    'Content-Type': 'application/json; charset=UTF-8',
+    'User-Agent': txt(l.ua),
+    Referer: txt(l.actjumpReferer || 'https://servicewechat.com/wx6f17e7e23765ca30/99/page-frame.html'),
+    Origin: txt(l.actjumpOrigin || 'https://servicewechat.com'),
+  }, body, CFG.detailTimeout);
+}
+
+function parseActGroupDetail(raw) {
+  if (!raw || raw.error) {
+    const msg = raw && raw.error ? raw.error.message : 'request failed';
+    return { ok: false, msg: msg, actIds: [], authExpired: is401Status(raw) || has401Text(msg) };
+  }
+  const obj = raw.json || {};
+  const code = toInt(pick(obj, ['code']), -1);
+  const rc = toInt(pick(obj, ['data.returnCode', 'returnCode']), -1);
+  const d = pick(obj, ['data.data', 'data', 'result']) || {};
+  if (code !== 0 || rc !== 0) {
+    const msg = friendlyMsg(pick(obj, ['data.returnMsg', 'message', 'msg', 'data.message', 'data.msg', 'errorMsg']) || obj);
+    return { ok: false, msg: msg || '活动组接口返回异常', actIds: [], authExpired: is401Status(raw) || code === 401 || rc === 401 || has401Text(msg) };
+  }
+  const ids = [];
+  pushUnique(ids, pick(d, ['vaildShowActIdList']));
+  pushUnique(ids, pick(d, ['prizeRecShowActIdList']));
+  pushUnique(ids, extractActIds(pick(d, ['subActInfoList'])));
+  return {
+    ok: true,
+    groupName: txt(pick(d, ['webPageElement.actGroupName', 'webPageElement.agThemeName'])),
+    actIds: ids,
+    authExpired: false,
+  };
+}
+
+function parseActJump(raw) {
+  if (!raw || raw.error) {
+    const msg = raw && raw.error ? raw.error.message : 'request failed';
+    return { ok: false, msg: msg, groupActId: '', authExpired: is401Status(raw) || has401Text(msg) };
+  }
+  const obj = raw.json || {};
+  const code = txt(pick(obj, ['errcode', 'res', 'code']));
+  const d = pick(obj, ['data', 'result']) || {};
+  if (!(code === '0' || code === '')) {
+    const msg = friendlyMsg(pick(obj, ['errmsg', 'return_msg', 'message', 'msg']) || obj);
+    return { ok: false, msg: msg || 'ActJump返回异常', groupActId: '', authExpired: is401Status(raw) || has401Text(msg) };
+  }
+  const pageUrl = txt(d.page_url);
+  const gid = extractGroupActId(pageUrl);
+  return {
+    ok: !!gid,
+    msg: gid ? '' : '未解析到 LPARK actGroupId',
+    groupActId: gid,
+    authExpired: false,
+  };
+}
+
+function extractActIds(v) {
+  const out = [];
+  if (!Array.isArray(v)) return out;
+  for (let i = 0; i < v.length; i++) pushUnique(out, txt(v[i] && v[i].actId));
+  return out;
+}
+
+function pushUnique(arr, v) {
+  if (Array.isArray(v)) {
+    for (let i = 0; i < v.length; i++) pushUnique(arr, v[i]);
+    return;
+  }
+  const s = txt(v);
+  if (!s) return;
+  for (let i = 0; i < arr.length; i++) if (txt(arr[i]) === s) return;
+  arr.push(s);
+}
+
+function extractGroupActId(pageUrl) {
+  const s = txt(pageUrl);
+  if (!s) return '';
+  let m = /actId=(LPARK\d+)/.exec(s);
+  if (m) return txt(m[1]);
+  const q = parseQuery(s);
+  const redirect = txt(q.redirect_uri);
+  const decoded = safeB64Decode(redirect);
+  if (decoded) {
+    m = /actId=(LPARK\d+)/.exec(decoded);
+    if (m) return txt(m[1]);
+  }
+  return '';
+}
+
+function safeB64Decode(s) {
+  const raw = String(s || '').replace(/-/g, '+').replace(/_/g, '/');
+  if (!raw) return '';
+  const pad = raw.length % 4 === 0 ? '' : new Array(5 - (raw.length % 4)).join('=');
+  const src = raw + pad;
+  try {
+    if (typeof Buffer !== 'undefined') return Buffer.from(src, 'base64').toString('utf8');
+  } catch (e) {}
+  try {
+    if (typeof atob === 'function') return decodeURIComponent(escape(atob(src)));
+  } catch (e) {}
+  return '';
 }
 
 function parseDetail(raw) {
@@ -717,10 +1042,35 @@ function captureReq() {
   const method = txt($request.method || 'GET').toUpperCase();
   const p = parseUrl(url);
   if (!p) return;
-  if (!(method === 'GET' && p.host === 'chp.icbc.com.cn' && (p.path === '/bmcs/api-bmcs/v3/lott/h5/getActivityDetail' || p.path === '/bmcs/api-bmcs/v2/lott/h5/getActivityDetail'))) return;
-
   const hs = normHeaders($request.headers || {});
   const st = loadState();
+  const body = typeof $request.body === 'string' ? $request.body : '';
+  if (method === 'POST' && p.host === 'elife.icbc.com.cn' && p.path === '/OFSTNEWBASE/custinfo/getCustinfo.do') {
+    const reqJson = toJSON(body, {});
+    const token = txt(reqJson.token || reqJson.t_k);
+    if (!token) return;
+    const rt = getActDiscoveryState(st);
+    if (txt(rt.token) === token) return log('ℹ️ 抓包字段无变化: discovery_token');
+    rt.token = token;
+    rt.tokenAt = now();
+    st.runtime[ACT_DISCOVERY_KEY] = rt;
+    st.lottery = st.lottery || {};
+    st.lottery.discoveryToken = token;
+    st.lottery.actjumpReferer = txt(hs.referer) || txt(st.lottery.actjumpReferer);
+    st.lottery.actjumpOrigin = txt(hs.origin) || deriveOrigin(txt(hs.referer), 'https://servicewechat.com');
+    saveState(st);
+    log('✅ 抓包更新: discovery_token');
+    $.msg($.name, '抓包更新: discovery_token', [
+      'type=discovery_token',
+      'token=' + summarizeSecret(token),
+      'referer=' + txt(st.lottery.actjumpReferer),
+      'origin=' + txt(st.lottery.actjumpOrigin),
+      'updatedAt=' + now(),
+    ].join('\n'));
+    return;
+  }
+  if (!(method === 'GET' && p.host === 'chp.icbc.com.cn' && (p.path === '/bmcs/api-bmcs/v3/lott/h5/getActivityDetail' || p.path === '/bmcs/api-bmcs/v2/lott/h5/getActivityDetail'))) return;
+
   const old = st.lottery ? JSON.stringify(st.lottery) : '';
   const q = parseQuery(url);
   const ref = txt(hs.referer);
@@ -734,9 +1084,13 @@ function captureReq() {
     ua: txt(hs['user-agent']),
     cookie: txt(hs.cookie),
     referer: ref,
+    refererActGroupId: extractQueryActId(ref),
     origin: txt(hs.origin) || deriveOrigin(ref, 'https://chp.icbc.com.cn'),
     contentType: txt(hs['content-type']) || 'application/json; charset=UTF-8',
     isApp: txt(st.lottery && st.lottery.isApp) || '2',
+    discoveryToken: txt(st.lottery && st.lottery.discoveryToken),
+    actjumpReferer: txt(st.lottery && st.lottery.actjumpReferer),
+    actjumpOrigin: txt(st.lottery && st.lottery.actjumpOrigin),
     updateAt: now(),
   };
   const cur = JSON.stringify(st.lottery);
@@ -751,6 +1105,7 @@ function captureReq() {
     'ua=' + summarizeUa(st.lottery.ua),
     'cookie=' + summarizeCookie(st.lottery.cookie),
     'referer=' + st.lottery.referer,
+    'refererActGroupId=' + st.lottery.refererActGroupId,
     'origin=' + st.lottery.origin,
     'isApp=' + st.lottery.isApp,
     'updatedAt=' + st.lottery.updateAt,
@@ -869,6 +1224,11 @@ function summarizeCookie(cookie) {
   const preview = keys.slice(0, 8).join(',');
   return 'keys=' + (preview || '无') + (keys.length > 8 ? '...' : '') + ' | count=' + keys.length + ' | len=' + s.length;
 }
+function summarizeSecret(v) {
+  const s = String(v || '').trim();
+  if (!s) return '空';
+  return 'len=' + s.length + ' | sha1_8=' + sha1Short(s);
+}
 function summarizeUa(ua) {
   const s = txt(ua);
   if (!s) return '空';
@@ -929,6 +1289,7 @@ function buildOpenUrlOpts(u) {
   if (!s) return {};
   return { url: s, 'open-url': s, openUrl: s };
 }
+function extractQueryActId(url) { return txt(parseQuery(url).actId); }
 function ymdFromAny(v) {
   const s = txt(v);
   if (!s) return '';
@@ -983,6 +1344,15 @@ function fmtTs(v) {
 function now() { const d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ':' + pad2(d.getSeconds()); }
 function pad2(n) { return n < 10 ? '0' + n : String(n); }
 function log(s) { const line = '[' + now() + '] ' + s; if ($ && typeof $.log === 'function') $.log(line); else console.log(line); }
+function sha1Short(s) {
+  try {
+    if (typeof require === 'function') {
+      const crypto = require('crypto');
+      return crypto.createHash('sha1').update(String(s)).digest('hex').slice(0, 8);
+    }
+  } catch (e) {}
+  return 'na';
+}
 
 function Env(name) {
   this.name = name;
