@@ -3228,8 +3228,10 @@ function formatStationText(st) {
       : Number(st.relative_bearing_deg);
   const stationArrow = isStationQueryMode ? "" : String(bearingToArrow8Emoji(stationBearing) || "↗️");
 
+  const queryLabelText = String(queryLabel || "");
+  const queryLabelIsIcon = queryLabelText && Array.from(queryLabelText).length <= 2;
   let head = isStationQueryMode
-    ? (queryLabel === "🔍" ? `${queryLabel}${st.name}` : `${queryLabel ? `${queryLabel}：` : ""}${st.name}`)
+    ? (queryLabelIsIcon ? `${queryLabelText}${st.name}` : `${queryLabelText ? `${queryLabelText}：` : ""}${st.name}`)
     : `${stationArrow}${st.name}`;
   if (isStationQueryMode) {
     if (Number.isFinite(Number(st.distance_m))) head += ` 📏${Math.round(Number(st.distance_m))}米`;
@@ -3638,7 +3640,7 @@ async function main() {
     nearStations[0].query_label = "🔍";
     if (nearestQueryStation) {
       nearestQueryStation.query_mode = "station";
-      nearestQueryStation.query_label = "最近站";
+      nearestQueryStation.query_label = "📍";
       nearStations.push(nearestQueryStation);
     }
     if (nearStations.length > 1) {
