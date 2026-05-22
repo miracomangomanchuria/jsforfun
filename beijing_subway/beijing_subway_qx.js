@@ -1,7 +1,7 @@
 /*
 用途说明：
 - Quantumult X 北京地铁出发时刻测算脚本。
-- 输入经纬度（lon/lat），输出最近站点及各方向后续班次信息。
+- 输入经纬度（lon/lat）或站名（station=xxx），输出最近站点/目标站及各方向后续班次信息。
 - backend/重写模式返回扁平列表；主动运行模式会发送 QX 通知（正文为该扁平列表文本化结果）。
 - 若经纬度超出京冀边界，仅返回/通知一行提示，不盲目计算。
 
@@ -17,6 +17,7 @@
 参数格式：
 - backend/重写调用建议传 lon + lat。
 - 支持 "lon,lat"、"lon lat"、"lon=<value>&lat=<value>"。
+- 也支持站名查询：station=<站名>。
 - 可选附加 amap_key 覆盖内置 key：lon=<value>&lat=<value>&amap_key=<YOUR_WEB_KEY>
 - 预热模式（无需经纬度）：prewarm=1
 - 强制刷新（可与 prewarm 组合）：force_refresh=1
@@ -74,7 +75,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.16";
+const SCRIPT_VERSION = "1.6.17";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -86,7 +87,7 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 5;
+const SCHEDULE_COMPACT_INDEX_VERSION = 6;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
@@ -1897,6 +1898,55 @@ function buildCatalog(mapObj) {
   return { stations, nameIndex };
 }
 
+function rebuildCatalogNameIndex(stations) {
+  const nameIndex = {};
+  for (const st of stations || []) {
+    if (!st || typeof st !== "object") continue;
+    const norm = normName(st.norm || st.name || "");
+    if (norm) {
+      if (!nameIndex[norm]) nameIndex[norm] = [];
+      nameIndex[norm].push(st);
+    }
+    for (const alias of st.aliases || []) {
+      const na = normName(alias);
+      if (!na) continue;
+      if (!nameIndex[na]) nameIndex[na] = [];
+      nameIndex[na].push(st);
+    }
+  }
+  return nameIndex;
+}
+
+function filterCatalogByNormSet(catalog, validNormSet) {
+  if (
+    !catalog ||
+    !Array.isArray(catalog.stations) ||
+    !(validNormSet instanceof Set) ||
+    validNormSet.size <= 0
+  ) {
+    return catalog;
+  }
+  const stations = catalog.stations.filter((st) => st && validNormSet.has(String(st.norm || "")));
+  if (!stations.length) return catalog;
+  return {
+    stations,
+    nameIndex: rebuildCatalogNameIndex(stations)
+  };
+}
+
+function collectValidStationNormSetFromIndexBundle(bundle) {
+  const out = new Set();
+  if (!isValidCompactScheduleIndexBundle(bundle)) return out;
+  for (const idx of [bundle.weekday, bundle.weekend]) {
+    const stationMap = idx && idx.stations && typeof idx.stations === "object" ? idx.stations : null;
+    if (!stationMap) continue;
+    for (const n of Object.keys(stationMap)) {
+      if (n) out.add(String(n));
+    }
+  }
+  return out;
+}
+
 function buildStationLineIndex(catalog) {
   const idx = {};
   for (const st of catalog.stations) {
@@ -1947,8 +1997,114 @@ function getStationCoordFromCatalog(catalog, stationName) {
   return [st.lat, st.lon];
 }
 
-function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
-  const ranked = catalog.stations.map((st) => {
+function extractStationQuery(arg) {
+  function fromObj(o) {
+    if (!o || typeof o !== "object") return "";
+    const keys = ["station", "station_name", "stationName", "name"];
+    for (const k of keys) {
+      if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+      const v = o[k];
+      if (Array.isArray(v)) {
+        for (const one of v) {
+          const s = String(one == null ? "" : one).trim();
+          if (s) return s;
+        }
+        continue;
+      }
+      const s = String(v == null ? "" : v).trim();
+      if (s) return s;
+    }
+    return "";
+  }
+
+  if (arg && typeof arg === "object") {
+    const r = fromObj(arg);
+    if (r) return r;
+  }
+
+  let s = String(arg == null ? "" : arg).trim();
+  if (!s) return "";
+  s = s.replace(/，/g, ",").replace(/；/g, ";").replace(/＝/g, "=").replace(/＆/g, "&");
+  if (s.includes("%")) {
+    try {
+      s = decodeURIComponent(s);
+    } catch (e) {
+      // ignore decode errors
+    }
+  }
+
+  if ((s.startsWith("{") && s.endsWith("}")) || (s.startsWith("[") && s.endsWith("]"))) {
+    try {
+      const j = JSON.parse(s);
+      const r = fromObj(j);
+      if (r) return r;
+    } catch (e) {
+      // ignore parse errors
+    }
+  }
+
+  const m = s.match(/(?:^|[?&;,\s])station\s*=\s*([^&;,\s]+)/i);
+  if (m) {
+    try {
+      return decodeURIComponent(String(m[1] || "").trim()).trim();
+    } catch (e) {
+      return String(m[1] || "").trim();
+    }
+  }
+  return "";
+}
+
+function resolveStationByName(catalog, stationName) {
+  if (!catalog || !catalog.nameIndex) return null;
+  const n = normName(stationName);
+  if (!n) return null;
+
+  const dedupe = new Map();
+  function add(st) {
+    if (!st || typeof st !== "object") return;
+    if (!Number.isFinite(st.lat) || !Number.isFinite(st.lon)) return;
+    const key = String(st.norm || st.name || "");
+    if (!key || dedupe.has(key)) return;
+    dedupe.set(key, Object.assign({}, st));
+  }
+
+  const exact = catalog.nameIndex[n];
+  if (Array.isArray(exact) && exact.length) {
+    exact.forEach(add);
+  }
+  if (!dedupe.size) {
+    for (const [k, vals] of Object.entries(catalog.nameIndex)) {
+      if (!k || !n) continue;
+      if (!(k.includes(n) || n.includes(k))) continue;
+      for (const st of vals || []) add(st);
+    }
+  }
+
+  const cands = [...dedupe.values()];
+  if (!cands.length) return null;
+  cands.sort((a, b) => {
+    const ae = normName(a.name || a.norm || "") === n ? 0 : 1;
+    const be = normName(b.name || b.norm || "") === n ? 0 : 1;
+    if (ae !== be) return ae - be;
+    return String(a.name || "").localeCompare(String(b.name || ""), "zh-Hans-CN");
+  });
+  return cands[0] || null;
+}
+
+function findNearestDistinctStation(catalog, targetStation) {
+  if (!catalog || !Array.isArray(catalog.stations) || !targetStation) return null;
+  const targetNorm = normName(targetStation.norm || targetStation.name || "");
+  const ranked = rankStations(catalog, targetStation.lat, targetStation.lon);
+  for (const st of ranked) {
+    if (!st || typeof st !== "object") continue;
+    if (normName(st.norm || st.name || "") === targetNorm) continue;
+    return Object.assign({}, st);
+  }
+  return null;
+}
+
+function rankStations(catalog, lat, lon) {
+  const ranked = (catalog && Array.isArray(catalog.stations) ? catalog.stations : []).map((st) => {
     const d = haversineM(lat, lon, st.lat, st.lon);
     const br = bearingDeg(lat, lon, st.lat, st.lon);
     return { d, br, st };
@@ -1958,15 +2114,20 @@ function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
     if (Math.abs(dd) > 1e-6) return dd;
     return a.br - b.br;
   });
+  return ranked.map((it) => Object.assign({}, it.st, {
+    distance_m: Math.round(it.d * 10) / 10,
+    relative_bearing_deg: Math.round(it.br * 10) / 10
+  }));
+}
+
+function nearestStations(catalog, lat, lon, threshold = 300, maxN = 8) {
+  const ranked = rankStations(catalog, lat, lon);
   if (!ranked.length) return [];
-  const minD = ranked[0].d;
+  const minD = Number(ranked[0].distance_m);
   const out = [];
   for (const it of ranked) {
-    if (it.d <= minD + threshold || out.length === 0) {
-      out.push(Object.assign({}, it.st, {
-        distance_m: Math.round(it.d * 10) / 10,
-        relative_bearing_deg: Math.round(it.br * 10) / 10
-      }));
+    if (it.distance_m <= minD + threshold || out.length === 0) {
+      out.push(it);
       if (out.length >= maxN) break;
     } else {
       break;
@@ -2056,6 +2217,7 @@ function buildCompactScheduleIndex(schedule) {
       if (!trains || typeof trains !== "object") continue;
       const lineDirKey = `${lineName}|||${direction}`;
       const lineDirId = internCompactId(lineDirIds, lineDirs, lineDirKey);
+      const parsedTrains = [];
 
       for (const stops of Object.values(trains)) {
         if (!Array.isArray(stops)) continue;
@@ -2076,14 +2238,53 @@ function buildCompactScheduleIndex(schedule) {
         if (!parsed.length) continue;
 
         const terminal = String(parsed[parsed.length - 1][0] || "").trim();
-        const terminalMin = Number(parsed[parsed.length - 1][1]);
         const terminalId = terminal ? internCompactId(terminalIds, terminals, terminal) : -1;
         const origin = String(parsed[0][0] || "").trim();
         const originId = origin ? internCompactId(originIds, origins, origin) : -1;
         const tailNames = parsed.slice().reverse().slice(0, CROSSLINE_LOOKBACK).map((x) => String(x[0] || ""));
         const tailSig = tailNames.join("|");
         const tailId = tailSig ? internCompactId(tailIds, tails, tailSig) : -1;
+        parsedTrains.push({
+          parsed,
+          terminalId,
+          originId,
+          tailId
+        });
+      }
 
+      const enableRingContinuation = isRingLineDisplayName(lineName);
+      let ringSeed = null;
+      let latestTerminalMinute = Number.NEGATIVE_INFINITY;
+      for (const seed of parsedTrains) {
+        const parsed = Array.isArray(seed && seed.parsed) ? seed.parsed : [];
+        if (!parsed.length) continue;
+        const duration = Number(parsed[parsed.length - 1][1]) - Number(parsed[0][1]);
+        if (
+          !ringSeed ||
+          parsed.length > ringSeed.parsed.length ||
+          (
+            parsed.length === ringSeed.parsed.length &&
+            duration > (Number(ringSeed.parsed[ringSeed.parsed.length - 1][1]) - Number(ringSeed.parsed[0][1]))
+          )
+        ) {
+          ringSeed = seed;
+        }
+        const lastMinute = Number(parsed[parsed.length - 1][1]);
+        if (Number.isFinite(lastMinute) && lastMinute > latestTerminalMinute) {
+          latestTerminalMinute = lastMinute;
+        }
+      }
+      const ringLoopNextStation = ringSeed && ringSeed.parsed && ringSeed.parsed[0]
+        ? String(ringSeed.parsed[0][0] || "").trim()
+        : "";
+      const ringLoopDuration = ringSeed && Array.isArray(ringSeed.parsed) && ringSeed.parsed.length >= 2
+        ? Math.max(0, Number(ringSeed.parsed[ringSeed.parsed.length - 1][1]) - Number(ringSeed.parsed[0][1]))
+        : 0;
+
+      for (const seed of parsedTrains) {
+        const parsed = Array.isArray(seed && seed.parsed) ? seed.parsed : [];
+        if (!parsed.length) continue;
+        const terminalMin = Number(parsed[parsed.length - 1][1]);
         for (let pi = 0; pi < parsed.length; pi++) {
           const stName = parsed[pi][0];
           const curMin = parsed[pi][1];
@@ -2107,12 +2308,51 @@ function buildCompactScheduleIndex(schedule) {
           }
           const cell = stations[stNorm][lineDirId];
           cell.m.push(curMin);
-          cell.t.push(terminalId);
-          cell.o.push(originId);
+          cell.t.push(seed.terminalId);
+          cell.o.push(seed.originId);
           cell.n.push(nextId);
           const remain = terminalMin - curMin;
           cell.r.push(Number.isFinite(remain) ? remain : -1);
-          cell.z.push(tailId);
+          cell.z.push(seed.tailId);
+        }
+
+        if (
+          enableRingContinuation &&
+          parsed.length >= 2 &&
+          ringLoopNextStation
+        ) {
+          const lastStationName = String(parsed[parsed.length - 1][0] || "").trim();
+          const lastMinute = Number(parsed[parsed.length - 1][1]);
+          if (
+            lastStationName &&
+            ringLoopNextStation !== lastStationName &&
+            Number.isFinite(lastMinute) &&
+            lastMinute < latestTerminalMinute
+          ) {
+            let stNorm = normMemo[lastStationName];
+            if (stNorm == null) {
+              stNorm = normName(lastStationName);
+              normMemo[lastStationName] = stNorm;
+            }
+            if (stNorm) {
+              const nextId = internCompactId(nextStationIds, nextStations, ringLoopNextStation);
+              const selfTerminalId = internCompactId(terminalIds, terminals, lastStationName);
+              const selfOriginId = internCompactId(originIds, origins, lastStationName);
+              if (!Object.prototype.hasOwnProperty.call(stations, stNorm)) {
+                stations[stNorm] = {};
+              }
+              if (!Object.prototype.hasOwnProperty.call(stations[stNorm], lineDirId)) {
+                stations[stNorm][lineDirId] = { m: [], t: [], o: [], n: [], r: [], z: [] };
+              }
+              const cell = stations[stNorm][lineDirId];
+              cell.m.push(lastMinute);
+              cell.t.push(selfTerminalId);
+              cell.o.push(selfOriginId);
+              cell.n.push(nextId);
+              cell.r.push(Number.isFinite(ringLoopDuration) ? ringLoopDuration : -1);
+              cell.z.push(seed.tailId);
+            }
+          }
         }
       }
     }
@@ -2568,7 +2808,7 @@ function ringMarkFromDirectionText(directionText) {
 
 function isRingLineDisplayName(lineName) {
   const s = String(lineName || "");
-  return s.includes("2号线") || s.includes("10号线");
+  return /(^|\D)(2号线|10号线)(\D|$)/.test(s.trim());
 }
 
 function buildRingDirectionTag(d, shouldShortenTerminal) {
@@ -2957,7 +3197,9 @@ function cleanLineText(s) {
 
 function formatStationText(st) {
   const dirs = (st.runtime && st.runtime.directions) || [];
-  const access = st && st.access && typeof st.access === "object" ? st.access : null;
+  const isStationQueryMode = String((st && st.query_mode) || "") === "station";
+  const queryLabel = String((st && st.query_label) || "").trim();
+  const access = !isStationQueryMode && st && st.access && typeof st.access === "object" ? st.access : null;
   const hasAccessDistance = !!(access && Number.isFinite(Number(access.distance_m)));
   const hasAccessEta = !!(
     access &&
@@ -2965,13 +3207,15 @@ function formatStationText(st) {
   );
   const useApiStyle = !!(access && (hasAccessDistance || hasAccessEta || String(access.exit_label || "").trim() !== ""));
   const stationBearing =
-    useApiStyle && access && access.uses_exit_coord && Number.isFinite(Number(access.bearing_deg))
+    !isStationQueryMode && useApiStyle && access && access.uses_exit_coord && Number.isFinite(Number(access.bearing_deg))
       ? Number(access.bearing_deg)
       : Number(st.relative_bearing_deg);
-  const stationArrow = String(bearingToArrow8Emoji(stationBearing) || "↗️");
+  const stationArrow = isStationQueryMode ? "" : String(bearingToArrow8Emoji(stationBearing) || "↗️");
 
-  let head = `${stationArrow}${st.name}`;
-  if (useApiStyle) {
+  let head = isStationQueryMode ? `${queryLabel ? `${queryLabel}：` : ""}${st.name}` : `${stationArrow}${st.name}`;
+  if (isStationQueryMode) {
+    if (Number.isFinite(Number(st.distance_m))) head += ` 📏${Math.round(Number(st.distance_m))}米`;
+  } else if (useApiStyle) {
     if (access && access.exit_label) head += `${String(access.exit_label)}`;
     if (hasAccessDistance) head += ` ${Math.round(Number(access.distance_m))}米`;
     else if (Number.isFinite(st.distance_m)) head += ` ${Math.round(st.distance_m)}米`;
@@ -3148,6 +3392,8 @@ async function main() {
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
   const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
+  const stationQuery = extractStationQuery(rawArg);
+  const stationQueryMode = !!String(stationQuery || "").trim();
   const nowForMode = new Date();
   const todayForMode = dateOnly(nowForMode);
   const prevDayForMode = addDays(todayForMode, -1);
@@ -3205,60 +3451,67 @@ async function main() {
     perfAfterPrewarm = Date.now();
   }
 
-  let resolvedCoord = parsed;
-  if (!resolvedCoord) {
-    if (!backend) {
-      const ipLoc = await resolveLonLatByIp(amapKey);
-      if (ipLoc && isValidLonLat(ipLoc.lon, ipLoc.lat)) {
-        resolvedCoord = { lon: Number(ipLoc.lon), lat: Number(ipLoc.lat) };
-        if (!backend) {
-          console.log(
-            `[INFO][v${SCRIPT_VERSION}] 无入参，IP定位成功 source=${ipLoc.source}${ipLoc.from_cache ? ":cache" : ""}`
-          );
+  let inputLon = NaN;
+  let inputLat = NaN;
+  if (stationQueryMode) {
+    perfAfterLocate = Date.now();
+    cleanupLegacyCachesOnce();
+  } else {
+    let resolvedCoord = parsed;
+    if (!resolvedCoord) {
+      if (!backend) {
+        const ipLoc = await resolveLonLatByIp(amapKey);
+        if (ipLoc && isValidLonLat(ipLoc.lon, ipLoc.lat)) {
+          resolvedCoord = { lon: Number(ipLoc.lon), lat: Number(ipLoc.lat) };
+          if (!backend) {
+            console.log(
+              `[INFO][v${SCRIPT_VERSION}] 无入参，IP定位成功 source=${ipLoc.source}${ipLoc.from_cache ? ":cache" : ""}`
+            );
+          }
         }
       }
     }
-  }
-  if (!resolvedCoord) {
-    const rawType = rawArg == null ? "null" : typeof rawArg;
-    let preview = "";
-    try {
-      preview = rawType === "object" ? JSON.stringify(rawArg) : String(rawArg);
-    } catch (e) {
-      preview = String(rawArg);
+    if (!resolvedCoord) {
+      const rawType = rawArg == null ? "null" : typeof rawArg;
+      let preview = "";
+      try {
+        preview = rawType === "object" ? JSON.stringify(rawArg) : String(rawArg);
+      } catch (e) {
+        preview = String(rawArg);
+      }
+      preview = redactSensitiveText(preview).replace(/\s+/g, " ").slice(0, 200);
+      const dbg = argumentChannelDebug(rawArg);
+      const glb = discoverGlobalArgCandidates();
+      const traceLine = parseTrace.join(" -> ").slice(0, 1200);
+      if (backend) {
+        throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
+      }
+      throw new Error(`参数错误且IP反查失败：请传 lon,lat 或配置可用 IP 定位网络 | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
     }
-    preview = redactSensitiveText(preview).replace(/\s+/g, " ").slice(0, 200);
-    const dbg = argumentChannelDebug(rawArg);
-    const glb = discoverGlobalArgCandidates();
-    const traceLine = parseTrace.join(" -> ").slice(0, 1200);
-    if (backend) {
-      throw new Error(`参数错误：请传 2 个参数（lon,lat），例如 lon,lat 或 lon=<value>&lat=<value> | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
+    inputLon = Number(resolvedCoord.lon);
+    inputLat = Number(resolvedCoord.lat);
+    perfAfterLocate = Date.now();
+    cleanupLegacyCachesOnce();
+    if (!backend) {
+      console.log(`[INFO][v${SCRIPT_VERSION}] 坐标已就绪 lon=${inputLon.toFixed(6)} lat=${inputLat.toFixed(6)}`);
     }
-    throw new Error(`参数错误且IP反查失败：请传 lon,lat 或配置可用 IP 定位网络 | 收到类型=${rawType} | 收到内容=${preview} | 通道=${dbg} | 全局候选=${glb} | 解析轨迹=${traceLine}`);
-  }
-  const inputLon = Number(resolvedCoord.lon);
-  const inputLat = Number(resolvedCoord.lat);
-  perfAfterLocate = Date.now();
-  cleanupLegacyCachesOnce();
-  if (!backend) {
-    console.log(`[INFO][v${SCRIPT_VERSION}] 坐标已就绪 lon=${inputLon.toFixed(6)} lat=${inputLat.toFixed(6)}`);
-  }
 
-  if (!isInServiceRegionBJHebei(inputLon, inputLat)) {
-    const msg = "📍所在区域超出北京地铁服务范围";
-    if (backend) {
-      doneBackendJson([msg], 200);
-    } else {
-      perfAfterDayType = Date.now();
-      perfAfterBaseData = Date.now();
-      perfAfterSchedulePrep = Date.now();
-      perfAfterAccess = Date.now();
-      perfAfterAssemble = Date.now();
-      logStepPerf("超出服务范围");
-      notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
-      doneOk(msg);
+    if (!isInServiceRegionBJHebei(inputLon, inputLat)) {
+      const msg = "📍所在区域超出北京地铁服务范围";
+      if (backend) {
+        doneBackendJson([msg], 200);
+      } else {
+        perfAfterDayType = Date.now();
+        perfAfterBaseData = Date.now();
+        perfAfterSchedulePrep = Date.now();
+        perfAfterAccess = Date.now();
+        perfAfterAssemble = Date.now();
+        logStepPerf("超出服务范围");
+        notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
+        doneOk(msg);
+      }
+      return;
     }
-    return;
   }
 
   const now = new Date();
@@ -3289,45 +3542,176 @@ async function main() {
   const scheduleIndexPrev = scheduleBundlePrev && typeof scheduleBundlePrev === "object"
     ? scheduleBundlePrev[dayKindPrev]
     : null;
+  const validStationNormSet = collectValidStationNormSetFromIndexBundle(scheduleBundleToday);
   scheduleBundleToday = null;
   perfAfterBaseData = Date.now();
 
   let catalog = buildCatalog(mapObj);
   mapObj = null;
-  const aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
-  const nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
-  const systemDistByNorm = {};
-  for (const st of nearStations) {
-    const sd = haversineM(inputLat, inputLon, st.lat, st.lon);
-    st.system_distance_m = Math.round(sd * 10) / 10;
-    systemDistByNorm[st.norm] = st.system_distance_m;
-  }
+  catalog = filterCatalogByNormSet(catalog, validStationNormSet);
+  const stationCoordIndex = buildStationCoordIndex(catalog);
   let stationLinesIndex = {};
-  let stationCoordIndex = {};
-  if (nearStations.length) {
+  let nearStations = [];
+  const systemDistByNorm = {};
+  const accessByNorm = {};
+  let aligned = null;
+  let amapUsable = false;
+  let exitCacheCtx = null;
+  let accessCacheCtx = null;
+
+  if (stationQueryMode) {
+    const queryStation = resolveStationByName(catalog, stationQuery);
+    if (!queryStation) {
+      const msg = `📍未找到站点：${stationQuery}`;
+      if (backend) {
+        doneBackendJson([msg, ""], 200);
+      } else {
+        console.log("===QX_SUBWAY_RESULT_BEGIN===");
+        console.log("---STATION#1---PART1---");
+        console.log(msg);
+        console.log("---STATION#1---PART2---");
+        console.log("");
+        console.log("---STATION#1---END---");
+        console.log("===QX_SUBWAY_RESULT_END===");
+        perfAfterSchedulePrep = Date.now();
+        perfAfterAccess = Date.now();
+        perfAfterAssemble = Date.now();
+        logStepPerf("站名未找到");
+        notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
+        doneOk(msg);
+      }
+      return;
+    }
+    if (!isInServiceRegionBJHebei(queryStation.lon, queryStation.lat)) {
+      const msg = "📍所在区域超出北京地铁服务范围";
+      if (backend) {
+        doneBackendJson([msg, ""], 200);
+      } else {
+        console.log("===QX_SUBWAY_RESULT_BEGIN===");
+        console.log("---STATION#1---PART1---");
+        console.log(msg);
+        console.log("---STATION#1---PART2---");
+        console.log("");
+        console.log("---STATION#1---END---");
+        console.log("===QX_SUBWAY_RESULT_END===");
+        perfAfterSchedulePrep = Date.now();
+        perfAfterAccess = Date.now();
+        perfAfterAssemble = Date.now();
+        logStepPerf("站名超出服务范围");
+        notifyByBackendFlatList([msg], "北京地铁出发时刻测算");
+        doneOk(msg);
+      }
+      return;
+    }
+    const nearestQueryStation = findNearestDistinctStation(catalog, queryStation);
+    nearStations = [Object.assign({}, queryStation)];
+    nearStations[0].query_mode = "station";
+    nearStations[0].query_label = "查询站";
+    if (nearestQueryStation) {
+      nearestQueryStation.query_mode = "station";
+      nearestQueryStation.query_label = "最近站";
+      nearStations.push(nearestQueryStation);
+    }
     if (nearStations.length > 1) {
       stationLinesIndex = buildStationLineIndex(catalog);
     }
-  }
-  if (!nearStations.length) {
-    catalog = null;
-    if (backend) {
-      doneBackendJson(["未找到附近站点", ""], 200);
-    } else {
-      console.log("===QX_SUBWAY_RESULT_BEGIN===");
-      console.log("---STATION#1---PART1---");
-      console.log("未找到附近站点");
-      console.log("---STATION#1---PART2---");
-      console.log("");
-      console.log("---STATION#1---END---");
-      console.log("===QX_SUBWAY_RESULT_END===");
-      perfAfterSchedulePrep = Date.now();
-      perfAfterAccess = Date.now();
-      perfAfterAssemble = Date.now();
-      logStepPerf("未找到附近站点");
-      doneOk("");
+    if (!backend) {
+      console.log(
+        `[INFO][v${SCRIPT_VERSION}] 站名已就绪 station=${queryStation.name}${nearestQueryStation ? ` 最近站=${nearestQueryStation.name}` : ""}`
+      );
     }
-    return;
+  } else {
+    aligned = autoAlignCoordForCatalog(catalog, inputLat, inputLon, true);
+    nearStations = nearestStations(catalog, aligned.lat, aligned.lon, STATION_THRESHOLD_M, MAX_STATIONS);
+    for (const st of nearStations) {
+      const sd = haversineM(inputLat, inputLon, st.lat, st.lon);
+      st.system_distance_m = Math.round(sd * 10) / 10;
+      systemDistByNorm[st.norm] = st.system_distance_m;
+    }
+    if (nearStations.length > 1) {
+      stationLinesIndex = buildStationLineIndex(catalog);
+    }
+    if (!nearStations.length) {
+      catalog = null;
+      if (backend) {
+        doneBackendJson(["未找到附近站点", ""], 200);
+      } else {
+        console.log("===QX_SUBWAY_RESULT_BEGIN===");
+        console.log("---STATION#1---PART1---");
+        console.log("未找到附近站点");
+        console.log("---STATION#1---PART2---");
+        console.log("");
+        console.log("---STATION#1---END---");
+        console.log("===QX_SUBWAY_RESULT_END===");
+        perfAfterSchedulePrep = Date.now();
+        perfAfterAccess = Date.now();
+        perfAfterAssemble = Date.now();
+        logStepPerf("未找到附近站点");
+        doneOk("");
+      }
+      return;
+    }
+
+    const minSystemDist = nearStations.reduce((best, s) => {
+      const d = Number(s.system_distance_m);
+      if (!Number.isFinite(d)) return best;
+      if (!Number.isFinite(best)) return d;
+      return Math.min(best, d);
+    }, NaN);
+    const globalSkipAccess = Number.isFinite(minSystemDist) && minSystemDist <= NEAR_STATION_SKIP_ACCESS_M;
+    // 路途/出口查询仅由“系统定位到站点中心距离”控制，避免被高德结果反向触发。
+    const accessCandidates = nearStations
+      .filter((s) => {
+        const baseDist = Number.isFinite(Number(s.system_distance_m)) ? Number(s.system_distance_m) : Number(s.distance_m);
+        return Number.isFinite(baseDist) && baseDist > NEAR_STATION_SKIP_ACCESS_M;
+      })
+      .slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
+    // 若最近站已在近站阈值内（<=200m），整次查询都不做出口/路途请求，避免无用加载。
+    const shouldFetchAmapAccess = !globalSkipAccess && accessCandidates.length > 0;
+    if (!backend && globalSkipAccess) {
+      console.log(
+        `[INFO][v${SCRIPT_VERSION}] 最近站系统距离=${Math.round(minSystemDist)}米<=${NEAR_STATION_SKIP_ACCESS_M}米，已跳过口字母与路途请求`
+      );
+    }
+    amapUsable = shouldFetchAmapAccess && AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
+    exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
+    accessCacheCtx = amapUsable ? { data: loadAmapAccessCache(), dirty: false } : null;
+    if (amapUsable) {
+      const tasks = accessCandidates.map(async (st) => {
+        try {
+          const access = await withTimeoutIgnore(
+            fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx),
+            AMAP_PER_STATION_BUDGET_MS
+          );
+          return [st.norm, access];
+        } catch (e) {
+          return [st.norm, null];
+        }
+      });
+      const pairs = await Promise.all(tasks);
+      for (const [n, access] of pairs) {
+        if (!access || typeof access !== "object") continue;
+        const baseDist = Number(systemDistByNorm[n]);
+        const accessDist = Number(access.distance_m);
+        // 规则：若系统距离已判定为近站（<=阈值），或者系统>阈值但高德<阈值，均不采用口与路途信息。
+        if (Number.isFinite(baseDist) && baseDist <= NEAR_STATION_SKIP_ACCESS_M) continue;
+        if (
+          Number.isFinite(baseDist) &&
+          baseDist > NEAR_STATION_SKIP_ACCESS_M &&
+          Number.isFinite(accessDist) &&
+          accessDist < NEAR_STATION_SKIP_ACCESS_M
+        ) {
+          continue;
+        }
+        accessByNorm[n] = access;
+      }
+      if (exitCacheCtx && exitCacheCtx.dirty) {
+        saveAmapExitCache(exitCacheCtx.data);
+      }
+      if (accessCacheCtx && accessCacheCtx.dirty) {
+        saveAmapAccessCache(accessCacheCtx.data);
+      }
+    }
   }
 
   const stationNorms = nearStations.map((s) => s.norm);
@@ -3342,67 +3726,6 @@ async function main() {
     schByStationToday = collectScheduleForStationsFromCompactIndex(scheduleIndexToday, stationNorms);
   }
   perfAfterSchedulePrep = Date.now();
-  const accessByNorm = {};
-  const minSystemDist = nearStations.reduce((best, s) => {
-    const d = Number(s.system_distance_m);
-    if (!Number.isFinite(d)) return best;
-    if (!Number.isFinite(best)) return d;
-    return Math.min(best, d);
-  }, NaN);
-  const globalSkipAccess = Number.isFinite(minSystemDist) && minSystemDist <= NEAR_STATION_SKIP_ACCESS_M;
-  // 路途/出口查询仅由“系统定位到站点中心距离”控制，避免被高德结果反向触发。
-  const accessCandidates = nearStations
-    .filter((s) => {
-      const baseDist = Number.isFinite(Number(s.system_distance_m)) ? Number(s.system_distance_m) : Number(s.distance_m);
-      return Number.isFinite(baseDist) && baseDist > NEAR_STATION_SKIP_ACCESS_M;
-    })
-    .slice(0, Math.max(0, Number(AMAP_ACCESS_MAX_STATIONS) || 0));
-  // 若最近站已在近站阈值内（<=200m），整次查询都不做出口/路途请求，避免无用加载。
-  const shouldFetchAmapAccess = !globalSkipAccess && accessCandidates.length > 0;
-  if (!backend && globalSkipAccess) {
-    console.log(
-      `[INFO][v${SCRIPT_VERSION}] 最近站系统距离=${Math.round(minSystemDist)}米<=${NEAR_STATION_SKIP_ACCESS_M}米，已跳过口字母与路途请求`
-    );
-  }
-  const amapUsable = shouldFetchAmapAccess && AMAP_ENABLE_EXIT_ETA && !!amapKey && await ensureAmapWebKeyUsable(amapKey);
-  const exitCacheCtx = amapUsable ? { data: loadAmapExitCache(), dirty: false } : null;
-  const accessCacheCtx = amapUsable ? { data: loadAmapAccessCache(), dirty: false } : null;
-  if (amapUsable) {
-    const tasks = accessCandidates.map(async (st) => {
-      try {
-        const access = await withTimeoutIgnore(
-          fetchStationExitEta(st, aligned.lon, aligned.lat, amapKey, exitCacheCtx, accessCacheCtx),
-          AMAP_PER_STATION_BUDGET_MS
-        );
-        return [st.norm, access];
-      } catch (e) {
-        return [st.norm, null];
-      }
-    });
-    const pairs = await Promise.all(tasks);
-    for (const [n, access] of pairs) {
-      if (!access || typeof access !== "object") continue;
-      const baseDist = Number(systemDistByNorm[n]);
-      const accessDist = Number(access.distance_m);
-      // 规则：若系统距离已判定为近站（<=阈值），或者系统>阈值但高德<阈值，均不采用口与路途信息。
-      if (Number.isFinite(baseDist) && baseDist <= NEAR_STATION_SKIP_ACCESS_M) continue;
-      if (
-        Number.isFinite(baseDist) &&
-        baseDist > NEAR_STATION_SKIP_ACCESS_M &&
-        Number.isFinite(accessDist) &&
-        accessDist < NEAR_STATION_SKIP_ACCESS_M
-      ) {
-        continue;
-      }
-      accessByNorm[n] = access;
-    }
-    if (exitCacheCtx && exitCacheCtx.dirty) {
-      saveAmapExitCache(exitCacheCtx.data);
-    }
-    if (accessCacheCtx && accessCacheCtx.dirty) {
-      saveAmapAccessCache(accessCacheCtx.data);
-    }
-  }
   perfAfterAccess = Date.now();
 
   const stationsOut = [];
@@ -3413,6 +3736,8 @@ async function main() {
       lat: st.lat,
       lon: st.lon,
       distance_m: Number.isFinite(Number(st.system_distance_m)) ? Number(st.system_distance_m) : st.distance_m,
+      query_mode: st.query_mode || "",
+      query_label: st.query_label || "",
       line_names: st.line_names,
       station_ids: st.station_ids,
       access: accessByNorm[st.norm] || null,
