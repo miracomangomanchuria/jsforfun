@@ -2000,6 +2000,14 @@ function getStationCoordFromCatalog(catalog, stationName) {
 function extractStationQuery(arg) {
   function fromObj(o) {
     if (!o || typeof o !== "object") return "";
+    const nestedKeys = ["params", "param", "query", "sourcePath", "path", "url", "argument", "arguments"];
+    for (const nk of nestedKeys) {
+      if (!Object.prototype.hasOwnProperty.call(o, nk)) continue;
+      const nested = o[nk];
+      if (nested == null) continue;
+      const nestedHit = extractStationQuery(nested);
+      if (nestedHit) return nestedHit;
+    }
     const keys = ["station", "station_name", "stationName", "name"];
     for (const k of keys) {
       if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
@@ -2050,6 +2058,14 @@ function extractStationQuery(arg) {
     } catch (e) {
       return String(m[1] || "").trim();
     }
+  }
+  return "";
+}
+
+function extractStationQueryFromSources(sources) {
+  for (const src of Array.isArray(sources) ? sources : []) {
+    const q = extractStationQuery(src);
+    if (q) return q;
   }
   return "";
 }
@@ -3212,7 +3228,9 @@ function formatStationText(st) {
       : Number(st.relative_bearing_deg);
   const stationArrow = isStationQueryMode ? "" : String(bearingToArrow8Emoji(stationBearing) || "↗️");
 
-  let head = isStationQueryMode ? `${queryLabel ? `${queryLabel}：` : ""}${st.name}` : `${stationArrow}${st.name}`;
+  let head = isStationQueryMode
+    ? (queryLabel === "🔍" ? `${queryLabel}${st.name}` : `${queryLabel ? `${queryLabel}：` : ""}${st.name}`)
+    : `${stationArrow}${st.name}`;
   if (isStationQueryMode) {
     if (Number.isFinite(Number(st.distance_m))) head += ` 📏${Math.round(Number(st.distance_m))}米`;
   } else if (useApiStyle) {
@@ -3392,7 +3410,18 @@ async function main() {
   const parseTrace = [];
   const parsed = parseArgument(rawArg, parseTrace);
   const amapKey = extractAmapKeyOverride(rawArg) || AMAP_WEB_KEY;
-  const stationQuery = extractStationQuery(rawArg);
+  const stationQuery = extractStationQueryFromSources([
+    rawArg,
+    typeof $request !== "undefined" ? $request : "",
+    typeof $request !== "undefined" && $request ? $request.url : "",
+    typeof $request !== "undefined" && $request ? $request.path : "",
+    typeof $request !== "undefined" && $request ? $request.query : "",
+    typeof $request !== "undefined" && $request ? $request.params : "",
+    typeof $request !== "undefined" && $request ? $request.body : "",
+    typeof $argument !== "undefined" ? $argument : "",
+    typeof $arguments !== "undefined" ? $arguments : "",
+    typeof $environment !== "undefined" && $environment && typeof $environment === "object" ? $environment : ""
+  ]);
   const stationQueryMode = !!String(stationQuery || "").trim();
   const nowForMode = new Date();
   const todayForMode = dateOnly(nowForMode);
@@ -3606,7 +3635,7 @@ async function main() {
     const nearestQueryStation = findNearestDistinctStation(catalog, queryStation);
     nearStations = [Object.assign({}, queryStation)];
     nearStations[0].query_mode = "station";
-    nearStations[0].query_label = "查询站";
+    nearStations[0].query_label = "🔍";
     if (nearestQueryStation) {
       nearestQueryStation.query_mode = "station";
       nearestQueryStation.query_label = "最近站";
