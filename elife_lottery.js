@@ -6,6 +6,7 @@ e生活抽奖（QX/Surge/Loon/Node）
 QX:
 [rewrite_local]
 ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ url script-request-body elife_lottery.js
+^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$ url script-request-body elife_lottery.js
 ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ url script-request-header elife_lottery.js
 [mitm]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn
@@ -13,6 +14,7 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 Loon:
 [Script]
 http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture
+http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture_2
 http-request ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_capture
 [MITM]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn
@@ -20,6 +22,7 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 Surge:
 [Script]
 elife_lottery_token_capture = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$,script-path=elife_lottery.js,timeout=60
+elife_lottery_token_capture_2 = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$,script-path=elife_lottery.js,timeout=60
 elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$,script-path=elife_lottery.js,timeout=60
 [MITM]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn
@@ -36,16 +39,19 @@ const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
 
 const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ url script-request-body elife_lottery.js
+^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$ url script-request-body elife_lottery.js
 ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ url script-request-header elife_lottery.js
 [mitm]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 const CAPTURE_LOON = String.raw`[Script]
 http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture
+http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture_2
 http-request ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_capture
 [MITM]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 const CAPTURE_SURGE = String.raw`[Script]
 elife_lottery_token_capture = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$,script-path=elife_lottery.js,timeout=60
+elife_lottery_token_capture_2 = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/actjump\/getActJump\.do$,script-path=elife_lottery.js,timeout=60
 elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$,script-path=elife_lottery.js,timeout=60
 [MITM]
 hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
@@ -101,11 +107,11 @@ Promise.resolve().then(async () => {
     const g = captureGuideByClient();
     log('❌ 缺少抓包字段（lottery）');
     log(g);
-    $.msg($.name, '缺少抓包字段', '请先抓 getActivityDetail\n可额外抓 custinfo/getCustinfo.do 以启用全活动自动刷新\n' + g);
+    $.msg($.name, '缺少抓包字段', '请先抓 getActivityDetail\n可额外打开任一刮刮乐入口页，以抓 discovery token 并启用全活动自动刷新\n通常命中 custinfo/getCustinfo.do 或 actjump/getActJump.do 即可\n' + g);
     return;
   }
   if (!findDiscoveryToken(st)) {
-    log('ℹ️ 未抓到 discovery_token：当前可执行已知活动，但无法主动刷新全部活动。建议打开任一刮刮乐入口页补抓 custinfo/getCustinfo.do');
+    log('ℹ️ 未抓到 discovery_token：当前可执行已知活动，但无法主动刷新全部活动。建议打开任一刮刮乐入口页补抓 token');
   }
 
   let acts = hydrateActsFromRuntime(st);
@@ -191,26 +197,26 @@ async function runOneActivity(st, act) {
   const detail = parseDetail(await reqDetail(st, act.actId));
   if (!detail.ok) {
     const m = txt(detail.msg);
-    if (detail.authExpired) return { category: 'error', reason: m || '接口401', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: true };
+    if (detail.authExpired) return { category: 'error', reason: m || '接口401', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
     if (isExpiredText(m)) {
       markActDiscoveryExpired(st, act, m || '活动已结束');
-      return { category: 'expired', reason: m || '活动已结束', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
+      return { category: 'expired', reason: m || '活动已结束', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
     }
-    if (isAlreadyDoneText(m)) return { category: 'already_done', reason: m || '已完成/已参与', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
-    return { category: 'error', reason: m || '状态接口返回异常', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
+    if (isAlreadyDoneText(m)) return { category: 'already_done', reason: m || '已完成/已参与', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    return { category: 'error', reason: m || '状态接口返回异常', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
   log('📊 状态: drawFlag=' + detail.drawFlag + ' | drawCount=' + detail.drawCount + ' | totalCount=' + detail.totalCount + ' | errCode=' + detail.errCode + ' | errMsg=' + detail.errMsg);
   if (isActivityExpired(detail)) {
     markActDiscoveryExpired(st, act, detail.errMsg || '活动已结束');
-    return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+    return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
   if (isRefreshWorthyAbnormal(detail)) {
     markActDiscoveryExpired(st, act, detail.errMsg || '活动状态异常，请尝试刷新活动ID');
-    return { category: 'expired', reason: detail.errMsg || '活动状态异常，请尝试刷新活动ID', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+    return { category: 'expired', reason: detail.errMsg || '活动状态异常，请尝试刷新活动ID', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
 
-  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
-  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
 
   let remain = detail.drawCount;
   let done = 0;
@@ -220,13 +226,13 @@ async function runOneActivity(st, act) {
     const draw = parseDraw(await reqDraw(st, act.actId));
     if (!draw.ok) {
       const dm = txt(draw.msg);
-      if (draw.authExpired) return { category: 'error', reason: dm || '接口401', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: true };
+      if (draw.authExpired) return { category: 'error', reason: dm || '接口401', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
       if (isExpiredText(dm)) {
         markActDiscoveryExpired(st, act, dm || '活动已结束');
-        return { category: 'expired', reason: dm || '活动已结束', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false };
+        return { category: 'expired', reason: dm || '活动已结束', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
       }
-      if (String(draw.errCode) === '200004' || dm.indexOf('次数用完') >= 0 || isAlreadyDoneText(dm)) return { category: 'already_done', reason: dm || '次数已用完', prizes, remain: 0, done, rewardPool: detail.rewardPool, authExpired: false };
-      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: !!draw.authExpired };
+      if (String(draw.errCode) === '200004' || dm.indexOf('次数用完') >= 0 || isAlreadyDoneText(dm)) return { category: 'already_done', reason: dm || '次数已用完', prizes, remain: 0, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: !!draw.authExpired, groupName: txt(act.groupName), actName: txt(detail.actName) };
     }
     const p = draw.prizeName || '奖励名未返回';
     prizes.push(p);
@@ -239,20 +245,31 @@ async function runOneActivity(st, act) {
     const re = parseDetail(await reqDetail(st, act.actId));
     if (re.ok) remain = re.drawCount;
   }
-  return { category: 'ok', reason: '执行完成', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false };
+  return { category: 'ok', reason: '执行完成', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
 }
 
 function formatActLine(name, rs) {
   const reason = friendlyMsg(rs && rs.reason);
-  if (rs && rs.authExpired) return '⚠️ ' + name + ': 接口401，Cookie已过期，请重新抓包';
-  if (rs && rs.category === 'expired') return '⚠️ ' + name + ': 活动已结束/过期 | ' + (reason || '活动发现器未装填到新活动');
-  if (rs.category === 'ok') return '✅ ' + name + ': 已刮' + rs.done + '次 | 本次=' + (rs.prizes.length ? rs.prizes.join('、') : '奖励名未返回') + fmtRemain(rs.remain);
-  if (rs.category === 'already_done') return '⏭️ ' + name + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (reason || '已刮过');
-  if (rs.category === 'query_only') return '🧪 ' + name + ': 状态可刮，query_only跳过' + fmtRemain(rs.remain);
-  return '❌ ' + name + ': ' + (reason || '失败');
+  const label = formatActLabel(name, rs);
+  if (rs && rs.authExpired) return '⚠️ ' + label + ': 接口401，Cookie已过期，请重新抓包';
+  if (rs && rs.category === 'expired') return '⚠️ ' + label + ': 活动已结束/过期 | ' + (reason || '活动发现器未装填到新活动');
+  if (rs.category === 'ok') return '✅ ' + label + ': 已刮' + rs.done + '次 | 本次=' + (rs.prizes.length ? rs.prizes.join('、') : '奖励名未返回') + fmtRemain(rs.remain);
+  if (rs.category === 'already_done') return '⏭️ ' + label + ': 无可用次数' + fmtRemain(rs.remain) + ' | ' + (reason || '已刮过');
+  if (rs.category === 'query_only') return '🧪 ' + label + ': 状态可刮，query_only跳过' + fmtRemain(rs.remain);
+  return '❌ ' + label + ': ' + (reason || '失败');
 }
 
 function fmtRemain(n) { return toInt(n, -1) >= 0 ? ' | 剩余' + n + '次' : ''; }
+
+function formatActLabel(aliasName, rs) {
+  const alias = txt(aliasName);
+  const group = txt(rs && rs.groupName);
+  const actName = txt(rs && rs.actName);
+  const parts = [alias];
+  if (group && !sameText(group, alias)) parts.push(group);
+  if (actName && !sameText(actName, alias) && !sameText(actName, group)) parts.push(actName);
+  return uniqArr(parts).join(' / ');
+}
 
 function buildSubtitle(runLines) {
   let ok = 0, skip = 0, bad = 0;
@@ -664,6 +681,14 @@ function uniqArr(arr) {
     out.push(s);
   }
   return out;
+}
+
+function sameText(a, b) {
+  return normalizeTextKey(a) === normalizeTextKey(b);
+}
+
+function normalizeTextKey(v) {
+  return txt(v).replace(/[（）()]/g, '').replace(/\s+/g, '').toLowerCase();
 }
 
 function clearActDiscoveryNeedsRefresh(st) {
@@ -1407,23 +1432,17 @@ function captureReq() {
   const hs = normHeaders($request.headers || {});
   const st = loadState();
   const body = typeof $request.body === 'string' ? $request.body : '';
-  if (method === 'POST' && p.host === 'elife.icbc.com.cn' && p.path === '/OFSTNEWBASE/custinfo/getCustinfo.do') {
+  if (method === 'POST' && p.host === 'elife.icbc.com.cn' && (p.path === '/OFSTNEWBASE/custinfo/getCustinfo.do' || p.path === '/OFSTNEWBASE/actjump/getActJump.do')) {
     const reqJson = toJSON(body, {});
     const token = txt(reqJson.token || reqJson.t_k);
     if (!token) return;
-    const rt = getActDiscoveryState(st);
-    if (txt(rt.token) === token) return log('ℹ️ 抓包字段无变化: discovery_token');
-    rt.token = token;
-    rt.tokenAt = now();
-    st.runtime[ACT_DISCOVERY_KEY] = rt;
-    st.lottery = st.lottery || {};
-    st.lottery.discoveryToken = token;
-    st.lottery.actjumpReferer = txt(hs.referer) || txt(st.lottery.actjumpReferer);
-    st.lottery.actjumpOrigin = txt(hs.origin) || deriveOrigin(txt(hs.referer), 'https://servicewechat.com');
-    saveState(st);
-    log('✅ 抓包更新: discovery_token');
+    const source = p.path.indexOf('/actjump/') >= 0 ? 'actjump_request' : 'custinfo_request';
+    const changed = saveDiscoveryToken(st, token, hs, source);
+    if (!changed) return log('ℹ️ 抓包字段无变化: discovery_token');
+    log('✅ 抓包更新: discovery_token | source=' + source);
     $.msg($.name, '抓包更新: discovery_token', [
       'type=discovery_token',
+      'source=' + source,
       'token=' + summarizeSecret(token),
       'referer=' + txt(st.lottery.actjumpReferer),
       'origin=' + txt(st.lottery.actjumpOrigin),
@@ -1544,6 +1563,27 @@ function loadState() {
   return o;
 }
 function saveState(st) { $.setdata(JSON.stringify(st || {}), STORE_KEY); }
+
+function saveDiscoveryToken(st, token, hs, source) {
+  const rt = getActDiscoveryState(st);
+  const nextToken = txt(token);
+  const nextReferer = txt(hs && hs.referer) || txt(st.lottery && st.lottery.actjumpReferer);
+  const nextOrigin = txt(hs && hs.origin) || deriveOrigin(nextReferer, 'https://servicewechat.com');
+  const oldToken = txt(rt.token);
+  const oldReferer = txt(st.lottery && st.lottery.actjumpReferer);
+  const oldOrigin = txt(st.lottery && st.lottery.actjumpOrigin);
+  if (oldToken === nextToken && oldReferer === nextReferer && oldOrigin === nextOrigin) return false;
+  rt.token = nextToken;
+  rt.tokenAt = now();
+  rt.tokenSource = txt(source) || 'capture';
+  st.runtime[ACT_DISCOVERY_KEY] = rt;
+  st.lottery = st.lottery || {};
+  st.lottery.discoveryToken = nextToken;
+  st.lottery.actjumpReferer = nextReferer;
+  st.lottery.actjumpOrigin = nextOrigin;
+  saveState(st);
+  return true;
+}
 
 function parseUrl(url) { const m = /^https?:\/\/([^\/?#]+)([^?#]*)(\?[^#]*)?/i.exec(String(url || '')); return m ? { host: txt(m[1]).toLowerCase(), path: txt(m[2]) || '/', search: txt(m[3] || '') } : null; }
 function parseQuery(url) {
