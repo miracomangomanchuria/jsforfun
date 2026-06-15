@@ -5,57 +5,68 @@ e生活抽奖（QX/Surge/Loon/Node）
 
 QX:
 [rewrite_local]
+^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ url script-request-body elife_lottery.js
 ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ url script-request-header elife_lottery.js
 [mitm]
-hostname = chp.icbc.com.cn
+hostname = elife.icbc.com.cn, chp.icbc.com.cn
 
 Loon:
 [Script]
+http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture
 http-request ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_capture
 [MITM]
-hostname = chp.icbc.com.cn
+hostname = elife.icbc.com.cn, chp.icbc.com.cn
 
 Surge:
 [Script]
+elife_lottery_token_capture = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$,script-path=elife_lottery.js,timeout=60
 elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$,script-path=elife_lottery.js,timeout=60
 [MITM]
-hostname = chp.icbc.com.cn
+hostname = elife.icbc.com.cn, chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.4.2';
+const VER = 'v1.4.4';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
 const ACT_DISCOVERY_KEY = 'elife_lottery_activity_discovery_v1';
+const ACT_DISCOVERY_RECHECK_MS = 12 * 3600 * 1000;
 const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
 
 const CAPTURE_QX = String.raw`[rewrite_local]
+^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ url script-request-body elife_lottery.js
 ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ url script-request-header elife_lottery.js
 [mitm]
-hostname = chp.icbc.com.cn`;
+hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 const CAPTURE_LOON = String.raw`[Script]
+http-request ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_token_capture
 http-request ^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$ script-path=elife_lottery.js, timeout=60, tag=elife_lottery_capture
 [MITM]
-hostname = chp.icbc.com.cn`;
+hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 const CAPTURE_SURGE = String.raw`[Script]
+elife_lottery_token_capture = type=http-request,pattern=^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$,script-path=elife_lottery.js,timeout=60
 elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\/bmcs\/api-bmcs\/v[23]\/lott\/h5\/getActivityDetail(?:\?.*)?$,script-path=elife_lottery.js,timeout=60
 [MITM]
-hostname = chp.icbc.com.cn`;
+hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 
 const ACTS = [
   // Updated via local HAR (2026-05-22): LPARK20250801152144809773 -> LOT20260331140621284295
   { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20260331140621284295', groupActId: 'LPARK20250801152144809773', hdActId: 'HD888813cZxswuh65d', groupSlot: 0 },
-  { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260104140832936109', groupActId: 'LPARK20260104152747703010', hdActId: 'HD888813cNCaaMeLDu', groupSlot: 0 },
-  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260104095117513209', groupActId: 'LPARK20260104095652618118', hdActId: 'HD888813cNzezmCe9d', groupSlot: 1 },
-  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260104093807607845', groupActId: 'LPARK20260104095652618118', hdActId: 'HD888813cNzezmCe9d', groupSlot: 0 },
+  // Updated via local HAR (2026-06-15): LPARK20260331181013212359 -> LOT20260529101527599103
+  { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260529101527599103', groupActId: 'LPARK20260331181013212359', hdActId: 'HD888813cNCaaMeLDu', groupSlot: 0 },
+  // Added via local HAR (2026-06-15): LPARK20260104135652791527 -> LOT20260529145850668850
+  { key: 'gas', name: '加油刮刮乐', actId: 'LOT20260529145850668850', groupActId: 'LPARK20260104135652791527', hdActId: 'HD888813jFA553nPHZ', groupSlot: 0 },
+  // Updated via direct ActJump verification (2026-06-15): LPARK20260331153025142282 -> LOT20260529135740524357
+  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 1 },
+  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 0 },
   // Updated via discovery replay (2026-05-22): LPARK20260104105132312187 -> LOT20260331162633816255
   { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260331162633816255', groupActId: 'LPARK20260104105132312187', hdActId: 'HD888813iP1oQnhPJX', groupSlot: 0 },
-  // Updated via discovery replay (2026-05-22): LPARK20251231162233106731 -> LOT20260331163552975001
-  { key: 'food', name: '美食刮刮乐', actId: 'LOT20260331163552975001', groupActId: 'LPARK20251231162233106731', hdActId: 'HD888813cMutfHbQXh', groupSlot: 0 },
+  // Updated via local HAR (2026-06-15): LPARK20251231162233106731 -> LOT20260529143359269898
+  { key: 'food', name: '美食刮刮乐', actId: 'LOT20260529143359269898', groupActId: 'LPARK20251231162233106731', hdActId: 'HD888813cMutfHbQXh', groupSlot: 0 },
   { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054', groupActId: 'LPARK20260104094508989099', hdActId: 'HD888813cNHeYjjaVu', groupSlot: 0 },
-  // Updated via discovery replay (2026-05-22): LPARK20260104135441483600 -> LOT20260331181019127747
-  { key: 'movie', name: '电影刮刮乐', actId: 'LOT20260331181019127747', groupActId: 'LPARK20260104135441483600', hdActId: 'HD888813V9svtYS24w', groupSlot: 0 },
+  // Updated via direct ActJump verification (2026-06-15): LPARK20260104135441483600 -> LOT20260529145917217458
+  { key: 'movie', name: '电影刮刮乐', actId: 'LOT20260529145917217458', groupActId: 'LPARK20260104135441483600', hdActId: 'HD888813V9svtYS24w', groupSlot: 0 },
 ];
 const DAILY_THRESHOLD_RULES = {
   cashback: { '0.18': '20', '0.88': '20', '8.8': '100' },
@@ -90,8 +101,11 @@ Promise.resolve().then(async () => {
     const g = captureGuideByClient();
     log('❌ 缺少抓包字段（lottery）');
     log(g);
-    $.msg($.name, '缺少抓包字段', '请先抓 getActivityDetail\n' + g);
+    $.msg($.name, '缺少抓包字段', '请先抓 getActivityDetail\n可额外抓 custinfo/getCustinfo.do 以启用全活动自动刷新\n' + g);
     return;
+  }
+  if (!findDiscoveryToken(st)) {
+    log('ℹ️ 未抓到 discovery_token：当前可执行已知活动，但无法主动刷新全部活动。建议打开任一刮刮乐入口页补抓 custinfo/getCustinfo.do');
   }
 
   let acts = hydrateActsFromRuntime(st);
@@ -100,10 +114,17 @@ Promise.resolve().then(async () => {
   const lines = [];
   const prizeRows = [];
   const poolRows = [];
+  const seenActResults = {};
   let authExpired = null;
   const refreshedKeys = {};
   for (let i = 0; i < acts.length; i++) {
     let a = acts[i];
+    const dedupeKey = txt(a && a.actId);
+    if (dedupeKey && seenActResults[dedupeKey]) {
+      const base = seenActResults[dedupeKey];
+      lines.push(formatActLine(a.name, cloneResultForAlias(base, a.name)));
+      continue;
+    }
     let rs = await runOneActivity(st, a);
     const k = txt(a && a.key);
     if (rs && rs.category === 'expired' && k && !refreshedKeys[k]) {
@@ -119,6 +140,7 @@ Promise.resolve().then(async () => {
         log('ℹ️ 未发现到新 actId，继续按当前结果输出');
       }
     }
+    if (dedupeKey && rs && rs.category !== 'expired') seenActResults[txt(a && a.actId)] = cloneResultForAlias(rs, a.name);
     lines.push(formatActLine(a.name, rs));
     if (rs && rs.authExpired) {
       authExpired = { actName: a.name, reason: friendlyMsg(rs.reason) || 'HTTP 401' };
@@ -162,6 +184,10 @@ async function runOneActivity(st, act) {
   log('----------');
   log('🎯 活动: ' + act.name + ' | actId=' + act.actId);
 
+  if (txt(act.discoveryStatus) === 'expired_no_update' && isDiscoveryCooldownActive(act)) {
+    return { category: 'expired', reason: '活动已结束，暂未发现新活动ID，下次检查 ' + txt(act.discoveryNextRefreshAt), prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
+  }
+
   const detail = parseDetail(await reqDetail(st, act.actId));
   if (!detail.ok) {
     const m = txt(detail.msg);
@@ -177,6 +203,10 @@ async function runOneActivity(st, act) {
   if (isActivityExpired(detail)) {
     markActDiscoveryExpired(st, act, detail.errMsg || '活动已结束');
     return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
+  }
+  if (isRefreshWorthyAbnormal(detail)) {
+    markActDiscoveryExpired(st, act, detail.errMsg || '活动状态异常，请尝试刷新活动ID');
+    return { category: 'expired', reason: detail.errMsg || '活动状态异常，请尝试刷新活动ID', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
   }
 
   if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false };
@@ -342,7 +372,18 @@ function hydrateActsFromRuntime(st) {
       discoveryAt: txt(cached.updateAt) || '',
       discoveryStatus: txt(cached.status) || '',
       discoveryExpiredAt: txt(cached.expiredAt) || '',
+      discoveryNextRefreshAt: txt(cached.nextRefreshAt) || '',
+      discoveryLastExpiredActId: txt(cached.lastExpiredActId) || '',
     });
+  });
+}
+
+function cloneResultForAlias(rs, aliasName) {
+  const base = rs || {};
+  return Object.assign({}, base, {
+    prizes: Array.isArray(base.prizes) ? base.prizes.slice() : [],
+    rewardPool: Array.isArray(base.rewardPool) ? base.rewardPool.slice() : [],
+    aliasOf: txt(base.aliasOf) || txt(aliasName),
   });
 }
 
@@ -382,6 +423,7 @@ function saveActDiscovery(st, discovered) {
       groupName: txt(item.groupName) || txt(old.groupName),
       status: 'fresh',
       expiredAt: '',
+      nextRefreshAt: '',
       lastExpiredActId: '',
       lastExpiredMsg: '',
       updateAt: now(),
@@ -394,7 +436,7 @@ function saveActDiscovery(st, discovered) {
   if (changed) {
     rt.byKey = byKey;
     rt.updateAt = now();
-    rt.needsRefresh = false;
+    rt.needsRefresh = hasPendingActDiscoveryRefresh(rt);
     st.runtime[ACT_DISCOVERY_KEY] = rt;
     saveState(st);
   }
@@ -413,6 +455,7 @@ function markActDiscoveryExpired(st, act, reason) {
     source: txt(old.source) || txt(act && act.discoverySource) || 'runtime',
     status: 'expired',
     expiredAt: now(),
+    nextRefreshAt: '',
     lastExpiredActId: txt(act && act.actId),
     lastExpiredMsg: friendlyMsg(reason),
   });
@@ -421,6 +464,35 @@ function markActDiscoveryExpired(st, act, reason) {
   byKey[key] = next;
   rt.byKey = byKey;
   rt.needsRefresh = true;
+  st.runtime[ACT_DISCOVERY_KEY] = rt;
+  saveState(st);
+  return true;
+}
+
+function markActDiscoveryNoUpdate(st, act, actId, groupName, source) {
+  const rt = getActDiscoveryState(st);
+  const byKey = rt.byKey || {};
+  const key = txt(act && act.key);
+  if (!key) return false;
+  const old = byKey[key] || {};
+  const nowText = now();
+  const next = Object.assign({}, old, {
+    actId: txt(old.actId) || txt(actId) || txt(act && act.actId),
+    groupActId: txt(old.groupActId) || txt(act && act.groupActId),
+    source: txt(source) || txt(old.source) || 'discovery',
+    groupName: txt(groupName) || txt(old.groupName),
+    status: 'expired_no_update',
+    expiredAt: txt(old.expiredAt) || nowText,
+    nextRefreshAt: fmtTs(Date.now() + ACT_DISCOVERY_RECHECK_MS),
+    lastExpiredActId: txt(actId) || txt(old.lastExpiredActId) || txt(act && act.actId),
+    lastExpiredMsg: txt(old.lastExpiredMsg) || '活动已结束，暂未发现新 actId',
+    updateAt: nowText,
+  });
+  const changed = JSON.stringify(old) !== JSON.stringify(next) || !!rt.needsRefresh;
+  if (!changed) return false;
+  byKey[key] = next;
+  rt.byKey = byKey;
+  rt.needsRefresh = hasPendingActDiscoveryRefresh(rt);
   st.runtime[ACT_DISCOVERY_KEY] = rt;
   saveState(st);
   return true;
@@ -448,6 +520,15 @@ function isActivityExpired(detail) {
   return /活动已结束|活动结束|活动过期|活动已过期|下次活动|抽奖已结束|刮奖已结束|本期已结束/.test(msg);
 }
 
+function isRefreshWorthyAbnormal(detail) {
+  const code = toInt(detail && detail.errCode, 0);
+  const msg = txt(detail && detail.errMsg);
+  const actStatus = toInt(detail && detail.actStatus, -1);
+  if (code !== 100006) return false;
+  if (actStatus === 3) return true;
+  return /活动状态异常|请稍后重试/.test(msg);
+}
+
 function isExpiredText(msg) {
   const s = txt(msg);
   if (!s) return false;
@@ -458,6 +539,45 @@ function isAlreadyDoneText(msg) {
   const s = txt(msg);
   if (!s) return false;
   return /已参与|已参加|已抽|已刮|已完成|已领取|已做过|今日已|当天已|次数用完|次数已用完|无可用次数|次数不足|已用完/.test(s);
+}
+
+function isDiscoveryCooldownActive(x) {
+  const next = toTsMs(x && (x.nextRefreshAt || x.discoveryNextRefreshAt));
+  return next > Date.now();
+}
+
+function hasPendingActDiscoveryRefresh(rt) {
+  const byKey = (rt && rt.byKey) || {};
+  const keys = Object.keys(byKey);
+  for (let i = 0; i < keys.length; i++) {
+    const item = byKey[keys[i]] || {};
+    const status = txt(item.status);
+    if (status === 'expired') return true;
+    if (status === 'expired_no_update' && !isDiscoveryCooldownActive(item)) return true;
+  }
+  return false;
+}
+
+function isSameExpiredDiscovery(st, act, actId) {
+  const key = txt(act && act.key);
+  const rt = getActDiscoveryState(st);
+  const cached = (rt.byKey || {})[key] || {};
+  const status = txt(cached.status) || txt(act && act.discoveryStatus);
+  if (status.indexOf('expired') !== 0) return false;
+  const next = txt(actId);
+  if (!next) return false;
+  return next === txt(act && act.actId) || next === txt(cached.lastExpiredActId) || next === txt(act && act.discoveryLastExpiredActId);
+}
+
+function acceptDiscoveredAct(st, act, actId, groupName, source, logs, prefix) {
+  const next = txt(actId);
+  if (!next) return false;
+  if (isSameExpiredDiscovery(st, act, next)) {
+    markActDiscoveryNoUpdate(st, act, next, groupName, source);
+    logs.push(prefix + ': ' + act.name + ' | 仍为已过期 actId=' + next + '，跳过重试');
+    return false;
+  }
+  return true;
 }
 
 function getActDiscoveryStats(st, acts) {
@@ -471,7 +591,8 @@ function getActDiscoveryStats(st, acts) {
     out.keysAll.push(key);
     out.total += 1;
     const cached = byKey[key] || {};
-    if (txt(cached.status) === 'expired') { out.expired += 1; out.keysExpired.push(key); }
+    const status = txt(cached.status);
+    if (status === 'expired' || (status === 'expired_no_update' && !isDiscoveryCooldownActive(cached))) { out.expired += 1; out.keysExpired.push(key); }
     if (txt(cached.actId)) { out.resolved += 1; out.keysResolved.push(key); }
     else { out.missing += 1; out.keysMissing.push(key); }
   }
@@ -480,8 +601,18 @@ function getActDiscoveryStats(st, acts) {
 
 function shouldPreloadActDiscovery(st, acts) {
   const stats = getActDiscoveryStats(st, acts);
+  if (hasFreshCaptureSinceDiscovery(st)) {
+    return { needed: true, reason: '最近抓到新的活动页，请求前先同步活动缓存', keys: stats.keysAll.slice() };
+  }
+  if (canRunScheduledDiscovery(st, acts)) {
+    return { needed: true, reason: '发现 token 可用，执行周期性活动刷新', keys: stats.keysAll.slice() };
+  }
   if (stats.needsRefresh) {
-    const keys = stats.keysExpired.length || stats.keysMissing.length ? uniqArr(stats.keysExpired.concat(stats.keysMissing)) : stats.keysAll.slice();
+    const keys = uniqArr(stats.keysExpired.concat(stats.keysMissing));
+    if (!keys.length) {
+      clearActDiscoveryNeedsRefresh(st);
+      return { needed: false, reason: '发现缓存处于冷却期，直接跳过预装填' };
+    }
     return { needed: true, reason: '发现状态要求刷新（needsRefresh=on）', keys: keys };
   }
   if (stats.expired > 0) {
@@ -535,6 +666,37 @@ function uniqArr(arr) {
   return out;
 }
 
+function clearActDiscoveryNeedsRefresh(st) {
+  const rt = getActDiscoveryState(st);
+  if (!rt.needsRefresh) return false;
+  rt.needsRefresh = false;
+  st.runtime[ACT_DISCOVERY_KEY] = rt;
+  saveState(st);
+  return true;
+}
+
+function hasFreshCaptureSinceDiscovery(st) {
+  const lottery = (st && st.lottery) || {};
+  const rt = getActDiscoveryState(st);
+  const capAt = toTsMs(txt(lottery.updateAt));
+  const disAt = toTsMs(txt(rt.updateAt));
+  return capAt > 0 && (disAt <= 0 || capAt > disAt);
+}
+
+function canRunScheduledDiscovery(st, acts) {
+  const token = findDiscoveryToken(st);
+  if (!token) return false;
+  const rt = getActDiscoveryState(st);
+  const last = toTsMs(txt(rt.updateAt));
+  if (last <= 0) return true;
+  const hasQuestionable = (acts || []).some(function (act) {
+    const status = txt(act && act.discoveryStatus);
+    return status === 'expired' || status === 'expired_no_update';
+  });
+  if (hasQuestionable) return true;
+  return (Date.now() - last) >= ACT_DISCOVERY_RECHECK_MS;
+}
+
 async function refreshActsByDiscovery(st, acts) {
   const discovered = {};
   const logs = [];
@@ -560,8 +722,10 @@ async function refreshOneActByDiscovery(st, act) {
     if (parsed.ok) {
       const actId = selectActIdFromGroup(act, parsed);
       if (actId) {
-        discovered[key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
-        logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
+        if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'group_detail', logs, '🧭 单活动未更新')) {
+          discovered[key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
+          logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
+        }
       }
     } else {
       logs.push('🧭 单活动组详情失败: ' + gid + ' | ' + (parsed.msg || '未知错误'));
@@ -578,8 +742,10 @@ async function refreshOneActByDiscovery(st, act) {
         if (parsed.ok) {
           const actId = selectActIdFromGroup(act, parsed);
           if (actId) {
-            discovered[key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
-            logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+            if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'actjump', logs, '🧭 单活动ActJump未更新')) {
+              discovered[key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
+              logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+            }
           }
         } else {
           logs.push('🧭 单活动新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
@@ -626,6 +792,7 @@ async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
       const a = groupActs[j];
       const actId = selectActIdFromGroup(a, parsed);
       if (!actId) continue;
+      if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'group_detail', logs, '🧭 组未更新')) continue;
       discovered[a.key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
       logs.push('🧭 组装填: ' + a.name + ' | group=' + gid + ' | actId=' + actId);
     }
@@ -664,6 +831,7 @@ async function resolveActsFromActJump(st, acts, discovered, logs) {
       const a = groupActs[j];
       const actId = selectActIdFromGroup(a, parsed);
       if (!actId) continue;
+      if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'actjump', logs, '🧭 ActJump未更新')) continue;
       discovered[a.key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
       logs.push('🧭 ActJump装填: ' + a.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
     }
@@ -859,6 +1027,7 @@ function parseDetail(raw) {
     totalCount: toInt(d.totalCount, -1),
     errCode: errCode,
     errMsg: friendlyMsg(d.errMsg),
+    actStatus: toInt(pick(d, ['detail.actStatus', 'actStatus']), -1),
     rewardPool: rewardPool,
     authExpired: false,
   };
@@ -1267,6 +1436,8 @@ function captureReq() {
   const old = st.lottery ? JSON.stringify(st.lottery) : '';
   const q = parseQuery(url);
   const ref = txt(hs.referer);
+  const capturedActId = txt(q.actId);
+  const capturedGroupActId = extractQueryActId(ref);
   st.lottery = {
     type: 'lottery',
     host: p.host,
@@ -1277,7 +1448,7 @@ function captureReq() {
     ua: txt(hs['user-agent']),
     cookie: txt(hs.cookie),
     referer: ref,
-    refererActGroupId: extractQueryActId(ref),
+    refererActGroupId: capturedGroupActId,
     origin: txt(hs.origin) || deriveOrigin(ref, 'https://chp.icbc.com.cn'),
     contentType: txt(hs['content-type']) || 'application/json; charset=UTF-8',
     isApp: txt(st.lottery && st.lottery.isApp) || '2',
@@ -1287,7 +1458,8 @@ function captureReq() {
     updateAt: now(),
   };
   const cur = JSON.stringify(st.lottery);
-  if (old === cur) return log('ℹ️ 抓包字段无变化: lottery_state');
+  const backfill = captureBackfillActDiscovery(st, capturedActId, capturedGroupActId);
+  if (old === cur && !backfill.changed) return log('ℹ️ 抓包字段无变化: lottery_state');
   saveState(st);
   const msg = [
     'type=lottery_state',
@@ -1299,15 +1471,62 @@ function captureReq() {
     'cookie=' + summarizeCookie(st.lottery.cookie),
     'referer=' + st.lottery.referer,
     'refererActGroupId=' + st.lottery.refererActGroupId,
+    'capturedActId=' + capturedActId,
     'origin=' + st.lottery.origin,
     'isApp=' + st.lottery.isApp,
     'updatedAt=' + st.lottery.updateAt,
   ].join('\n');
   log('✅ 抓包更新: lottery_state');
+  if (backfill.changed) log('🧭 抓包回填活动缓存: ' + backfill.summary);
   // Avoid flooding the console with long capture payloads (and never print raw cookies).
   // Notification keeps the full copyable fields; console only prints a short marker unless debug is enabled.
   if (CFG.debug) log(msg);
   $.msg($.name, '抓包更新: lottery_state', msg);
+}
+
+function captureBackfillActDiscovery(st, actId, groupActId) {
+  const acts = findActsByCurrentOrKnownIds(st, actId, groupActId);
+  if (!acts.length) return { changed: false, summary: '' };
+  const discovered = {};
+  const names = [];
+  for (let i = 0; i < acts.length; i++) {
+    const act = acts[i];
+    names.push(act.name);
+    discovered[act.key] = {
+      actId: txt(actId),
+      groupActId: txt(groupActId) || txt(act.groupActId),
+      groupName: txt(act.groupName) || act.name,
+      source: 'capture',
+    };
+  }
+  const changed = saveActDiscovery(st, discovered);
+  return {
+    changed: changed,
+    summary: changed ? (uniqArr(names).join(' / ') + ' | group=' + txt(groupActId) + ' | actId=' + txt(actId)) : '',
+  };
+}
+
+function findActsByCurrentOrKnownIds(st, actId, groupActId) {
+  const aid = txt(actId);
+  const gid = txt(groupActId);
+  if (!aid && !gid) return [];
+  const out = [];
+  const acts = hydrateActsFromRuntime(st);
+  for (let i = 0; i < acts.length; i++) {
+    const act = acts[i];
+    if (aid && txt(act.actId) === aid) pushActUnique(out, act);
+    if (gid && txt(act.groupActId) === gid) pushActUnique(out, act);
+  }
+  return out;
+}
+
+function pushActUnique(arr, act) {
+  const key = txt(act && act.key);
+  if (!key) return;
+  for (let i = 0; i < arr.length; i++) {
+    if (txt(arr[i] && arr[i].key) === key) return;
+  }
+  arr.push(act);
 }
 
 function captureGuideByClient() {
