@@ -29,13 +29,18 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.4.4';
+const VER = 'v1.4.5';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
 const ACT_DISCOVERY_KEY = 'elife_lottery_activity_discovery_v1';
 const ACT_DISCOVERY_RECHECK_MS = 12 * 3600 * 1000;
 const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
+const MEM = {
+  detailByActId: {},
+  groupDetailById: {},
+  actJumpByHd: {},
+};
 
 const CAPTURE_QX = String.raw`[rewrite_local]
 ^https:\/\/elife\.icbc\.com\.cn\/OFSTNEWBASE\/custinfo\/getCustinfo\.do$ url script-request-body elife_lottery.js
@@ -116,52 +121,42 @@ Promise.resolve().then(async () => {
 
   let acts = hydrateActsFromRuntime(st);
   const preload = await preloadActsByDiscoveryIfNeeded(st, acts);
+  if (preload && preload.authExpired) {
+    $.msg($.name, '过期重抓', [
+      '接口401，Cookie已过期',
+      '请重新抓包 getActivityDetail',
+      '来源阶段: 活动预装填',
+      '错误信息: ' + friendlyMsg(preload.reason || 'HTTP 401'),
+      '点击本通知可跳转抓包入口',
+    ].join('\n'), buildOpenUrlOpts(RECAPTURE_URL));
+    return;
+  }
   acts = preload.acts;
+  const run = await runActivities(st, acts);
+  acts = run.acts || acts;
+  const aliasResults = Array.isArray(run.aliasResults) ? run.aliasResults : [];
+  const unitResults = Array.isArray(run.unitResults) ? run.unitResults : [];
   const lines = [];
   const prizeRows = [];
   const poolRows = [];
-  const seenActResults = {};
-  let authExpired = null;
-  const refreshedKeys = {};
-  for (let i = 0; i < acts.length; i++) {
-    let a = acts[i];
-    const dedupeKey = txt(a && a.actId);
-    if (dedupeKey && seenActResults[dedupeKey]) {
-      const base = seenActResults[dedupeKey];
-      lines.push(formatActLine(a.name, cloneResultForAlias(base, a.name)));
-      continue;
+  for (let i = 0; i < aliasResults.length; i++) {
+    const x = aliasResults[i] || {};
+    lines.push(formatActLine(txt(x.aliasName), x.result || {}));
+  }
+  for (let j = 0; j < unitResults.length; j++) {
+    const item = unitResults[j] || {};
+    const rs = item.result || {};
+    const actName = txt(item.actName);
+    for (let p = 0; p < (rs.prizes || []).length; p++) {
+      prizeRows.push({ actName: actName, prizeName: txt(rs.prizes[p]) });
     }
-    let rs = await runOneActivity(st, a);
-    const k = txt(a && a.key);
-    if (rs && rs.category === 'expired' && k && !refreshedKeys[k]) {
-      refreshedKeys[k] = true;
-      log('🧭 命中过期活动，尝试刷新 actId 后重试: ' + a.name);
-      const refreshed = await refreshOneActByDiscovery(st, a);
-      if (refreshed.changed) {
-        acts = hydrateActsFromRuntime(st);
-        a = findActByKey(acts, a.key) || a;
-        log('🔄 活动装填: ' + a.name + ' | actId=' + a.actId + ' | source=' + txt(a.discoverySource || 'discovery'));
-        rs = await runOneActivity(st, a);
-      } else {
-        log('ℹ️ 未发现到新 actId，继续按当前结果输出');
-      }
-    }
-    if (dedupeKey && rs && rs.category !== 'expired') seenActResults[txt(a && a.actId)] = cloneResultForAlias(rs, a.name);
-    lines.push(formatActLine(a.name, rs));
-    if (rs && rs.authExpired) {
-      authExpired = { actName: a.name, reason: friendlyMsg(rs.reason) || 'HTTP 401' };
-      break;
-    }
-    for (let j = 0; j < rs.prizes.length; j++) {
-      const p = txt(rs.prizes[j]);
-      prizeRows.push({ actName: a.name, prizeName: p });
-    }
-    for (let k = 0; k < rs.rewardPool.length; k++) {
-      const rp = txt(rs.rewardPool[k]);
-      if (!rp) continue;
-      poolRows.push({ actName: a.name, rewardName: rp });
+    for (let q = 0; q < (rs.rewardPool || []).length; q++) {
+      const rewardName = txt(rs.rewardPool[q]);
+      if (!rewardName) continue;
+      poolRows.push({ actName: actName, rewardName: rewardName });
     }
   }
+  const authExpired = run.authExpired || null;
   if (authExpired) {
     const b = [
       '接口401，Cookie已过期',
@@ -186,39 +181,212 @@ Promise.resolve().then(async () => {
   $.msg($.name, buildSubtitle(lines), body);
 }).catch(e => $.logErr(e)).finally(() => { log('🏁 结束 ' + VER); log('=========='); $.done(); });
 
-async function runOneActivity(st, act) {
+async function runActivities(st, acts) {
+  let units = buildUniqueActUnits(acts);
+  let probeMap = {};
+  let authExpired = null;
+  for (let i = 0; i < units.length; i++) {
+    const unit = units[i];
+    const probe = await probeOneActivity(st, unit.act);
+    probeMap[unit.dedupeKey] = probe;
+    if (probe && probe.authExpired) {
+      authExpired = { actName: unit.act.name, reason: friendlyMsg(probe.reason) || 'HTTP 401' };
+      break;
+    }
+  }
+  if (authExpired) return { acts: acts, unitResults: mapUnitResults(units, probeMap), aliasResults: mapAliasResults(acts, probeMap), authExpired: authExpired };
+
+  const refreshKeys = collectRefreshKeys(acts, units, probeMap);
+  if (refreshKeys.length) {
+    log('🧭 二阶段刷新: ' + refreshKeys.join(' / '));
+    const refreshed = await refreshActsByDiscovery(st, filterActsByKeys(acts, refreshKeys));
+    acts = refreshed.acts || hydrateActsFromRuntime(st);
+    units = rebuildUnitsWithActs(units, acts);
+    probeMap = await reprobeUnits(st, units, probeMap, refreshKeys);
+    authExpired = firstAuthExpiredFromMap(units, probeMap);
+    if (authExpired) return { acts: acts, unitResults: mapUnitResults(units, probeMap), aliasResults: mapAliasResults(acts, probeMap), authExpired: authExpired };
+  }
+
+  const resultMap = {};
+  for (let j = 0; j < units.length; j++) {
+    const unit = units[j];
+    const probe = probeMap[unit.dedupeKey] || emptyResult();
+    const result = await executeOneActivity(st, unit.act, probe);
+    resultMap[unit.dedupeKey] = result;
+    if (result && result.authExpired) {
+      authExpired = { actName: unit.act.name, reason: friendlyMsg(result.reason) || 'HTTP 401' };
+      break;
+    }
+  }
+  return { acts: acts, unitResults: mapUnitResults(units, resultMap), aliasResults: mapAliasResults(acts, resultMap), authExpired: authExpired };
+}
+
+function buildUniqueActUnits(acts) {
+  const out = [];
+  const seen = {};
+  for (let i = 0; i < (acts || []).length; i++) {
+    const act = acts[i] || {};
+    const dedupeKey = buildActDedupeKey(act);
+    if (!dedupeKey || seen[dedupeKey]) continue;
+    seen[dedupeKey] = 1;
+    out.push({
+      key: txt(act.key),
+      dedupeKey: dedupeKey,
+      act: act,
+    });
+  }
+  return out;
+}
+
+function rebuildUnitsWithActs(units, acts) {
+  const out = [];
+  for (let i = 0; i < (units || []).length; i++) {
+    const unit = units[i] || {};
+    const current = findActByKey(acts, txt(unit.key)) || unit.act;
+    out.push({
+      key: txt(unit.key),
+      dedupeKey: buildActDedupeKey(current),
+      act: current,
+    });
+  }
+  return dedupeUnits(out);
+}
+
+function dedupeUnits(units) {
+  const out = [];
+  const seen = {};
+  for (let i = 0; i < (units || []).length; i++) {
+    const unit = units[i] || {};
+    const k = txt(unit.dedupeKey);
+    if (!k || seen[k]) continue;
+    seen[k] = 1;
+    out.push(unit);
+  }
+  return out;
+}
+
+function buildActDedupeKey(act) {
+  const actId = txt(act && act.actId);
+  if (actId) return actId;
+  const key = txt(act && act.key);
+  if (key) return 'key:' + key;
+  return '';
+}
+
+function emptyResult() {
+  return { category: 'error', reason: '未执行', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
+}
+
+function mapUnitResults(units, resultMap) {
+  const out = [];
+  for (let i = 0; i < (units || []).length; i++) {
+    const unit = units[i] || {};
+    out.push({
+      dedupeKey: txt(unit.dedupeKey),
+      actKey: txt(unit.key),
+      actName: txt(unit.act && unit.act.name),
+      result: cloneResultForAlias(resultMap[unit.dedupeKey] || emptyResult(), txt(unit.act && unit.act.name)),
+    });
+  }
+  return out;
+}
+
+function mapAliasResults(acts, resultMap) {
+  const out = [];
+  for (let i = 0; i < (acts || []).length; i++) {
+    const act = acts[i] || {};
+    const dedupeKey = buildActDedupeKey(act);
+    out.push({
+      aliasKey: txt(act.key),
+      aliasName: txt(act.name),
+      dedupeKey: dedupeKey,
+      result: cloneResultForAlias(resultMap[dedupeKey] || emptyResult(), txt(act.name)),
+    });
+  }
+  return out;
+}
+
+function collectRefreshKeys(acts, units, probeMap) {
+  const out = [];
+  const aliasMap = {};
+  for (let i = 0; i < (acts || []).length; i++) {
+    const act = acts[i] || {};
+    const dedupeKey = buildActDedupeKey(act);
+    if (!dedupeKey) continue;
+    if (!aliasMap[dedupeKey]) aliasMap[dedupeKey] = [];
+    aliasMap[dedupeKey].push(txt(act.key));
+  }
+  for (let i = 0; i < (units || []).length; i++) {
+    const unit = units[i] || {};
+    const probe = probeMap[unit.dedupeKey] || {};
+    if (!probe || !probe.needsRefresh) continue;
+    const keys = aliasMap[unit.dedupeKey] || [txt(unit.key)];
+    for (let j = 0; j < keys.length; j++) out.push(txt(keys[j]));
+  }
+  return uniqArr(out);
+}
+
+async function reprobeUnits(st, units, probeMap, refreshKeys) {
+  const out = Object.assign({}, probeMap || {});
+  const allow = {};
+  for (let i = 0; i < (refreshKeys || []).length; i++) allow[txt(refreshKeys[i])] = 1;
+  for (let j = 0; j < (units || []).length; j++) {
+    const unit = units[j] || {};
+    if (!allow[txt(unit.key)]) continue;
+    log('🔄 活动装填: ' + unit.act.name + ' | actId=' + unit.act.actId + ' | source=' + txt(unit.act.discoverySource || 'discovery'));
+    out[unit.dedupeKey] = await probeOneActivity(st, unit.act);
+  }
+  return out;
+}
+
+function firstAuthExpiredFromMap(units, resultMap) {
+  for (let i = 0; i < (units || []).length; i++) {
+    const unit = units[i] || {};
+    const rs = resultMap[txt(unit.dedupeKey)] || {};
+    if (rs && rs.authExpired) return { actName: txt(unit.act && unit.act.name), reason: friendlyMsg(rs.reason) || 'HTTP 401' };
+  }
+  return null;
+}
+
+async function probeOneActivity(st, act) {
   log('----------');
   log('🎯 活动: ' + act.name + ' | actId=' + act.actId);
 
   if (txt(act.discoveryStatus) === 'expired_no_update' && isDiscoveryCooldownActive(act)) {
-    return { category: 'expired', reason: '活动已结束，暂未发现新活动ID，下次检查 ' + txt(act.discoveryNextRefreshAt), prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false };
+    return { category: 'expired', reason: '活动已结束，暂未发现新活动ID，下次检查 ' + txt(act.discoveryNextRefreshAt), prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(act.name) };
   }
 
-  const detail = parseDetail(await reqDetail(st, act.actId));
+  const detail = await getActivityDetailCached(st, act.actId);
   if (!detail.ok) {
     const m = txt(detail.msg);
-    if (detail.authExpired) return { category: 'error', reason: m || '接口401', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    if (detail.authExpired) return { category: 'error', reason: m || '接口401', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: true, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
     if (isExpiredText(m)) {
       markActDiscoveryExpired(st, act, m || '活动已结束');
-      return { category: 'expired', reason: m || '活动已结束', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+      return { category: 'expired', reason: m || '活动已结束', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, needsRefresh: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
     }
-    if (isAlreadyDoneText(m)) return { category: 'already_done', reason: m || '已完成/已参与', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
-    return { category: 'error', reason: m || '状态接口返回异常', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    if (isAlreadyDoneText(m)) return { category: 'already_done', reason: m || '已完成/已参与', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    return { category: 'error', reason: m || '状态接口返回异常', prizes: [], remain: -1, done: 0, rewardPool: [], authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
   log('📊 状态: drawFlag=' + detail.drawFlag + ' | drawCount=' + detail.drawCount + ' | totalCount=' + detail.totalCount + ' | errCode=' + detail.errCode + ' | errMsg=' + detail.errMsg);
   if (isActivityExpired(detail)) {
     markActDiscoveryExpired(st, act, detail.errMsg || '活动已结束');
-    return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    return { category: 'expired', reason: detail.errMsg || '活动已结束', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, needsRefresh: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
   if (isRefreshWorthyAbnormal(detail)) {
     markActDiscoveryExpired(st, act, detail.errMsg || '活动状态异常，请尝试刷新活动ID');
-    return { category: 'expired', reason: detail.errMsg || '活动状态异常，请尝试刷新活动ID', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+    return { category: 'expired', reason: detail.errMsg || '活动状态异常，请尝试刷新活动ID', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, needsRefresh: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
   }
+  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+  return { category: 'ready', reason: '状态允许执行', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, needsRefresh: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+}
 
-  if (!detail.drawFlag || detail.drawCount <= 0) return { category: 'already_done', reason: detail.errMsg || '无可用次数', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
-  if (CFG.queryOnly) return { category: 'query_only', reason: 'query_only=true，跳过刮奖', prizes: [], remain: detail.drawCount, done: 0, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+async function executeOneActivity(st, act, probe) {
+  const base = cloneResultForAlias(probe || emptyResult(), txt(act && act.name));
+  if (!probe || probe.authExpired) return base;
+  if (probe.category !== 'ready') return base;
 
-  let remain = detail.drawCount;
+  let remain = toInt(probe.remain, 0);
   let done = 0;
   const prizes = [];
   const maxTry = Math.min(remain, CFG.maxDrawEach);
@@ -226,26 +394,26 @@ async function runOneActivity(st, act) {
     const draw = parseDraw(await reqDraw(st, act.actId));
     if (!draw.ok) {
       const dm = txt(draw.msg);
-      if (draw.authExpired) return { category: 'error', reason: dm || '接口401', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: true, groupName: txt(act.groupName), actName: txt(detail.actName) };
+      if (draw.authExpired) return { category: 'error', reason: dm || '接口401', prizes: prizes, remain: remain, done: done, rewardPool: probe.rewardPool || [], authExpired: true, groupName: txt(probe.groupName), actName: txt(probe.actName) };
       if (isExpiredText(dm)) {
         markActDiscoveryExpired(st, act, dm || '活动已结束');
-        return { category: 'expired', reason: dm || '活动已结束', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+        return { category: 'expired', reason: dm || '活动已结束', prizes: prizes, remain: remain, done: done, rewardPool: probe.rewardPool || [], authExpired: false, needsRefresh: true, groupName: txt(probe.groupName), actName: txt(probe.actName) };
       }
-      if (String(draw.errCode) === '200004' || dm.indexOf('次数用完') >= 0 || isAlreadyDoneText(dm)) return { category: 'already_done', reason: dm || '次数已用完', prizes, remain: 0, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
-      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: !!draw.authExpired, groupName: txt(act.groupName), actName: txt(detail.actName) };
+      if (String(draw.errCode) === '200004' || dm.indexOf('次数用完') >= 0 || isAlreadyDoneText(dm)) return { category: 'already_done', reason: dm || '次数已用完', prizes: prizes, remain: 0, done: done, rewardPool: probe.rewardPool || [], authExpired: false, groupName: txt(probe.groupName), actName: txt(probe.actName) };
+      return { category: 'error', reason: draw.msg || '服务端拒绝', prizes: prizes, remain: remain, done: done, rewardPool: probe.rewardPool || [], authExpired: !!draw.authExpired, groupName: txt(probe.groupName), actName: txt(probe.actName) };
     }
-    const p = draw.prizeName || '奖励名未返回';
-    prizes.push(p);
+    const prizeName = draw.prizeName || '奖励名未返回';
+    prizes.push(prizeName);
     done += 1;
     remain = Math.max(0, remain - 1);
-    log('✅ 第' + done + '次刮奖: ' + p);
+    log('✅ 第' + done + '次刮奖: ' + prizeName);
   }
 
   if (done > 0 && CFG.verifyAfterDraw) {
-    const re = parseDetail(await reqDetail(st, act.actId));
+    const re = await getActivityDetailFresh(st, act.actId);
     if (re.ok) remain = re.drawCount;
   }
-  return { category: 'ok', reason: '执行完成', prizes, remain, done, rewardPool: detail.rewardPool, authExpired: false, groupName: txt(act.groupName), actName: txt(detail.actName) };
+  return { category: 'ok', reason: '执行完成', prizes: prizes, remain: remain, done: done, rewardPool: probe.rewardPool || [], authExpired: false, groupName: txt(probe.groupName), actName: txt(probe.actName) };
 }
 
 function formatActLine(name, rs) {
@@ -423,6 +591,47 @@ function getActDiscoveryState(st) {
   return st.runtime[ACT_DISCOVERY_KEY];
 }
 
+function getDiscoverySourceRank(source) {
+  const s = txt(source);
+  if (s === 'capture') return 4;
+  if (s === 'group_detail') return 3;
+  if (s === 'actjump') return 2;
+  if (s === 'discovery') return 1;
+  return 0;
+}
+
+function mergeDiscoveryCandidate(map, key, candidate) {
+  const k = txt(key);
+  if (!k || !candidate || !txt(candidate.actId)) return false;
+  const next = {
+    actId: txt(candidate.actId),
+    groupActId: txt(candidate.groupActId),
+    groupName: txt(candidate.groupName),
+    source: txt(candidate.source) || 'discovery',
+  };
+  const old = map[k];
+  if (!old) {
+    map[k] = next;
+    return true;
+  }
+  if (txt(old.actId) === next.actId && txt(old.groupActId) === next.groupActId && txt(old.groupName) === next.groupName && txt(old.source) === next.source) return false;
+  if (getDiscoverySourceRank(next.source) > getDiscoverySourceRank(old.source)) {
+    map[k] = next;
+    return true;
+  }
+  if (getDiscoverySourceRank(next.source) === getDiscoverySourceRank(old.source)) {
+    if (!txt(old.groupName) && txt(next.groupName)) {
+      map[k] = next;
+      return true;
+    }
+    if (!txt(old.groupActId) && txt(next.groupActId)) {
+      map[k] = next;
+      return true;
+    }
+  }
+  return false;
+}
+
 function saveActDiscovery(st, discovered) {
   const rt = getActDiscoveryState(st);
   let changed = false;
@@ -589,9 +798,36 @@ function isSameExpiredDiscovery(st, act, actId) {
 function acceptDiscoveredAct(st, act, actId, groupName, source, logs, prefix) {
   const next = txt(actId);
   if (!next) return false;
+  if (!isCandidateCompatibleWithAct(act, next, groupName, source)) {
+    logs.push(prefix + ': ' + act.name + ' | 候选活动不匹配，跳过 actId=' + next + ' | source=' + txt(source || 'discovery'));
+    return false;
+  }
   if (isSameExpiredDiscovery(st, act, next)) {
     markActDiscoveryNoUpdate(st, act, next, groupName, source);
     logs.push(prefix + ': ' + act.name + ' | 仍为已过期 actId=' + next + '，跳过重试');
+    return false;
+  }
+  return true;
+}
+
+function isCandidateCompatibleWithAct(act, actId, groupName, source) {
+  const nextActId = txt(actId);
+  if (!nextActId) return false;
+  const currentActId = txt(act && act.actId);
+  const currentGroupId = txt(act && act.groupActId);
+  const sourceName = txt(source);
+  if (sourceName === 'group_detail') {
+    return true;
+  }
+  if (sourceName === 'actjump') {
+    const hint = normalizeTextKey(groupName);
+    const alias = normalizeTextKey(txt(act && act.name));
+    const knownGroup = normalizeTextKey(txt(act && act.groupName));
+    if (hint && (hint.indexOf(alias) >= 0 || alias.indexOf(hint) >= 0 || (knownGroup && (hint.indexOf(knownGroup) >= 0 || knownGroup.indexOf(hint) >= 0)))) {
+      return true;
+    }
+    if (currentActId && nextActId === currentActId) return true;
+    if (currentGroupId && txt(act && act.discoverySource) === 'actjump' && txt(act && act.groupActId) === currentGroupId) return true;
     return false;
   }
   return true;
@@ -648,15 +884,18 @@ async function preloadActsByDiscoveryIfNeeded(st, acts) {
   const plan = shouldPreloadActDiscovery(st, acts);
   if (!plan.needed) {
     if (CFG.debug) log('🧭 跳过活动预装填: ' + plan.reason);
-    return { changed: false, acts: acts, reason: plan.reason };
+    return { changed: false, acts: acts, reason: plan.reason, authExpired: false };
   }
   log('🧭 活动预装填: ' + plan.reason);
   const subset = (plan.keys && plan.keys.length && plan.keys.length < acts.length) ? filterActsByKeys(acts, plan.keys) : acts;
   const refreshed = await refreshActsByDiscovery(st, subset);
+  if (refreshed.authExpired) {
+    return { changed: false, acts: acts, reason: refreshed.reason || 'HTTP 401', authExpired: true };
+  }
   if (!refreshed.changed) {
     log('ℹ️ 活动预装填未更新，沿用当前缓存/内置活动ID');
   }
-  return { changed: refreshed.changed, acts: refreshed.acts || hydrateActsFromRuntime(st), reason: plan.reason };
+  return { changed: refreshed.changed, acts: refreshed.acts || hydrateActsFromRuntime(st), reason: plan.reason, authExpired: false };
 }
 
 function filterActsByKeys(acts, keys) {
@@ -725,31 +964,42 @@ function canRunScheduledDiscovery(st, acts) {
 async function refreshActsByDiscovery(st, acts) {
   const discovered = {};
   const logs = [];
-  await resolveActsFromGroupDetail(st, acts, discovered, logs);
-  if (!allActsResolved(acts, discovered)) {
-    await resolveActsFromActJump(st, acts, discovered, logs);
+  const actjumpFails = [];
+  const groupResult = await resolveActsFromGroupDetail(st, acts, discovered, logs);
+  if (groupResult && groupResult.authExpired) {
+    for (let i = 0; i < logs.length; i++) log(logs[i]);
+    return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: groupResult.reason || 'HTTP 401' };
   }
+  if (!allActsResolved(acts, discovered)) {
+    const jumpResult = await resolveActsFromActJump(st, acts, discovered, logs, actjumpFails);
+    if (jumpResult && jumpResult.authExpired) {
+      for (let j = 0; j < logs.length; j++) log(logs[j]);
+      return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: jumpResult.reason || 'HTTP 401' };
+    }
+  }
+  flushActJumpFailures(logs, actjumpFails, discovered);
   for (let i = 0; i < logs.length; i++) log(logs[i]);
   const changed = saveActDiscovery(st, discovered);
-  return { changed, acts: hydrateActsFromRuntime(st), discovered };
+  return { changed, acts: hydrateActsFromRuntime(st), discovered, authExpired: false, reason: '' };
 }
 
 async function refreshOneActByDiscovery(st, act) {
   const discovered = {};
   const logs = [];
+  const actjumpFails = [];
   const key = txt(act && act.key);
   if (!key) return { changed: false, discovered };
 
   const gid = txt(act && act.groupActId);
   if (gid) {
-    const raw = await reqActGroupDetail(st, gid);
-    const parsed = parseActGroupDetail(raw);
+    const parsed = await getGroupDetailCached(st, gid);
     if (parsed.ok) {
       const actId = selectActIdFromGroup(act, parsed);
       if (actId) {
         if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'group_detail', logs, '🧭 单活动未更新')) {
-          discovered[key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
-          logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
+          if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
+            logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
+          }
         }
       }
     } else {
@@ -761,26 +1011,28 @@ async function refreshOneActByDiscovery(st, act) {
     const token = findDiscoveryToken(st);
     const hd = txt(act && act.hdActId);
     if (token && hd) {
-      const jump = parseActJump(await reqActJump(st, hd, token));
+      const jump = await getActJumpCached(st, hd, token);
       if (jump.ok && txt(jump.groupActId)) {
-        const parsed = parseActGroupDetail(await reqActGroupDetail(st, jump.groupActId));
+        const parsed = await getGroupDetailCached(st, jump.groupActId);
         if (parsed.ok) {
           const actId = selectActIdFromGroup(act, parsed);
           if (actId) {
             if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'actjump', logs, '🧭 单活动ActJump未更新')) {
-              discovered[key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
-              logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+              if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
+                logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+              }
             }
           }
         } else {
           logs.push('🧭 单活动新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
         }
       } else {
-        logs.push('🧭 单活动ActJump失败: ' + hd + ' | ' + (jump.msg || '未解析到 LPARK'));
+        actjumpFails.push({ type: 'single', hd: hd, actName: act.name, key: key, msg: jump.msg || '未解析到 LPARK' });
       }
     }
   }
 
+  flushActJumpFailures(logs, actjumpFails, discovered);
   for (let i = 0; i < logs.length; i++) log(logs[i]);
   const changed = saveActDiscovery(st, discovered);
   return { changed, discovered };
@@ -806,9 +1058,9 @@ async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
   const groupIds = Object.keys(groupMap);
   for (let i = 0; i < groupIds.length; i++) {
     const gid = groupIds[i];
-    const raw = await reqActGroupDetail(st, gid);
-    const parsed = parseActGroupDetail(raw);
+    const parsed = await getGroupDetailCached(st, gid);
     if (!parsed.ok) {
+      if (parsed.authExpired) return { authExpired: true, reason: parsed.msg || 'HTTP 401' };
       logs.push('🧭 组详情失败: ' + gid + ' | ' + (parsed.msg || '未知错误'));
       continue;
     }
@@ -818,17 +1070,19 @@ async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
       const actId = selectActIdFromGroup(a, parsed);
       if (!actId) continue;
       if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'group_detail', logs, '🧭 组未更新')) continue;
-      discovered[a.key] = { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' };
-      logs.push('🧭 组装填: ' + a.name + ' | group=' + gid + ' | actId=' + actId);
+      if (mergeDiscoveryCandidate(discovered, a.key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
+        logs.push('🧭 组装填: ' + a.name + ' | group=' + gid + ' | actId=' + actId);
+      }
     }
   }
+  return { authExpired: false, reason: '' };
 }
 
-async function resolveActsFromActJump(st, acts, discovered, logs) {
+async function resolveActsFromActJump(st, acts, discovered, logs, actjumpFails) {
   const token = findDiscoveryToken(st);
   if (!token) {
     logs.push('🧭 缺少发现 token，跳过 HD -> LPARK 刷新');
-    return;
+    return { authExpired: false, reason: '' };
   }
   const hdMap = {};
   for (let i = 0; i < (acts || []).length; i++) {
@@ -841,13 +1095,21 @@ async function resolveActsFromActJump(st, acts, discovered, logs) {
   const hds = Object.keys(hdMap);
   for (let i = 0; i < hds.length; i++) {
     const hd = hds[i];
-    const jump = parseActJump(await reqActJump(st, hd, token));
+    const jump = await getActJumpCached(st, hd, token);
     if (!jump.ok || !txt(jump.groupActId)) {
-      logs.push('🧭 ActJump失败: ' + hd + ' | ' + (jump.msg || '未解析到 LPARK'));
+      if (jump.authExpired) return { authExpired: true, reason: jump.msg || 'HTTP 401' };
+      (actjumpFails || []).push({
+        type: 'batch',
+        hd: hd,
+        actNames: (hdMap[hd] || []).map(function (x) { return txt(x && x.name); }).filter(Boolean),
+        keys: (hdMap[hd] || []).map(function (x) { return txt(x && x.key); }).filter(Boolean),
+        msg: jump.msg || '未解析到 LPARK',
+      });
       continue;
     }
-    const parsed = parseActGroupDetail(await reqActGroupDetail(st, jump.groupActId));
+    const parsed = await getGroupDetailCached(st, jump.groupActId);
     if (!parsed.ok) {
+      if (parsed.authExpired) return { authExpired: true, reason: parsed.msg || 'HTTP 401' };
       logs.push('🧭 新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
       continue;
     }
@@ -857,10 +1119,51 @@ async function resolveActsFromActJump(st, acts, discovered, logs) {
       const actId = selectActIdFromGroup(a, parsed);
       if (!actId) continue;
       if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'actjump', logs, '🧭 ActJump未更新')) continue;
-      discovered[a.key] = { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' };
-      logs.push('🧭 ActJump装填: ' + a.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+      if (mergeDiscoveryCandidate(discovered, a.key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
+        logs.push('🧭 ActJump装填: ' + a.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
+      }
     }
   }
+  return { authExpired: false, reason: '' };
+}
+
+function flushActJumpFailures(logs, actjumpFails, discovered) {
+  const arr = Array.isArray(actjumpFails) ? actjumpFails : [];
+  if (!arr.length) return;
+  const unresolved = [];
+  for (let i = 0; i < arr.length; i++) {
+    const x = arr[i] || {};
+    const keys = Array.isArray(x.keys) ? x.keys : [txt(x.key)];
+    let pending = false;
+    for (let j = 0; j < keys.length; j++) {
+      const key = txt(keys[j]);
+      if (!key) continue;
+      if (!txt(discovered[key] && discovered[key].actId)) {
+        pending = true;
+        break;
+      }
+    }
+    if (pending) unresolved.push(x);
+  }
+  if (!unresolved.length) return;
+  const names = [];
+  const msgs = [];
+  for (let i = 0; i < unresolved.length; i++) {
+    const x = unresolved[i] || {};
+    const actNames = Array.isArray(x.actNames) ? x.actNames : [txt(x.actName)];
+    for (let j = 0; j < actNames.length; j++) {
+      const name = txt(actNames[j]);
+      if (name) names.push(name);
+    }
+    const msg = txt(x.msg);
+    if (msg) msgs.push(msg);
+  }
+  const uniqueNames = uniqArr(names);
+  const uniqueMsgs = uniqArr(msgs);
+  let line = '🧭 ActJump未命中';
+  if (uniqueNames.length) line += ': ' + uniqueNames.join(' / ');
+  if (uniqueMsgs.length) line += ' | ' + uniqueMsgs.join('；');
+  logs.push(line);
 }
 
 function selectActIdFromGroup(act, parsed) {
@@ -928,6 +1231,45 @@ async function reqActJump(st, hdActId, token) {
     Referer: txt(l.actjumpReferer || 'https://servicewechat.com/wx6f17e7e23765ca30/99/page-frame.html'),
     Origin: txt(l.actjumpOrigin || 'https://servicewechat.com'),
   }, body, CFG.detailTimeout);
+}
+
+function invalidateDetailCache(actId) {
+  const key = txt(actId);
+  if (key && MEM.detailByActId[key]) delete MEM.detailByActId[key];
+}
+
+async function getActivityDetailCached(st, actId) {
+  const key = txt(actId);
+  if (!key) return { ok: false, msg: '缺少actId', authExpired: false };
+  if (Object.prototype.hasOwnProperty.call(MEM.detailByActId, key)) return MEM.detailByActId[key];
+  const parsed = parseDetail(await reqDetail(st, key));
+  MEM.detailByActId[key] = parsed;
+  return parsed;
+}
+
+async function getActivityDetailFresh(st, actId) {
+  invalidateDetailCache(actId);
+  return getActivityDetailCached(st, actId);
+}
+
+async function getGroupDetailCached(st, groupActId) {
+  const key = txt(groupActId);
+  if (!key) return { ok: false, msg: '缺少groupActId' };
+  if (Object.prototype.hasOwnProperty.call(MEM.groupDetailById, key)) return MEM.groupDetailById[key];
+  const parsed = parseActGroupDetail(await reqActGroupDetail(st, key));
+  MEM.groupDetailById[key] = parsed;
+  return parsed;
+}
+
+async function getActJumpCached(st, hdActId, token) {
+  const hd = txt(hdActId);
+  if (!hd) return { ok: false, msg: '缺少hdActId' };
+  const t = summarizeSecret(token);
+  const key = hd + '|' + t;
+  if (Object.prototype.hasOwnProperty.call(MEM.actJumpByHd, key)) return MEM.actJumpByHd[key];
+  const parsed = parseActJump(await reqActJump(st, hd, token));
+  MEM.actJumpByHd[key] = parsed;
+  return parsed;
 }
 
 function parseActGroupDetail(raw) {
