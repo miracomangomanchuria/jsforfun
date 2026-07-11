@@ -16,7 +16,7 @@ QQ 农牧场助手（Node / Quantumult X / Surge / Loon）
  *  配置区（在此修改）
  * ======================= */
 var CONFIG = {
-  // 优先使用完整 Cookie（ptcz/openId/accessToken/newuin/openid/token/skey/uin）
+  // 新客户端优先使用 openid/token/uin/platform；仍兼容旧六字段 Cookie。
   INLINE_COOKIE: "",
   // 仅走 WAP：不使用 g_tk；skey/uin 仅作为 Cookie 字段参与请求。
 
@@ -59,7 +59,7 @@ var CONFIG = {
   // 用于排查“手游显示待收获，但脚本不动/状态不一致”等问题。
   FARM_JSON_OBSERVE_ONLY: false,
   FARM_JSON_ENCODE_KEY: "@#$N*9Fi@KLJH#$dfghKLJHdfgh!$Fl12aOAISDs",
-  FARM_JSON_USE_SWF_PARAMS: true,
+  FARM_JSON_USE_SWF_PARAMS: false,
   FARM_JSON_EMPTY_UIDX: true,
   FARM_JSON_LOCK_HEURISTIC: true,
   FARM_JSON_LOCK_GUARD: true,
@@ -196,6 +196,8 @@ var CONFIG = {
   FARM_EVENT_WISH_AUTO_HELP: true, // 自动执行一次 wish_help
   FARM_EVENT_WEEKGIFT_ENABLE: true, // 感恩回馈礼包（act_ios_weekshop）
   FARM_EVENT_WEEKGIFT_AUTO_CLAIM: true, // 感恩回馈礼包状态可领时自动领取
+  FARM_EVENT_JUDGE_SCORE_ENABLE: true, // 每日农场评级（cgi_farm_judge_score_*）
+  FARM_EVENT_JUDGE_SCORE_AUTO_CLAIM: true, // 农场评级可领时自动领奖
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
   FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
   FARM_SIGNIN_BOARD_ENABLE: true, // 月签签到板（/cgi_farm_month_signin_*）自动领奖
@@ -320,7 +322,9 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.03.07-r50";
+var SCRIPT_REV = "2026.07.12-r52";
+var FARM_COOKIE_STORE_KEY = "qfarm_Cookie";
+var FARM_PROFILE_STORE_KEY = "qfarm_Profile";
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -483,6 +487,16 @@ function localDateKey() {
   return y + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
 }
 
+function localDateKeyByTs(ts) {
+  var n = Number(ts || 0);
+  if (!n || isNaN(n) || n < 1000000000) return "";
+  var d = new Date(n * 1000);
+  var y = d.getFullYear();
+  var m = d.getMonth() + 1;
+  var day = d.getDate();
+  return y + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
+}
+
 function getFarmTime() {
   var base = nowTs();
   var delta = FARM_CTX.timeDelta || 0;
@@ -524,11 +538,18 @@ function extractServerTime(obj) {
 
 function getFarmUinFromCookie(cookie) {
   var map = parseCookieMap(cookie || "");
-  return map.newuin || map.uin || "";
+  return map.uin || map.newuin || "";
 }
 
 function getFarmUin(cookie) {
-  return FARM_CTX.uIdx || FARM_CTX.uinY || getFarmUinFromCookie(cookie) || "";
+  var map = parseCookieMap(cookie || "");
+  return FARM_CTX.uIdx || map.uIdx || FARM_CTX.uinY || map.uinY || getFarmUinFromCookie(cookie) || "";
+}
+
+function hydrateFarmContextFromCookie(cookie) {
+  var map = parseCookieMap(cookie || "");
+  if (!FARM_CTX.uIdx && map.uIdx) FARM_CTX.uIdx = map.uIdx;
+  if (!FARM_CTX.uinY) FARM_CTX.uinY = map.uinY || map.uin || map.newuin || "";
 }
 
 function parseCookieMap(cookie) {
@@ -602,7 +623,14 @@ function hasOpenidToken(cookie) {
 
 function buildLiteCookie(cookie) {
   var map = parseCookieMap(cookie);
-  var keys = ["ptcz", "openId", "accessToken", "newuin", "openid", "token"];
+  var keys;
+  if (map.openid && map.token && (map.uin || map.newuin)) {
+    if (!map.uin && map.newuin) map.uin = map.newuin;
+    if (!map.platform) map.platform = CONFIG.FARM_PLATFORM || "13";
+    keys = ["openid", "token", "uin", "platform"];
+  } else {
+    keys = ["ptcz", "openId", "accessToken", "newuin", "openid", "token"];
+  }
   var parts = [];
   for (var i = 0; i < keys.length; i++) {
     var k = keys[i];
@@ -636,6 +664,11 @@ function buildCookie() {
     COOKIE_SOURCE = "ENV:QQFARM_COOKIE";
     return process.env.QQFARM_COOKIE;
   }
+  var farmStored = $.read(FARM_COOKIE_STORE_KEY);
+  if (farmStored) {
+    COOKIE_SOURCE = FARM_COOKIE_STORE_KEY;
+    return farmStored;
+  }
   var stored = $.read("qcdld_Cookie");
   if (stored) {
     COOKIE_SOURCE = "qcdld_Cookie";
@@ -647,6 +680,26 @@ function buildCookie() {
     return stored;
   }
   return "";
+}
+
+function applyFarmProfile() {
+  var raw = $.read(FARM_PROFILE_STORE_KEY) || "";
+  if (!raw) return;
+  var profile = tryJson(raw);
+  if (!profile || typeof profile !== "object") return;
+  var platform = String(profile.platform || "");
+  var appid = String(profile.appid || "");
+  var version = String(profile.version || "");
+  var vClient = String(profile.v_client || "");
+  var unity = String(profile.unityVersion || "");
+  var ua = String(profile.userAgent || "");
+  if (/^\d{1,3}$/.test(platform)) CONFIG.FARM_PLATFORM = platform;
+  if (/^\d{1,8}$/.test(appid)) CONFIG.FARM_APPID = appid;
+  if (/^\d+(?:\.\d+){1,5}$/.test(version)) CONFIG.FARM_VERSION = version;
+  if (/^\d{1,3}$/.test(vClient)) CONFIG.FARM_V_CLIENT = vClient;
+  if (/^[\w.\-]{3,80}$/.test(unity)) CONFIG.FARM_UNITY_VERSION = unity;
+  if (/^qqfarm\/\d+\s+CFNetwork\//.test(ua) && ua.length <= 180) CONFIG.FARM_USER_AGENT = ua;
+  if (CONFIG.DEBUG) logDebug("农场协议档案已加载: platform=" + CONFIG.FARM_PLATFORM + " appid=" + CONFIG.FARM_APPID + " version=" + CONFIG.FARM_VERSION);
 }
 
 function logDebug(msg) {
@@ -724,14 +777,18 @@ function logDiagResponse(label, url, html, status) {
 
 function logCookieHealth(cookie) {
   var map = parseCookieMap(cookie || "");
-  var keys = ["ptcz", "openId", "accessToken", "newuin", "openid", "token", "skey", "uin"];
+  var keys = ["ptcz", "openId", "accessToken", "newuin", "openid", "token", "platform", "skey", "uin"];
   var present = [];
   for (var i = 0; i < keys.length; i++) {
     if (map[keys[i]]) present.push(keys[i]);
   }
   log("🍪 Cookie关键字段: " + (present.length ? present.join(", ") : "无"));
-  if (!map.openid || !map.token) {
-    log("⚠️ Cookie缺少 openid/token，6字段不完整，牧场进入可能失败");
+  if (!map.openid || !map.token || !(map.uin || map.newuin)) {
+    log("⚠️ Cookie缺少 openid/token/uin，会话不完整");
+  } else if (map.uin && map.platform) {
+    log("🍪 会话模式: 新版四字段");
+  } else {
+    log("🍪 会话模式: 旧版兼容");
   }
   if (map.openid && map.openId && map.openid === map.openId) {
     log("⚠️ Cookie openid 与 openId 值相同，疑似抓包混淆（会导致请求参数错误）");
@@ -1058,6 +1115,10 @@ function ensureMcappAccess(cookie) {
     var altUrl = base + "/mc/cgi-bin/wap_pasture_index?sid=" + sid + "&g_ut=" + gut + "&source=fallback";
       var referer = buildReferer(gut);
       return getHtmlFollow(indexUrl, cookieVal, referer, label || "牧场", 0).then(function (resp) {
+        if (isWapParameterError(resp.body)) {
+          if (CONFIG.DEBUG) logDebug("牧场WAP会话无效，停止入口轮询");
+          return { cookie: resp.cookie || cookieVal, ok: false, authError: true };
+        }
         var ctx = extractRanchContext(resp.body);
         setStartStats("ranch", parseCommonStats(resp.body));
         if (ctx.sid && ctx.g_ut && isRanchHome(resp.body)) {
@@ -1088,14 +1149,14 @@ function ensureMcappAccess(cookie) {
     return tryDirect(liteCookie, "6字段探测")
       .then(function (ok) {
         if (ok) {
-          logDebug("牧场进入: 6字段可用");
+          logDebug("牧场进入: 精简会话可用");
           return { cookie: cookie, ok: true, ranchCookie: ok.ranchCookie || liteCookie };
         }
-        logDebug("牧场进入: 6字段未命中，改用原始 Cookie");
+        logDebug("牧场进入: 精简会话未命中，改用原始 Cookie");
         return tryDirect(cookie, "原始Cookie探测");
       })
       .catch(function () {
-        logDebug("牧场进入: 6字段异常，改用原始 Cookie");
+        logDebug("牧场进入: 精简会话异常，改用原始 Cookie");
         return tryDirect(cookie, "原始Cookie探测");
       });
   }
@@ -1140,6 +1201,10 @@ function ensureFarmAccess(cookie) {
     return getHtmlFollow(url, curCookie, null, "农场探测", 0)
       .then(function (ret) {
         var html = ret.body || "";
+        if (isWapParameterError(html)) {
+          log("⚠️ 农场WAP会话无效，停止入口轮询");
+          return { ok: false, cookie: ret.cookie || curCookie, authError: true };
+        }
         if (isFarmHome(html)) {
           CONFIG.FARM_G_UT = gut;
           if (!CONFIG.FISH_G_UT) CONFIG.FISH_G_UT = gut;
@@ -1328,6 +1393,11 @@ var FARM_EVENT_STATS = {
   weekGiftCanClaim: 0,
   weekGiftClaim: 0,
   weekGiftReward: "",
+  judgeScore: 0,
+  judgeLevel: 0,
+  judgeDrawTs: 0,
+  judgeCanClaim: 0,
+  judgeClaim: 0,
   day7Days: 0,
   day7Flag: 0,
   busy: 0,
@@ -1537,9 +1607,14 @@ function buildLegacyHeaders(cookie) {
 }
 
 function buildFarmJsonHeaders(cookie) {
-  var h = buildHeaders(cookie);
-  h["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8";
-  return h;
+  return {
+    "User-Agent": CONFIG.FARM_USER_AGENT || "qqfarm/45 CFNetwork/3860.600.12 Darwin/25.5.0",
+    Accept: "*/*",
+    "Accept-Language": "zh-CN,zh-Hans;q=0.9",
+    "Content-Type": "application/x-www-form-urlencoded",
+    "X-Unity-Version": CONFIG.FARM_UNITY_VERSION || "2021.3.29f1c1",
+    Cookie: buildLiteCookie(cookie) || cookie
+  };
 }
 
 function buildFarmSeedJsonHeaders(cookie) {
@@ -1583,13 +1658,7 @@ function buildRanchHeaders(cookie, referer) {
 }
 
 function buildFishJsonHeaders(cookie) {
-  return {
-    "User-Agent": "qqfarm/45 CFNetwork/3860.400.51 Darwin/25.3.0",
-    Accept: "*/*",
-    "Accept-Language": "zh-CN,zh;q=0.9",
-    "Content-Type": "application/x-www-form-urlencoded",
-    Cookie: cookie
-  };
+  return buildFarmJsonHeaders(cookie);
 }
 
 function buildDldHeaders(cookie) {
@@ -4334,6 +4403,11 @@ function isContinuePage(html) {
   return /继续访问触屏版|继续访问|立即进入|跳转|redirect/i.test(text);
 }
 
+function isWapParameterError(html) {
+  var text = stripTags(html || "");
+  return /请求参数错误|参数错误|登录状态失效|请重新登录/.test(text);
+}
+
 function isFishPage(html) {
   var text = stripTags(html || "");
   return /鱼塘|鱼池|池塘|鱼苗|鱼食/.test(text);
@@ -4350,6 +4424,7 @@ function isFarmHome(html) {
 
 function isRanchHome(html) {
   var text = stripTags(html || "");
+  if (isWapParameterError(html)) return false;
   return (
     text.indexOf("我的牧场") >= 0 ||
     text.indexOf("牧场动物及产品") >= 0 ||
@@ -7045,6 +7120,24 @@ function buildLegacyBody(params) {
   return arr.join("&");
 }
 
+function buildFarmCommonParams(extra) {
+  var params = {
+    uIdx: FARM_CTX.uIdx || "",
+    uinY: FARM_CTX.uinY || "",
+    farmTime: getFarmTime(),
+    platform: CONFIG.FARM_PLATFORM || "13",
+    appid: CONFIG.FARM_APPID || "353",
+    version: CONFIG.FARM_VERSION || "4.0.20.0"
+  };
+  if (extra) {
+    for (var k in extra) {
+      if (!extra.hasOwnProperty(k)) continue;
+      params[k] = extra[k];
+    }
+  }
+  return params;
+}
+
 function buildModernBody(params) {
   return buildLegacyBody(params);
 }
@@ -7317,6 +7410,21 @@ function farmEventStatusLine() {
   if (FARM_EVENT_STATS.weekGiftCanClaim > 0 || FARM_EVENT_STATS.weekGiftClaim > 0) {
     parts.push("回馈 可领" + FARM_EVENT_STATS.weekGiftCanClaim + " 已领" + FARM_EVENT_STATS.weekGiftClaim);
   }
+  if (
+    FARM_EVENT_STATS.judgeScore > 0 ||
+    FARM_EVENT_STATS.judgeLevel > 0 ||
+    FARM_EVENT_STATS.judgeClaim > 0 ||
+    FARM_EVENT_STATS.judgeDrawTs > 0
+  ) {
+    parts.push(
+      "评级 分" +
+        FARM_EVENT_STATS.judgeScore +
+        " 等级" +
+        FARM_EVENT_STATS.judgeLevel +
+        " " +
+        (FARM_EVENT_STATS.judgeCanClaim > 0 ? "可领1" : "今日已领")
+    );
+  }
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     var selfStart = FARM_EVENT_STATS.wishSelfStart >= 0 ? FARM_EVENT_STATS.wishSelfStart : 0;
     var selfEnd = FARM_EVENT_STATS.wishSelfEnd >= 0 ? FARM_EVENT_STATS.wishSelfEnd : selfStart;
@@ -7350,6 +7458,7 @@ function farmEventSummaryLine() {
   parts.push("节气领" + FARM_EVENT_STATS.seedClaim);
   parts.push("补领" + FARM_EVENT_STATS.bulingClaim);
   parts.push("回馈领" + FARM_EVENT_STATS.weekGiftClaim);
+  parts.push("评级领" + FARM_EVENT_STATS.judgeClaim);
   if (FARM_EVENT_STATS.wishStatus >= 0) {
     parts.push("许愿收星" + FARM_EVENT_STATS.wishCollect);
     parts.push("许愿抽星" + FARM_EVENT_STATS.wishRandom);
@@ -7372,6 +7481,7 @@ function farmEventChangeLine() {
   if (FARM_EVENT_STATS.seedClaim > 0) parts.push("节气领取+" + FARM_EVENT_STATS.seedClaim);
   if (FARM_EVENT_STATS.bulingClaim > 0) parts.push("补领+" + FARM_EVENT_STATS.bulingClaim);
   if (FARM_EVENT_STATS.weekGiftClaim > 0) parts.push("回馈领取+" + FARM_EVENT_STATS.weekGiftClaim);
+  if (FARM_EVENT_STATS.judgeClaim > 0) parts.push("评级领取+" + FARM_EVENT_STATS.judgeClaim);
   if (FARM_EVENT_STATS.wishCollect > 0) parts.push("许愿收星+" + FARM_EVENT_STATS.wishCollect);
   if (FARM_EVENT_STATS.wishRandom > 0) parts.push("许愿抽星+" + FARM_EVENT_STATS.wishRandom);
   if (FARM_EVENT_STATS.wishStarClaim > 0) parts.push("许愿领奖+" + FARM_EVENT_STATS.wishStarClaim);
@@ -7957,6 +8067,10 @@ function buildQQOpenUrl(url) {
   return "mqqapi://forward/url?version=1&src_type=web&url_prefix=" + base64Encode(url);
 }
 
+function buildFarmCaptureOpenUrl() {
+  return buildQQOpenUrl("https://mcapp.z.qq.com/nc/cgi-bin/wap_farm_index?sid=c&g_ut=1");
+}
+
 var LINE = "";
 var SUBLINE = "";
 
@@ -8157,40 +8271,31 @@ function parseSaleAllJsonResult(res) {
   return { success: success, money: money, msg: msg };
 }
 function buildFarmJsonParams(farmTime, farmKey, uin) {
-  var params = {};
-  var extra = CONFIG.FARM_JSON_SWF_PARAMS;
-  if (CONFIG.FARM_JSON_USE_SWF_PARAMS && extra) {
-    for (var k in extra) {
-      if (!extra.hasOwnProperty(k)) continue;
-      params[k] = extra[k];
-    }
-  }
-  var uIdx = uin || "";
-  if (CONFIG.FARM_JSON_EMPTY_UIDX) uIdx = "";
-  params.uIdx = uIdx;
-  if (uIdx) params.ownerId = uIdx;
-  params.farmTime = farmTime;
-  params.farmKey = farmKey;
-  return params;
+  var uIdx = FARM_CTX.uIdx || "";
+  if (!uIdx && !CONFIG.FARM_JSON_EMPTY_UIDX) uIdx = uin || "";
+  return {
+    v_client: CONFIG.FARM_V_CLIENT || "1",
+    uIdx: uIdx,
+    uinY: FARM_CTX.uinY || uin || "",
+    farmTime: farmTime,
+    platform: CONFIG.FARM_PLATFORM || "13",
+    appid: CONFIG.FARM_APPID || "353",
+    version: CONFIG.FARM_VERSION || "4.0.20.0"
+  };
 }
 
 function fetchFarmJson(base, cookie, uin) {
   var farmTime = getFarmTime();
-  var farmKey = legacyFarmKey(farmTime);
-  if (!farmKey) {
-    log("⚠️ farmKey 为空，JSON 模式不可用");
-    return Promise.resolve(null);
-  }
-  var url = base + "/cgi-bin/cgi_farm_index?mod=user&act=run&flag=1";
+  var url = base + "/cgi-bin/cgi_farm_index";
   var headers = buildFarmJsonHeaders(cookie);
-  var body = buildLegacyBody(buildFarmJsonParams(farmTime, farmKey, uin));
+  var body = buildLegacyBody(buildFarmJsonParams(farmTime, "", uin));
   return httpRequest({
     method: "POST",
     url: url,
     headers: headers,
     body: body
   }).then(function (resp) {
-    logDebug("JSON 模式 响应: " + resp.status + " 长度=" + (resp.body || "").length);
+    logDebug("JSON 状态响应: " + resp.status + " 长度=" + (resp.body || "").length);
     var json = tryJson(resp.body);
     if (json && json.user) {
       LAST_FARM = json;
@@ -8199,6 +8304,8 @@ function fetchFarmJson(base, cookie, uin) {
       var st = extractServerTime(json);
       updateFarmTimeDelta(st);
       logFarmTimeSync(st);
+    } else if (json && isTransientFailText(farmEventErrMsg(json))) {
+      logDebug("JSON 状态受限: " + farmEventErrMsg(json));
     }
     return json;
   });
@@ -8223,17 +8330,12 @@ function fetchFarmJsonOutputStatus(base, cookie, uin, place) {
   if (!uin && uin !== 0) return Promise.resolve(null);
   if (place === null || place === undefined || place === "") return Promise.resolve(null);
   var farmTime = getFarmTime();
-  var params = {
-    v_client: 1,
+  var params = buildFarmCommonParams({
+    v_client: CONFIG.FARM_V_CLIENT || "1",
     place: place,
-    uinY: uin,
-    uIdx: uin,
-    ownerId: uin,
-    farmTime: farmTime,
-    platform: CONFIG.FARM_PLATFORM || "13",
-    appid: CONFIG.FARM_APPID || "353",
-    version: CONFIG.FARM_VERSION || "4.0.20.0"
-  };
+    ownerId: FARM_CTX.uIdx || uin || "",
+    farmTime: farmTime
+  });
   var placeName = FARM_PLACE_NAME[place];
   if (placeName) {
     params.fName = placeName;
@@ -8355,8 +8457,8 @@ function execFarmJsonActions(base, cookie, actions) {
     plant: "/cgi-bin/cgi_farm_plant?mod=farmlandstatus&act=planting"
   };
   var actionList = actions.slice(0);
-  var uin = getFarmUin(cookie);
-  if (!uin) log("⚠️ 未获取 uIdx，JSON 动作可能失败");
+  var uin = FARM_CTX.uIdx || "";
+  if (!uin) log("⚠️ 未获取内部 uIdx，JSON 动作已停止");
   var skipAfter = {};
   var plantBlocked = false;
 
@@ -8375,19 +8477,18 @@ function execFarmJsonActions(base, cookie, actions) {
         return next();
       }
       var farmTime = getFarmTime();
-      var farmKey = legacyFarmKey(farmTime);
-      if (!farmKey) {
+      if (!uin || !FARM_CTX.uinY) {
         ACTION_STATS.errors += 1;
-        log("⚠️ farmKey 为空，跳过动作: " + actionLabel(a.type));
+        log("⚠️ JSON上下文不完整，跳过动作: " + actionLabel(a.type));
         return Promise.resolve();
       }
-      var params = {
+      var params = buildFarmCommonParams({
+        v_client: CONFIG.FARM_V_CLIENT || "1",
         uIdx: uin,
         ownerId: uin,
         place: a.place,
-        farmTime: farmTime,
-        farmKey: farmKey
-      };
+        farmTime: farmTime
+      });
       if (a.type === "plant") {
         var useCid = String(CONFIG.PLANT_CID || "");
         if (!useCid || Number(useCid) <= 0) {
@@ -11218,6 +11319,122 @@ function runFarmEvents(cookie) {
     });
   }
 
+  function runJudgeScore() {
+    if (!CONFIG.FARM_EVENT_JUDGE_SCORE_ENABLE) return Promise.resolve();
+    var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
+    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+
+    function normalizeDrawTs(v) {
+      var n = Number(v || 0);
+      if (isNaN(n) || n <= 0) return 0;
+      if (n > 1000000000000) n = Math.floor(n / 1000);
+      return n;
+    }
+
+    function parseJudgeCanClaim(json, drawTs) {
+      var can = Number(json && json.can_get);
+      if (isNaN(can)) can = Number(json && json.can_claim);
+      if (isNaN(can)) can = Number(json && json.canClaim);
+      if (isNaN(can)) can = Number(json && json.can_draw);
+      if (isNaN(can)) can = Number(json && json.canDraw);
+      if (isNaN(can)) can = Number(json && json.l);
+      if (!isNaN(can)) return can > 0 ? 1 : 0;
+      var isGet = Number(json && (json.is_get != null ? json.is_get : json.isGet));
+      if (!isNaN(isGet)) return isGet > 0 ? 0 : 1;
+      var drawDay = localDateKeyByTs(drawTs);
+      var today = localDateKey();
+      if (drawDay && drawDay === today) return 0;
+      return 1;
+    }
+
+    function readIndex(tag, quiet) {
+      return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_judge_score_index", farmEventParams(ctx)).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (!isFarmEventNoop(json, msg)) {
+            FARM_EVENT_STATS.errors += 1;
+            log("⚠️ 农场评级状态读取失败(" + tag + "): " + msg);
+          } else if (CONFIG.DEBUG) {
+            logDebug("🏅 农场评级状态(" + tag + "): 无需执行(" + msg + ")");
+          }
+          return null;
+        }
+        var score = Number(json.score || 0) || 0;
+        var level = Number(json.level || 0) || 0;
+        var drawTs = normalizeDrawTs(json.draw || json.draw_time || json.drawTime);
+        var can = parseJudgeCanClaim(json, drawTs);
+        var drawDay = localDateKeyByTs(drawTs);
+        var today = localDateKey();
+        if (drawDay && drawDay === today) can = 0;
+        FARM_EVENT_STATS.judgeScore = score;
+        FARM_EVENT_STATS.judgeLevel = level;
+        FARM_EVENT_STATS.judgeDrawTs = drawTs;
+        FARM_EVENT_STATS.judgeCanClaim = can;
+        if (!quiet) {
+          log("🏅 农场评级状态: 分数" + score + " 等级" + level + " " + (can > 0 ? "可领" : "今日已领"));
+        } else if (CONFIG.DEBUG) {
+          logDebug(
+            "🏅 农场评级状态(" +
+              tag +
+              "): 分数" +
+              score +
+              " 等级" +
+              level +
+              " " +
+              (can > 0 ? "可领" : "今日已领")
+          );
+        }
+        return { json: json, can: can };
+      });
+    }
+
+    function claimOnce(attempt) {
+      return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_judge_score_draw", farmEventParams(ctx)).then(function (json) {
+        if (!isFarmEventOk(json)) {
+          var msg = farmEventErrMsg(json);
+          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+            log("⚠️ 农场评级领奖繁忙，第" + (attempt + 1) + "次重试");
+            return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
+              return claimOnce(attempt + 1);
+            });
+          }
+          if (isTransientFailText(msg || "")) {
+            FARM_EVENT_STATS.busy += 1;
+            log("⚠️ 农场评级领奖繁忙: 已重试" + transientRetries + "次，留待下轮");
+            return "busy";
+          }
+          if (isFarmEventNoop(json, msg) || /礼包已经领取过|已经领取|已领取|领取过|今日已领/.test(msg || "")) {
+            FARM_EVENT_STATS.judgeCanClaim = 0;
+            if (CONFIG.DEBUG) logDebug("🏅 农场评级领奖: 无需执行(" + msg + ")");
+            return "noop";
+          }
+          FARM_EVENT_STATS.errors += 1;
+          log("⚠️ 农场评级领奖失败: " + msg);
+          return "stop";
+        }
+        FARM_EVENT_STATS.judgeClaim += 1;
+        FARM_EVENT_STATS.judgeCanClaim = 0;
+        log("🏅 农场评级领奖: 成功");
+        return "ok";
+      });
+    }
+
+    return readIndex("开始", false).then(function (st) {
+      if (!st || st.can <= 0) return;
+      if (!CONFIG.FARM_EVENT_JUDGE_SCORE_AUTO_CLAIM) {
+        if (CONFIG.DEBUG) logDebug("🏅 农场评级领奖: 配置关闭，跳过");
+        return;
+      }
+      return claimOnce(0).then(function (flag) {
+        if (flag === "ok") {
+          return readIndex("领奖后", true);
+        }
+        return;
+      });
+    });
+  }
+
   function runDay7Probe() {
     if (!CONFIG.FARM_EVENT_DAY7_PROBE) return Promise.resolve();
     return callFarmEventApi(
@@ -11259,6 +11476,9 @@ function runFarmEvents(cookie) {
         })
         .then(function () {
           return runWeekGift();
+        })
+        .then(function () {
+          return runJudgeScore();
         })
         .then(function () {
           return runWish();
@@ -16334,23 +16554,26 @@ function main() {
   bannerStart();
   var STOP_SIGNAL = "__STOP__";
 
+  applyFarmProfile();
+
   var cookie = buildCookie();
   var ranchCookie = cookie;
   if (!cookie) {
     log("❌ Cookie 缺失，请填写 INLINE_COOKIE 或环境变量 QQFARM_COOKIE");
-    var openUrl = buildQQOpenUrl("https://mcapp.z.qq.com/mc/cgi-bin/wap_pasture_index");
-    notify("🌾 QQ 农牧场助手", "Cookie 缺失", "请先设置 Cookie", { "open-url": openUrl });
+    var openUrl = buildFarmCaptureOpenUrl();
+    notify("🌾 QQ 农牧场助手", "农场会话缺失", "点击打开农场 WAP，qfarm_ck.js 将自动抓取会话", { "open-url": openUrl });
     bannerEnd();
     return Promise.resolve();
   }
   log("🍪 Cookie来源: " + (COOKIE_SOURCE || "未知"));
   logCookieHealth(cookie);
+  hydrateFarmContextFromCookie(cookie);
 
   return ensureMcappAccess(cookie)
     .then(function (res) {
       if (!res || !res.ok) {
-        var openUrl2 = buildQQOpenUrl("https://mcapp.z.qq.com/mc/cgi-bin/wap_pasture_index");
-        notify("🌾 QQ 农牧场助手", "Cookie 失效", "点击进入牧场重新登录", {
+        var openUrl2 = buildFarmCaptureOpenUrl();
+        notify("🌾 QQ 农牧场助手", "农场会话失效", "点击打开农场 WAP，qfarm_ck.js 将自动更新会话", {
           "open-url": openUrl2
         });
         bannerEnd();

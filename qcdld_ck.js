@@ -1,18 +1,20 @@
 /*
 本脚本仅供个人学习交流使用，严禁用于任何商业用途，请于下载后24小时内删除。
 脚本无意侵犯任何第三方的肖像权、名誉权、著作权、商标权等合法权益，如涉嫌侵权，请权利人联系脚本，脚本将在收到通知后24小时内删除相关内容。
-大乐斗 Cookie 获取脚本（六字段）
+QQ 农场会话获取脚本（新版四字段 + 旧版兼容）
 
 【抓包方式（简版）】
 [rewrite_local]
-^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
+^https://(?:nc|farm)\\.qzone\\.qq\\.com/cgi-bin/(?:cgi_farm_index|cgi_fish_index).* url script-request-body qcdld_ck.js
+^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* url script-request-header qcdld_ck.js
 [mitm]
-hostname = dld.qzapp.z.qq.com
-打开大乐斗简版页面，触发请求即可写入。
+hostname = nc.qzone.qq.com, farm.qzone.qq.com, dld.qzapp.z.qq.com
+优先打开 QQ 农场客户端主页，触发 cgi_farm_index 即可写入。
 完整可复制配置见后文 CAPTURE_CONFIG_TEXT（缺少 Cookie 时会自动打印）。
 
 【保存字段】
-ptcz、openId、accessToken、newuin、openid、token
+新版：openid、token、uin、platform、uIdx、uinY
+旧版兼容：ptcz、openId、accessToken、newuin
 
 说明：
 - 牧场直连更依赖 openid + token
@@ -21,14 +23,15 @@ ptcz、openId、accessToken、newuin、openid、token
 存储键：qcdld_Cookie
 */
 
-const VERSION = "2026-02-09.v3";
+const VERSION = "2026-07-12.v4";
 const DEBUG = false;
 const NOTIFY = true;
 const $ = new API("qcdld_Cookie");
 const CAPTURE_CONFIG_TEXT = String.raw`[rewrite_local]
-^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* ^GET url-and-header script-request-header qcdld_ck.js
+^https://(?:nc|farm)\\.qzone\\.qq\\.com/cgi-bin/(?:cgi_farm_index|cgi_fish_index).* url script-request-body qcdld_ck.js
+^https?://dld\\.qzapp\\.z\\.qq\\.com/qpet/cgi-bin/phonepk\\?cmd=index.* url script-request-header qcdld_ck.js
 [mitm]
-hostname = dld.qzapp.z.qq.com`;
+hostname = nc.qzone.qq.com, farm.qzone.qq.com, dld.qzapp.z.qq.com`;
 
 !(async () => {
   if ($.env.isNode) {
@@ -49,7 +52,9 @@ hostname = dld.qzapp.z.qq.com`;
     return;
   }
 
-  const KEYS = ["ptcz", "openId", "accessToken", "newuin", "openid", "token"];
+  const NEW_KEYS = ["openid", "token", "uin", "platform", "uIdx", "uinY"];
+  const LEGACY_KEYS = ["ptcz", "openId", "accessToken", "newuin"];
+  const KEYS = NEW_KEYS.concat(LEGACY_KEYS);
   const data = {};
   const source = {};
   for (let i = 0; i < KEYS.length; i++) {
@@ -60,20 +65,38 @@ hostname = dld.qzapp.z.qq.com`;
       source[k] = "new";
     }
   }
+  if (!data.uin && data.newuin) {
+    data.uin = data.newuin;
+    source.uin = "derived";
+  }
+
+  const body = ($request && $request.body) || "";
+  const bodyMap = parseFormBody(body);
+  for (const k of ["uIdx", "uinY", "platform"]) {
+    if (bodyMap[k]) {
+      data[k] = bodyMap[k];
+      source[k] = "new";
+    }
+  }
+  if (!data.uin && data.uinY) {
+    data.uin = data.uinY;
+    source.uin = "derived";
+  }
 
   const old = $.read("qcdld_Cookie") || "";
   const oldMap = parseCookieMap(old);
+  const isNewCapture = !!(data.openid && data.token && (data.uin || data.uinY));
+  const activeKeys = isNewCapture ? NEW_KEYS : KEYS;
   const capturedKeys = Object.keys(data)
     .filter((k) => data[k] && source[k] === "new")
     .join(", ");
   if (DEBUG) {
     console.log("qcdld_ck version=" + VERSION);
-    console.log("old cookie=" + old);
     console.log("captured keys=" + capturedKeys);
   }
   // 如果本次缺字段，尝试用旧值补齐，避免覆盖成不完整 Cookie
-  for (let i = 0; i < KEYS.length; i++) {
-    const k = KEYS[i];
+  for (let i = 0; i < activeKeys.length; i++) {
+    const k = activeKeys[i];
     if (!data[k] && oldMap[k]) {
       data[k] = oldMap[k];
       source[k] = "old";
@@ -81,35 +104,32 @@ hostname = dld.qzapp.z.qq.com`;
   }
 
   const parts = [];
-  for (let i = 0; i < KEYS.length; i++) {
-    const k = KEYS[i];
+  for (let i = 0; i < activeKeys.length; i++) {
+    const k = activeKeys[i];
     if (data[k]) parts.push(k + "=" + data[k]);
   }
   if (!parts.length) {
-    console.log("qcdld_Cookie 未解析到字段，请确认抓包命中大乐斗请求");
+    console.log("qcdld_Cookie 未解析到字段，请确认抓包命中 QQ 农场主页请求");
     return;
   }
-  const missing = KEYS.filter((k) => !data[k]);
-  const filled = KEYS.filter((k) => source[k] === "old");
+  const missing = activeKeys.filter((k) => !data[k]);
+  const filled = activeKeys.filter((k) => source[k] === "old");
   if (capturedKeys) console.log("已捕获字段: " + capturedKeys);
   if (filled.length) console.log("沿用旧值: " + filled.join(", "));
   if (missing.length) console.log("缺失字段: " + missing.join(", "));
-  if (!data.openid || !data.token) {
-    console.log("字段不完整(openid/token缺失)，未覆盖旧 Cookie");
-    console.log("旧值: " + (old || "无"));
+  if (!data.openid || !data.token || !data.uin) {
+    console.log("字段不完整(openid/token/uin缺失)，未覆盖旧会话");
     return;
   }
   const value = parts.join("; ");
 
   if (old !== value) {
     $.write(value, "qcdld_Cookie");
-    console.log("qcdld_Cookie 更新成功");
-    console.log("旧值: " + (old || "无"));
-    console.log("新值: " + value);
-    if (NOTIFY) $.notify("qcdld_Cookie 更新成功", "", value);
+    const savedKeys = activeKeys.filter((k) => data[k]);
+    console.log("qcdld_Cookie 更新成功，字段: " + savedKeys.join(", "));
+    if (NOTIFY) $.notify("QQ农场会话更新成功", "", "字段: " + savedKeys.join(", "));
   } else {
     console.log("qcdld_Cookie 未变化");
-    console.log("旧值: " + (old || "无"));
   }
 })()
   .catch((e) => {
@@ -136,6 +156,24 @@ function parseCookieMap(cookie) {
     const k = kv.split("=")[0].trim();
     const v = kv.slice(k.length + 1);
     if (k) map[k] = v;
+  }
+  return map;
+}
+
+function parseFormBody(body) {
+  const map = {};
+  if (!body || typeof body !== "string") return map;
+  const parts = body.split("&");
+  for (let i = 0; i < parts.length; i++) {
+    const kv = parts[i].split("=", 2);
+    if (!kv[0]) continue;
+    let key = kv[0];
+    let value = kv.length > 1 ? kv[1] : "";
+    try {
+      key = decodeURIComponent(key.replace(/\+/g, " "));
+      value = decodeURIComponent(value.replace(/\+/g, " "));
+    } catch (_) {}
+    map[key] = value;
   }
   return map;
 }
