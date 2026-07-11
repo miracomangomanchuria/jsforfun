@@ -169,10 +169,23 @@ var CONFIG = {
   }, // 升级耗蜜预判（用于“先判定再请求”，按抓包可调）
   HIVE_UPGRADE_MAX: 2, // 单轮最多升级次数（0=不限制）
   HIVE_UPGRADE_BUSY_COOLDOWN_SEC: 1800, // 升级接口繁忙后，该蜂冷却时长（秒）
+  // 蜂巢“总等级升级”：接口不带 act/id；抓包已确认升级一次会使 hive level -1。
+  // 默认关闭，避免自动消耗蜂蜜；需主动启用且蜂蜜达到阈值才执行一次。
+  HIVE_AUTO_LEVEL_UPGRADE: false,
+  HIVE_LEVEL_UPGRADE_MIN_HONEY: 0,
+  HIVE_LEVEL_UPGRADE_MAX: 1,
   HIVE_AUTO_POLLEN: true, // 自动喂花粉（优先免费）
   HIVE_AUTO_WORK: true,
   HIVE_WORK_REQUIRE_FREECD: true, // 放蜂前要求花粉可用值>0（本轮喂粉成功可放行）
   HIVE_TRY_HARVEST_ON_STATUS1: true, // 状态1但蜂蜜>0时，仍补探测一次收蜜
+
+  // 土地升级（cgi_farm_reclaimpay -> cgi_farm_reclaim）：默认只检查，不自动花金币。
+  FARM_LAND_UPGRADE_BASE: "https://farm.qzone.qq.com",
+  FARM_LAND_UPGRADE_ENABLE: true,
+  FARM_LAND_UPGRADE_AUTO_CLAIM: false,
+  // 当前抓包未出现可靠的“实际扣费”字段：自动提交还需显式确认此风险开关。
+  FARM_LAND_UPGRADE_FORCE_UNVERIFIED_COST: false,
+  FARM_LAND_UPGRADE_MAX_COST: 0, // 仅在强制模式下比较接口预览 money；0=仅允许其为0
 
   // 节气/活动（状态检测 + 每日领取）
   FARM_EVENT_BASE: "https://nc.qzone.qq.com",
@@ -199,7 +212,7 @@ var CONFIG = {
   FARM_EVENT_JUDGE_SCORE_ENABLE: true, // 每日农场评级（cgi_farm_judge_score_*）
   FARM_EVENT_JUDGE_SCORE_AUTO_CLAIM: true, // 农场评级可领时自动领奖
   FARM_EVENT_DAY7_PROBE: true, // 仅状态探测 day7Login_index
-  FARM_EVENT_RETRY_TRANSIENT: 5, // 活动接口遇到“系统繁忙”等提示时重试次数（最少1）
+  FARM_EVENT_RETRY_TRANSIENT: 0, // 活动写操作繁忙时不盲重试；复查状态后留待下轮
   FARM_SIGNIN_BOARD_ENABLE: true, // 月签签到板（/cgi_farm_month_signin_*）自动领奖
   FARM_SIGNIN_BOARD_MAX_LOOP: 12, // 月签签到板单轮最多领奖次数
 
@@ -282,13 +295,15 @@ var CONFIG = {
 
   // 频率控制
   WAIT_MS: 600,
+  // JSON 接口全局串行节流：活动/蜂巢/时光农场共用，降低“点得太快”概率。
+  FARM_JSON_MIN_INTERVAL_MS: 450,
   // 0 = 不限制，直到无空地/无种子/无入口
   MAX_REPEAT: 0,
   RETRY_502: 2,
   RETRY_SHORT_BODY_LEN: 120,
   RETRY_WAIT_MS: 800,
-  // 针对“系统繁忙/网络繁忙/请稍后再试”等提示的额外重试次数（不影响 502 重试）
-  RETRY_TRANSIENT: 5,
+  // 写操作遇到“系统繁忙”等提示默认不重试，先由各模块复查状态；仅读请求可按需单独实现重试。
+  RETRY_TRANSIENT: 0,
 
   // 任务开关
   ENABLE: {
@@ -322,9 +337,10 @@ var CONFIG = {
   LOG_BAG_STATS: false
 };
 
-var SCRIPT_REV = "2026.07.12-r52";
+var SCRIPT_REV = "2026.07.12-r55";
 var FARM_COOKIE_STORE_KEY = "qfarm_Cookie";
 var FARM_PROFILE_STORE_KEY = "qfarm_Profile";
+var FARM_JSON_NEXT_AT = 0;
 
 /* =======================
  *  ENV (NobyDa-like style)
@@ -475,22 +491,55 @@ function sleep(ms) {
   });
 }
 
+function paceFarmJsonRequest() {
+  var interval = Number(CONFIG.FARM_JSON_MIN_INTERVAL_MS || 0);
+  if (isNaN(interval) || interval <= 0) return Promise.resolve();
+  interval = Math.floor(interval);
+  var now = Date.now();
+  var wait = FARM_JSON_NEXT_AT - now;
+  if (wait < 0) wait = 0;
+  FARM_JSON_NEXT_AT = Math.max(FARM_JSON_NEXT_AT, now) + interval;
+  return wait > 0 ? sleep(wait) : Promise.resolve();
+}
+
+function pacedFormPost(url, headers, params, label) {
+  var body = buildLegacyBody(params || {});
+  return paceFarmJsonRequest()
+    .then(function () {
+      return rawHttpRequest({
+        method: "POST",
+        url: url,
+        headers: headers,
+        body: body
+      });
+    })
+    .then(function (resp) {
+      if (CONFIG.DEBUG && label) {
+        logDebug(label + " 响应: " + (resp && resp.status != null ? resp.status : "?") + " 长度=" + ((resp && resp.body) || "").length);
+      }
+      return resp;
+    });
+}
+
+function farmJsonPost(url, cookie, params, label) {
+  return pacedFormPost(url, buildFarmJsonHeaders(cookie), params, label);
+}
+
+function farmSeedJsonPost(url, cookie, params, label) {
+  return pacedFormPost(url, buildFarmSeedJsonHeaders(cookie), params, label);
+}
+
 function nowTs() {
   return Math.floor(Date.now() / 1000);
 }
 
 function localDateKey() {
-  var d = new Date();
-  var y = d.getFullYear();
-  var m = d.getMonth() + 1;
-  var day = d.getDate();
-  return y + "-" + (m < 10 ? "0" + m : m) + "-" + (day < 10 ? "0" + day : day);
+  return localDateKeyByTs(getFarmTime());
 }
 
 function localDateKeyByTs(ts) {
   var n = Number(ts || 0);
-  if (!n || isNaN(n) || n < 1000000000) return "";
-  var d = new Date(n * 1000);
+  var d = n && !isNaN(n) && n >= 1000000000 ? new Date(n * 1000) : new Date();
   var y = d.getFullYear();
   var m = d.getMonth() + 1;
   var day = d.getDate();
@@ -799,6 +848,22 @@ function logCookieHealth(cookie) {
  *  HTTP WRAPPER
  * ======================= */
 function httpRequest(opts) {
+  if (shouldPaceFarmJsonRequest(opts)) {
+    return paceFarmJsonRequest().then(function () {
+      return rawHttpRequest(opts);
+    });
+  }
+  return rawHttpRequest(opts);
+}
+
+function shouldPaceFarmJsonRequest(opts) {
+  if (!opts || String(opts.method || "GET").toUpperCase() !== "POST") return false;
+  var url = String(opts.url || "");
+  // 只节流农场 JSON CGI；WAP、乐斗及其他业务请求保持原有节奏。
+  return /^https:\/\/(?:nc|farm)\.qzone\.qq\.com\/cgi-bin\/cgi_(?:farm|fish)_/i.test(url);
+}
+
+function rawHttpRequest(opts) {
   if (IS_QX) return qxRequest(opts);
   if (IS_SURGE || IS_LOON) return surgeRequest(opts);
   return nodeRequest(opts);
@@ -1148,10 +1213,11 @@ function ensureMcappAccess(cookie) {
   if (liteCookie) {
     return tryDirect(liteCookie, "6字段探测")
       .then(function (ok) {
-        if (ok) {
+        if (ok && ok.ok) {
           logDebug("牧场进入: 精简会话可用");
           return { cookie: cookie, ok: true, ranchCookie: ok.ranchCookie || liteCookie };
         }
+        if (ok && ok.authError) return ok;
         logDebug("牧场进入: 精简会话未命中，改用原始 Cookie");
         return tryDirect(cookie, "原始Cookie探测");
       })
@@ -1163,7 +1229,8 @@ function ensureMcappAccess(cookie) {
 
   return tryDirect(cookie, "原始Cookie探测")
     .then(function (ok) {
-      if (ok) return ok;
+      if (ok && ok.ok) return ok;
+      if (ok && ok.authError) return ok;
       log("⚠️ 牧场进入失败，尝试乐斗跳转");
       return fetchFromDld(cookie);
     })
@@ -1433,13 +1500,25 @@ var FISH_STATS = {
 
 var HIVE_STATS = {
   harvest: 0,
+  harvestUnverified: 0,
   upgrade: 0,
+  levelUpgrade: 0,
   pollen: 0,
   work: 0,
   honey: 0,
   errors: 0,
   start: "",
   end: ""
+};
+
+var LAND_UPGRADE_STATS = {
+  checked: false,
+  available: false,
+  claimed: 0,
+  nextPlace: 0,
+  needLevel: 0,
+  needMoney: 0,
+  errors: 0
 };
 
 var TIME_FARM_STATS = {
@@ -1817,6 +1896,13 @@ function isTransientFailText(text) {
   var t = normalizeSpace(text || "");
   if (!t) return false;
   return /系统繁忙|网络繁忙|网络异常|网络错误|错误代码|请求失败|超时|返回重试|请稍[后候]再试/.test(t);
+}
+
+function shouldRetryWriteTransient(attempt, limit) {
+  // 写请求只能在显式配置为正数时重试；默认由调用方先做状态复查。
+  var n = Number(limit || 0);
+  if (isNaN(n) || n <= 0) return false;
+  return Number(attempt || 0) < Math.floor(n);
 }
 
 function parseRanchRepTotalValue(html) {
@@ -3483,12 +3569,7 @@ function fetchFishIndexJsonState(cookie, tag) {
       version: CONFIG.FARM_VERSION || "4.0.20.0"
     };
     var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_index";
-    return httpRequest({
-      method: "POST",
-      url: url,
-      headers: buildFishJsonHeaders(cookie),
-      body: buildLegacyBody(params)
-    })
+    return farmJsonPost(url, cookie, params, "鱼塘 JSON " + (tag || "状态"))
       .then(function (resp) {
         var json = tryJson(resp.body);
         var state = parseFishIndexJsonState(json);
@@ -3651,12 +3732,7 @@ function fetchFishPearlNameMap(cookie) {
           version: CONFIG.FARM_VERSION || "4.0.20.0"
         };
         var url = base + "/cgi-bin/cgi_fish_history_list?type=" + t;
-        return httpRequest({
-          method: "POST",
-          url: url,
-          headers: buildFishJsonHeaders(cookie),
-          body: buildLegacyBody(params)
-        })
+        return farmJsonPost(url, cookie, params, "鱼塘图鉴")
           .then(function (resp) {
             var json = tryJson(resp.body);
             if (!json || Number(json.ret) !== 0 || Number(json.ecode || 0) !== 0) return;
@@ -3908,12 +3984,7 @@ function fetchFishComposeCandidates(cookie) {
           version: CONFIG.FARM_VERSION || "4.0.20.0"
         };
         var url = base + "/cgi-bin/cgi_fish_history_list?type=" + t;
-        return httpRequest({
-          method: "POST",
-          url: url,
-          headers: buildFishJsonHeaders(cookie),
-          body: buildLegacyBody(params)
-        })
+        return farmJsonPost(url, cookie, params, "鱼塘图鉴")
           .then(function (resp) {
             var json = tryJson(resp.body);
             if (!json || Number(json.ret) !== 0 || Number(json.ecode || 0) !== 0) return;
@@ -3971,12 +4042,7 @@ function runFishComposeFromPieces(cookie) {
       version: CONFIG.FARM_VERSION || "4.0.20.0"
     };
     var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_piece";
-    return httpRequest({
-      method: "POST",
-      url: url,
-      headers: buildFishJsonHeaders(cookie0),
-      body: buildLegacyBody(params)
-    }).then(function (resp) {
+    return farmJsonPost(url, cookie0, params, "碎片合成").then(function (resp) {
       var json = tryJson(resp.body);
       if (!json) return { ok: false, transient: false, msg: "响应非JSON" };
       var ok = Number(json.ret) === 0 && Number(json.ecode || 0) === 0;
@@ -4068,7 +4134,7 @@ function runFishComposeFromPieces(cookie) {
                   }
                   return loop(remain - 1, 0);
                 }
-                if (ret && ret.transient && retry < transientRetries) {
+                if (ret && ret.transient && shouldRetryWriteTransient(retry, transientRetries)) {
                   log("⚠️ 鱼苗合成: " + name + " 系统繁忙，第" + (retry + 1) + "次重试");
                   return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                     return loop(remain, retry + 1);
@@ -4143,12 +4209,7 @@ function fetchFishPieceState(cookie, tag) {
       version: CONFIG.FARM_VERSION || "4.0.20.0"
     };
     var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_piece";
-    return httpRequest({
-      method: "POST",
-      url: url,
-      headers: buildFishJsonHeaders(cookie),
-      body: buildLegacyBody(params)
-    })
+    return farmJsonPost(url, cookie, params, "碎片状态 " + (tag || ""))
       .then(function (resp) {
         var json = tryJson(resp.body);
         if (!json || Number(json.ret) !== 0 || Number(json.ecode || 0) !== 0) return null;
@@ -4295,12 +4356,7 @@ function runFishPearlDrawDaily(cookie) {
           };
           if (CONFIG.FISH_PEARL_DRAW_FORCE_FREE) params.free = 1;
           var url = (CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com") + "/cgi-bin/cgi_fish_pearl_gift";
-          return httpRequest({
-            method: "POST",
-            url: url,
-            headers: buildFishJsonHeaders(cookie),
-            body: buildLegacyBody(params)
-          }).then(function (resp) {
+          return farmJsonPost(url, cookie, params, "珍珠抽奖").then(function (resp) {
             var json = tryJson(resp.body);
             if (!json) {
               log("⚠️ 珍珠抽奖: 响应非 JSON");
@@ -5717,7 +5773,7 @@ function refillRanchAnimals(base, cookie, ctx) {
           var fullText = normalizeSpace(stripTags(retHtml || ""));
           if (/(购买并饲养成功|购买成功|成功购买并饲养)/.test(msg || fullText)) return num;
           if (isMoneyShortText(msg || fullText)) return 0;
-          if (isTransientFailText(msg || fullText) && attempt < transientRetries) {
+          if (isTransientFailText(msg || fullText) && shouldRetryWriteTransient(attempt, transientRetries)) {
             if (CONFIG.DEBUG) logDebug("🐮 商店补栏繁忙(" + type + ")，第" + (attempt + 1) + "次重试");
             return sleep(CONFIG.RETRY_WAIT_MS || 600).then(function () {
               return attemptBuy(attempt + 1);
@@ -7607,6 +7663,14 @@ function summaryModuleFarmLine() {
     " 错" +
     ACTION_STATS.errors;
   base = appendTextPart(base, farmEventSummaryLine(), " ");
+  if (LAND_UPGRADE_STATS.checked) {
+    if (LAND_UPGRADE_STATS.claimed > 0) {
+      base += " 土地升" + LAND_UPGRADE_STATS.claimed;
+    } else if (LAND_UPGRADE_STATS.available) {
+      base += " 土地可升" + LAND_UPGRADE_STATS.nextPlace;
+    }
+  }
+  if (LAND_UPGRADE_STATS.errors > 0) base += " 土地错" + LAND_UPGRADE_STATS.errors;
   if (FARM_EVENT_STATS.errors > 0) base += " 活动错" + FARM_EVENT_STATS.errors;
   return base;
 }
@@ -7718,6 +7782,9 @@ function summaryModuleHiveLine() {
   return (
     "收蜜" +
     HIVE_STATS.harvest +
+    (HIVE_STATS.harvestUnverified > 0 ? "(+待确认" + HIVE_STATS.harvestUnverified + ")" : "") +
+    " 蜂巢升" +
+    HIVE_STATS.levelUpgrade +
     " 升级" +
     HIVE_STATS.upgrade +
     " 喂粉" +
@@ -7819,6 +7886,21 @@ function changeModuleFarmLine() {
   if (harvestDetailLine) parts.push("收获[" + harvestDetailLine + "]");
   if (plantSkipLine) parts.push("播种未执行[" + plantSkipLine + "]");
   if (plantFailLine) parts.push("播种失败[" + plantFailLine + "]");
+  if (LAND_UPGRADE_STATS.checked) {
+    if (LAND_UPGRADE_STATS.claimed > 0) {
+      parts.push("土地升级+" + LAND_UPGRADE_STATS.claimed);
+    } else if (LAND_UPGRADE_STATS.available) {
+      parts.push(
+        "土地可升[地块" +
+          LAND_UPGRADE_STATS.nextPlace +
+          " 等级需求" +
+          LAND_UPGRADE_STATS.needLevel +
+          " 金币" +
+          LAND_UPGRADE_STATS.needMoney +
+          "]"
+      );
+    }
+  }
   parts.push("活动[" + farmEventChangeLine() + "]");
   return parts.join("；");
 }
@@ -7933,6 +8015,8 @@ function changeModuleHiveLine() {
   } else {
     parts.push("无变化");
   }
+  if (HIVE_STATS.levelUpgrade > 0) parts.push("蜂巢本体升级+" + HIVE_STATS.levelUpgrade);
+  if (HIVE_STATS.upgrade > 0) parts.push("蜜蜂升级+" + HIVE_STATS.upgrade);
   return parts.join("；");
 }
 
@@ -8036,18 +8120,20 @@ function actionLabel(type) {
 }
 
 function base64Encode(str) {
+  str = String(str == null ? "" : str);
   if (IS_NODE && typeof Buffer !== "undefined") return Buffer.from(str, "utf8").toString("base64");
   if (typeof $text !== "undefined" && $text.base64Encode) return $text.base64Encode(str);
+  var bytes = utf8ToBinaryString(str);
   if (typeof btoa !== "undefined") {
-    return btoa(unescape(encodeURIComponent(str)));
+    return btoa(bytes);
   }
   var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
   var output = "";
   var i = 0;
-  while (i < str.length) {
-    var c1 = str.charCodeAt(i++);
-    var c2 = str.charCodeAt(i++);
-    var c3 = str.charCodeAt(i++);
+  while (i < bytes.length) {
+    var c1 = bytes.charCodeAt(i++);
+    var c2 = bytes.charCodeAt(i++);
+    var c3 = bytes.charCodeAt(i++);
     var e1 = c1 >> 2;
     var e2 = ((c1 & 3) << 4) | (c2 >> 4);
     var e3 = ((c2 & 15) << 2) | (c3 >> 6);
@@ -8061,6 +8147,36 @@ function base64Encode(str) {
       chars.charAt(e1) + chars.charAt(e2) + chars.charAt(e3) + chars.charAt(e4);
   }
   return output;
+}
+
+function utf8ToBinaryString(str) {
+  var input = String(str == null ? "" : str);
+  var out = "";
+  for (var i = 0; i < input.length; i++) {
+    var code = input.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff && i + 1 < input.length) {
+      var low = input.charCodeAt(i + 1);
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        code = 0x10000 + ((code - 0xd800) << 10) + (low - 0xdc00);
+        i += 1;
+      }
+    }
+    if (code < 0x80) {
+      out += String.fromCharCode(code);
+    } else if (code < 0x800) {
+      out += String.fromCharCode(0xc0 | (code >> 6), 0x80 | (code & 0x3f));
+    } else if (code < 0x10000) {
+      out += String.fromCharCode(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f));
+    } else {
+      out += String.fromCharCode(
+        0xf0 | (code >> 18),
+        0x80 | ((code >> 12) & 0x3f),
+        0x80 | ((code >> 6) & 0x3f),
+        0x80 | (code & 0x3f)
+      );
+    }
+  }
+  return out;
 }
 
 function buildQQOpenUrl(url) {
@@ -8154,9 +8270,7 @@ function fetchFarmSeedJson(cookie) {
       if (!farmKey) return null;
       var base = CONFIG.FARM_SEED_JSON_BASE || "https://farm.qzone.qq.com";
       var url = base + "/cgi-bin/cgi_farm_getuserseed?mod=repertory&act=getUserSeed";
-      var headers = buildFarmSeedJsonHeaders(cookie);
-      var body = buildLegacyBody({ uIdx: uIdx, farmTime: farmTime, farmKey: farmKey });
-      return httpRequest({ method: "POST", url: url, headers: headers, body: body })
+      return farmSeedJsonPost(url, cookie, { uIdx: uIdx, farmTime: farmTime, farmKey: farmKey }, "JSON 种子")
         .then(function (resp) {
           var json = tryJson(resp.body);
           var parsed = parseSeedJsonItems(json);
@@ -8218,9 +8332,7 @@ function fetchFarmCropJson(cookie) {
     if (!farmKey) return null;
     var base = CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
     var url = base + "/cgi-bin/cgi_farm_getusercrop?mod=repertory&act=getUserCrop";
-    var headers = buildFarmJsonHeaders(cookie);
-    var body = buildLegacyBody({ uIdx: uIdx, uinX: uinX, farmTime: farmTime, farmKey: farmKey });
-    return httpRequest({ method: "POST", url: url, headers: headers, body: body })
+    return farmJsonPost(url, cookie, { uIdx: uIdx, uinX: uinX, farmTime: farmTime, farmKey: farmKey }, "JSON 仓库")
       .then(function (resp) {
         var json = tryJson(resp.body);
         var items = parseCropJsonItems(json);
@@ -8287,15 +8399,7 @@ function buildFarmJsonParams(farmTime, farmKey, uin) {
 function fetchFarmJson(base, cookie, uin) {
   var farmTime = getFarmTime();
   var url = base + "/cgi-bin/cgi_farm_index";
-  var headers = buildFarmJsonHeaders(cookie);
-  var body = buildLegacyBody(buildFarmJsonParams(farmTime, "", uin));
-  return httpRequest({
-    method: "POST",
-    url: url,
-    headers: headers,
-    body: body
-  }).then(function (resp) {
-    logDebug("JSON 状态响应: " + resp.status + " 长度=" + (resp.body || "").length);
+  return farmJsonPost(url, cookie, buildFarmJsonParams(farmTime, "", uin), "JSON 状态").then(function (resp) {
     var json = tryJson(resp.body);
     if (json && json.user) {
       LAST_FARM = json;
@@ -8312,15 +8416,7 @@ function fetchFarmJson(base, cookie, uin) {
 }
 
 function callFarmJsonAction(base, cookie, action, params) {
-  var headers = buildFarmJsonHeaders(cookie);
-  var body = buildLegacyBody(params);
-  return httpRequest({
-    method: "POST",
-    url: base + action,
-    headers: headers,
-    body: body
-  }).then(function (resp) {
-    logDebug("JSON 动作 " + action + " 状态=" + resp.status);
+  return farmJsonPost(base + action, cookie, params, "JSON 动作 " + action).then(function (resp) {
     return tryJson(resp.body) || resp.body;
   });
 }
@@ -9540,7 +9636,7 @@ function ensureFarmProtectedLocks(cookie) {
           return true;
         }
         var text = normalizeSpace(stripTags(html || ""));
-        if (isTransientFailText(text) && attempt < transientRetries) {
+        if (isTransientFailText(text) && shouldRetryWriteTransient(attempt, transientRetries)) {
           if (CONFIG.DEBUG) logDebug("🔒 农场保护锁定繁忙(cId=" + cid + ")，第" + (attempt + 1) + "次重试");
           return sleep(CONFIG.RETRY_WAIT_MS || 600).then(function () {
             return lockOneCrop(row, attempt + 1);
@@ -9960,12 +10056,7 @@ function ensureFarmEventContext(cookie) {
 function callFarmEventApi(cookie, path, params) {
   var base = CONFIG.FARM_EVENT_BASE || CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
   var url = base + path;
-  return httpRequest({
-    method: "POST",
-    url: url,
-    headers: buildFishJsonHeaders(cookie),
-    body: buildLegacyBody(params)
-  }).then(function (resp) {
+  return farmJsonPost(url, cookie, params, "活动 " + path).then(function (resp) {
     return tryJson(resp.body);
   });
 }
@@ -10261,7 +10352,7 @@ function runFarmEvents(cookie) {
     var claimPath = "/cgi-bin/cgi_farm_seedhb?act=10";
     var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
     if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
 
     function readStatus(tag) {
       return callFarmEventApi(cookie, statusPath, farmEventParams(ctx)).then(function (json) {
@@ -10299,7 +10390,7 @@ function runFarmEvents(cookie) {
       return callFarmEventApi(cookie, claimPath, farmEventParams(ctx)).then(function (json) {
         if (!isFarmEventOk(json)) {
           var msg = farmEventErrMsg(json);
-          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+          if (isTransientFailText(msg || "") && shouldRetryWriteTransient(attempt, transientRetries)) {
             log("⚠️ 节气领取繁忙，第" + (attempt + 1) + "次重试");
             return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
               return claimOnce(attempt + 1);
@@ -10380,7 +10471,7 @@ function runFarmEvents(cookie) {
     var claimPath = "/cgi-bin/cgi_farm_buling?act=get";
     var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
     if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
     var maxLoops = Number(CONFIG.FARM_EVENT_BULING_MAX_LOOP || 5);
     if (isNaN(maxLoops) || maxLoops < 1) maxLoops = 5;
     var doneIds = {};
@@ -10440,7 +10531,7 @@ function runFarmEvents(cookie) {
       return callFarmEventApi(cookie, claimPath, farmEventParams(ctx, { id: id })).then(function (json) {
         if (!isFarmEventOk(json)) {
           var msg = farmEventErrMsg(json);
-          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+          if (isTransientFailText(msg || "") && shouldRetryWriteTransient(attempt, transientRetries)) {
             log("⚠️ 奖励补领繁忙(id=" + id + ")，第" + (attempt + 1) + "次重试");
             return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
               return claimById(id, attempt + 1);
@@ -10553,7 +10644,7 @@ function runFarmEvents(cookie) {
     function wishTransientRetries() {
       var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
       if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-      if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+      if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
       return transientRetries;
     }
 
@@ -10694,7 +10785,7 @@ function runFarmEvents(cookie) {
               return { state: baseState || state, stop: true };
             }
             var transient = isTransientFailText(msg || "");
-            if (transient && attempt < transientRetries) {
+            if (transient && shouldRetryWriteTransient(attempt, transientRetries)) {
               log("⚠️ 许愿收星繁忙，第" + (attempt + 1) + "次重试");
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                 return run(attempt + 1, baseState);
@@ -10814,7 +10905,7 @@ function runFarmEvents(cookie) {
                 return false;
               }
               var transient = isTransientFailText(msg || "");
-              if (transient && retryNo < transientRetries) {
+              if (transient && shouldRetryWriteTransient(retryNo, transientRetries)) {
                 log("⚠️ 许愿抽星繁忙，第" + (retryNo + 1) + "次重试");
                 return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                   return one(loopNo, retryNo + 1);
@@ -10871,7 +10962,7 @@ function runFarmEvents(cookie) {
               return;
             }
             var transient = isTransientFailText(msg || "");
-            if (transient && attempt < transientRetries) {
+            if (transient && shouldRetryWriteTransient(attempt, transientRetries)) {
               log("⚠️ 许愿领奖繁忙(id=" + sid + ")，第" + (attempt + 1) + "次重试");
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                 return claimOne(sid, attempt + 1);
@@ -10996,7 +11087,7 @@ function runFarmEvents(cookie) {
               return state;
             }
             var transient = isTransientFailText(msg || "");
-            if (transient && attempt < transientRetries) {
+            if (transient && shouldRetryWriteTransient(attempt, transientRetries)) {
               log("⚠️ 许愿点星繁忙，第" + (attempt + 1) + "次重试");
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                 return run(attempt + 1);
@@ -11062,7 +11153,7 @@ function runFarmEvents(cookie) {
           if (!wishActionOk(json)) {
             var msg = farmEventErrMsg(json);
             var transient = isTransientFailText(msg || "");
-            if (transient && attempt < transientRetries) {
+            if (transient && shouldRetryWriteTransient(attempt, transientRetries)) {
               log("⚠️ 许愿助力繁忙，第" + (attempt + 1) + "次重试");
               return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                 return run(attempt + 1);
@@ -11231,7 +11322,7 @@ function runFarmEvents(cookie) {
     }
     var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
     if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
 
     function readIndex() {
       return callFarmEventApi(
@@ -11274,7 +11365,7 @@ function runFarmEvents(cookie) {
       ).then(function (json) {
         if (!isFarmEventOk(json)) {
           var msg = farmEventErrMsg(json);
-          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+          if (isTransientFailText(msg || "") && shouldRetryWriteTransient(attempt, transientRetries)) {
             log("⚠️ 感恩回馈领取繁忙，第" + (attempt + 1) + "次重试");
             return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
               return claimOnce(attempt + 1);
@@ -11323,7 +11414,7 @@ function runFarmEvents(cookie) {
     if (!CONFIG.FARM_EVENT_JUDGE_SCORE_ENABLE) return Promise.resolve();
     var transientRetries = Number(CONFIG.FARM_EVENT_RETRY_TRANSIENT);
     if (isNaN(transientRetries) || transientRetries < 0) transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
+    if (isNaN(transientRetries) || transientRetries < 0) transientRetries = 0;
 
     function normalizeDrawTs(v) {
       var n = Number(v || 0);
@@ -11393,7 +11484,7 @@ function runFarmEvents(cookie) {
       return callFarmEventApi(cookie, "/cgi-bin/cgi_farm_judge_score_draw", farmEventParams(ctx)).then(function (json) {
         if (!isFarmEventOk(json)) {
           var msg = farmEventErrMsg(json);
-          if (isTransientFailText(msg || "") && attempt < transientRetries) {
+          if (isTransientFailText(msg || "") && shouldRetryWriteTransient(attempt, transientRetries)) {
             log("⚠️ 农场评级领奖繁忙，第" + (attempt + 1) + "次重试");
             return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
               return claimOnce(attempt + 1);
@@ -12915,7 +13006,7 @@ function autoPlantFishFromBag(base, cookie, ctx) {
               if (!msg && typeof resp.body === "string") msg = normalizeSpace(stripTags(resp.body || ""));
               if (msg) log("🪣 放养(JSON): " + msg);
               var transient = isTransientFailText(msg || "");
-              if (transient && busyRetry < transientRetries) {
+               if (transient && shouldRetryWriteTransient(busyRetry, transientRetries)) {
                 log("⚠️ 放养(JSON): 系统繁忙，第" + (busyRetry + 1) + "次重试");
                 return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                   return step(remain, busyRetry + 1);
@@ -13074,7 +13165,7 @@ function autoPlantFishFromBag(base, cookie, ctx) {
               var transient = isTransientFailText(text);
               if (msg) log("🪣 放养" + (seedName ? "(" + seedName + ")" : "") + ": " + msg);
               else log("🪣 放养: 已提交");
-              if (transient && attempt < transientRetries) {
+               if (transient && shouldRetryWriteTransient(attempt, transientRetries)) {
                 log("⚠️ 放养: 系统繁忙，第" + (attempt + 1) + "次重试");
                 return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
                   return tryPlant(attempt + 1);
@@ -15036,11 +15127,9 @@ function isHiveNoop(json, msg) {
   );
 }
 
-function parseHiveHarvestGain(json, fallback) {
+function parseHiveHarvestGain(json) {
   var gain = Number((json && (json.addHoney || json.add || 0)) || 0) || 0;
-  if (gain > 0) return gain;
-  var fb = Number(fallback || 0) || 0;
-  return fb > 0 ? fb : 0;
+  return gain > 0 ? gain : 0;
 }
 
 function hiveNum(v, dft) {
@@ -15077,6 +15166,46 @@ function hiveUpgradeNeedHoney(id) {
   if (!k || k === "0") return 0;
   var need = Number(map[k] || 0) || 0;
   return need > 0 ? need : 0;
+}
+
+function hiveBeeInfoById(state, id) {
+  var target = Number(id || 0) || 0;
+  if (!target || !state) return null;
+  var list = ensureArray(state.beelevel);
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {};
+    if (Number(item.id || 0) === target) {
+      return {
+        id: target,
+        lv: Number(item.lv || item.level || 0) || 0,
+        jinhua: Number(item.jinhua || item.isJinhua || 0) || 0
+      };
+    }
+  }
+  return null;
+}
+
+function hiveBeeStateChanged(before, after, id) {
+  var a = hiveBeeInfoById(before, id);
+  var b = hiveBeeInfoById(after, id);
+  if (!a && !b) return false;
+  if (!a || !b) return true;
+  return a.lv !== b.lv || a.jinhua !== b.jinhua || hiveNum(before && before.honey, 0) !== hiveNum(after && after.honey, 0);
+}
+
+function hiveBeeBrief(state) {
+  var list = ensureArray(state && state.beelevel);
+  if (!list.length) return "";
+  var parts = [];
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {};
+    var id = Number(item.id || 0) || 0;
+    if (!id) continue;
+    var lv = Number(item.lv || item.level || 0) || 0;
+    var jinhua = Number(item.jinhua || item.isJinhua || 0) || 0;
+    parts.push("#" + id + " Lv" + lv + (jinhua ? " 进化" : ""));
+  }
+  return parts.join("；");
 }
 
 function hiveFindUpgradeableIdByHoney(honey, ids) {
@@ -15317,7 +15446,18 @@ function buildHiveActionPlan(state, opts) {
 function formatHiveState(state) {
   if (!state) return "未知";
   var freeCd = state.freeCD != null ? Number(state.freeCD) || 0 : 0;
-  return "状态" + state.status + " 蜂蜜" + state.honey + " 等级" + state.level + " 花粉" + freeCd;
+  var bee = hiveBeeBrief(state);
+  return (
+    "状态" +
+    state.status +
+    " 蜂蜜" +
+    state.honey +
+    " 等级" +
+    state.level +
+    " 花粉" +
+    freeCd +
+    (bee ? " 蜜蜂[" + bee + "]" : "")
+  );
 }
 
 function hiveActionStateChanged(before, after, action) {
@@ -15327,6 +15467,9 @@ function hiveActionStateChanged(before, after, action) {
     keys = ["freeCD", "status", "payCD", "stamp", "step"];
   } else if (action === "work") {
     keys = ["status", "payCD", "stamp", "step", "freeCD"];
+  } else if (action === "upgrade") {
+    // 升级会扣蜂蜜或改变等级；服务端繁忙后以这两项复查写入是否实际生效。
+    keys = ["level", "honey", "status", "step"];
   } else {
     keys = ["status", "honey", "freeCD", "payCD", "stamp", "step"];
   }
@@ -15342,14 +15485,139 @@ function hiveActionStateChanged(before, after, action) {
 function callHiveApi(cookie, path, params) {
   var base = CONFIG.HIVE_BASE || CONFIG.FARM_JSON_BASE || "https://nc.qzone.qq.com";
   var url = base + path;
-  return httpRequest({
-    method: "POST",
-    url: url,
-    headers: buildFishJsonHeaders(cookie),
-    body: buildLegacyBody(params)
-  }).then(function (resp) {
+  return farmJsonPost(url, cookie, params, "蜂巢 " + path).then(function (resp) {
     return tryJson(resp.body);
   });
+}
+
+function landUpgradeEnabled() {
+  return CONFIG.FARM_LAND_UPGRADE_ENABLE !== false;
+}
+
+function landUpgradeParams(ctx) {
+  return {
+    uIdx: ctx.uIdx,
+    uinY: ctx.uinY,
+    farmTime: getFarmTime(),
+    platform: CONFIG.FARM_PLATFORM || "13",
+    appid: CONFIG.FARM_APPID || "353",
+    version: CONFIG.FARM_VERSION || "4.0.20.0",
+    mod: "user"
+  };
+}
+
+function isLandUpgradeOk(json) {
+  return !!(json && Number(json.code) === 1 && Number(json.ecode || 0) === 0);
+}
+
+function landUpgradeErrMsg(json) {
+  if (!json) return "非JSON";
+  return json.direction || json.msg || json.message || ("ecode=" + (json.ecode != null ? json.ecode : "未知"));
+}
+
+function callLandUpgradeApi(cookie, act, ctx) {
+  var base = CONFIG.FARM_LAND_UPGRADE_BASE || CONFIG.FARM_SEED_JSON_BASE || "https://farm.qzone.qq.com";
+  var params = landUpgradeParams(ctx);
+  params.act = act;
+  return farmJsonPost(
+    base + (act === "reclaimPay" ? "/cgi-bin/cgi_farm_reclaimpay" : "/cgi-bin/cgi_farm_reclaim"),
+    cookie,
+    params,
+    "土地升级 " + act
+  ).then(function (resp) {
+    return tryJson(resp.body);
+  });
+}
+
+function runLandUpgradeCheck(cookie) {
+  if (!landUpgradeEnabled()) return Promise.resolve();
+  return ensureFarmJsonContext(cookie)
+    .then(function () {
+      var uIdx = FARM_CTX.uIdx || getFarmUin(cookie) || "";
+      var uinY = FARM_CTX.uinY || getFarmUinFromCookie(cookie) || "";
+      if (!uIdx || !uinY) {
+        if (CONFIG.DEBUG) logDebug("🌱 土地升级: 缺少 uIdx/uinY，跳过");
+        return null;
+      }
+      var ctx = { uIdx: String(uIdx), uinY: String(uinY) };
+      LAND_UPGRADE_STATS.checked = true;
+      return callLandUpgradeApi(cookie, "reclaimPay", ctx).then(function (preview) {
+        if (!isLandUpgradeOk(preview)) {
+          var readMsg = landUpgradeErrMsg(preview);
+          if (isTransientFailText(readMsg || "")) {
+            log("⚠️ 土地升级状态繁忙，留待下轮");
+          } else if (CONFIG.DEBUG) {
+            logDebug("🌱 土地升级状态: 无可升(" + readMsg + ")");
+          }
+          return null;
+        }
+        var place = Number(preview.placeid || preview.place || 0) || 0;
+        var needLevel = Number(preview.level || 0) || 0;
+        var needMoney = Number(preview.money || 0) || 0;
+        LAND_UPGRADE_STATS.nextPlace = place;
+        LAND_UPGRADE_STATS.needLevel = needLevel;
+        LAND_UPGRADE_STATS.needMoney = needMoney;
+        LAND_UPGRADE_STATS.available = place > 0;
+        if (!place) {
+          if (CONFIG.DEBUG) logDebug("🌱 土地升级: 当前无可升级地块");
+          return null;
+        }
+        log("🌱 土地升级预览: 地块" + place + " 等级需求" + needLevel + " 金币" + needMoney);
+        if (!CONFIG.FARM_LAND_UPGRADE_AUTO_CLAIM) {
+          if (CONFIG.DEBUG) logDebug("🌱 土地升级: 仅检查模式，未执行升级");
+          return null;
+        }
+        if (!CONFIG.FARM_LAND_UPGRADE_FORCE_UNVERIFIED_COST) {
+          log("⚠️ 土地升级: 预览金额与实际扣费口径尚未确认，安全跳过写入");
+          return null;
+        }
+        var maxCost = Number(CONFIG.FARM_LAND_UPGRADE_MAX_COST || 0);
+        if (isNaN(maxCost) || maxCost < 0) maxCost = 0;
+        if (needMoney > maxCost) {
+          log("🌱 土地升级: 预览金币" + needMoney + " 超过上限" + maxCost + "，跳过");
+          return null;
+        }
+        // 写前再次预览，避免依据过期状态扣金币。
+        return callLandUpgradeApi(cookie, "reclaimPay", ctx).then(function (check) {
+          if (!isLandUpgradeOk(check)) {
+            log("⚠️ 土地升级: 二次预览失败，未执行升级");
+            return null;
+          }
+          var place2 = Number(check.placeid || check.place || 0) || 0;
+          var cost2 = Number(check.money || 0) || 0;
+          if (place2 !== place || cost2 > maxCost) {
+            log("⚠️ 土地升级: 预览已变化，未执行升级");
+            return null;
+          }
+          return callLandUpgradeApi(cookie, "reclaim", ctx).then(function (claimed) {
+            if (!isLandUpgradeOk(claimed)) {
+              var writeMsg = landUpgradeErrMsg(claimed);
+              if (isTransientFailText(writeMsg || "")) {
+                log("⚠️ 土地升级繁忙：未重试，留待下轮");
+              } else {
+                LAND_UPGRADE_STATS.errors += 1;
+                log("⚠️ 土地升级失败: " + writeMsg);
+              }
+              return null;
+            }
+            var actualPlace = Number(claimed.place || place) || place;
+            var actualMoney = Math.abs(Number(claimed.money || 0) || 0);
+            LAND_UPGRADE_STATS.claimed += 1;
+            log(
+              "🌱 土地升级: 地块" +
+                actualPlace +
+                " 成功" +
+                (actualMoney > 0 ? "，接口金额" + actualMoney : "，接口未返回实际扣费")
+            );
+            return claimed;
+          });
+        });
+      });
+    })
+    .catch(function (e) {
+      LAND_UPGRADE_STATS.errors += 1;
+      log("⚠️ 土地升级检查失败: " + errText(e));
+    });
 }
 
 function fetchHiveIndex(cookie, ctx) {
@@ -15369,6 +15637,9 @@ function fetchHiveIndex(cookie, ctx) {
       payCD: Number(json.payCD || 0) || 0,
       step: Number(json.step || 0) || 0,
       stamp: Number(json.stamp || 0) || 0,
+      beelevel: ensureArray(json.beelevel),
+      limitdis: Number(json.limitdis || 0) || 0,
+      fwj: Number(json.fwj || 0) || 0,
       raw: json
     };
   });
@@ -15448,7 +15719,7 @@ function runHive(cookie) {
     if (CONFIG.DEBUG) {
       logDebug("🍯 收蜂蜜: " + (plan.harvestProbe ? "状态1补探测，执行" : "状态预判通过，执行"));
     }
-    var fallbackHoney = Number(current.honey || 0) || 0;
+    var beforeHoney = Number(current.honey || 0) || 0;
     return callHiveApi(cookie, "/cgi-bin/cgi_farm_hive_harvest", hiveParams(ctx)).then(function (json) {
       if (!isHiveOk(json)) {
         var msg = hiveErrMsg(json);
@@ -15463,17 +15734,20 @@ function runHive(cookie) {
         log("⚠️ 收蜂蜜失败: " + msg);
         return;
       }
-      var gain = parseHiveHarvestGain(json, fallbackHoney);
       harvestBlockedThisRound = false;
-      if (gain > 0) {
-        HIVE_STATS.harvest += gain;
-        harvested += gain;
-        log("🍯 收蜂蜜: +" + gain);
-      } else {
-        log("🍯 收蜂蜜: 已执行(本次+0)");
-      }
       return refresh("收蜜后").then(function (st) {
         if (st) current = st;
+        var afterHoney = Number((st && st.honey) || (current && current.honey) || 0) || 0;
+        var gain = beforeHoney - afterHoney;
+        if (gain <= 0) gain = parseHiveHarvestGain(json);
+        if (gain > 0) {
+          HIVE_STATS.harvest += gain;
+          harvested += gain;
+          log("🍯 收蜂蜜: +" + gain);
+        } else {
+          HIVE_STATS.harvestUnverified += 1;
+          log("🍯 收蜂蜜: 已执行（数量待服务端字段确认）");
+        }
       });
     });
   }
@@ -15487,15 +15761,16 @@ function runHive(cookie) {
     if (!ids.length) return Promise.resolve();
     var maxUpgrade = Number(CONFIG.HIVE_UPGRADE_MAX || 0);
     if (isNaN(maxUpgrade) || maxUpgrade < 0) maxUpgrade = 0;
-    var transientRetries = Number(CONFIG.RETRY_TRANSIENT || 0);
-    if (isNaN(transientRetries) || transientRetries < 1) transientRetries = 1;
     var busyCooldownSec = Number(CONFIG.HIVE_UPGRADE_BUSY_COOLDOWN_SEC || 0);
     if (isNaN(busyCooldownSec) || busyCooldownSec < 0) busyCooldownSec = 0;
     busyCooldownSec = Math.floor(busyCooldownSec);
     var done = 0;
     var idx = 0;
+    var stopForBusy = false;
 
     function next() {
+      // “系统繁忙”通常是接口级限流；本轮不再尝试下一只蜂，避免连续写请求。
+      if (stopForBusy) return Promise.resolve();
       if (idx >= ids.length) return Promise.resolve();
       if (maxUpgrade > 0 && done >= maxUpgrade) return Promise.resolve();
       var bid = Number(ids[idx++] || 0) || 0;
@@ -15507,6 +15782,11 @@ function runHive(cookie) {
           if (leftWait < 0) leftWait = 0;
           logDebug("🐝 蜜蜂升级(id=" + bid + "): 繁忙冷却中(" + formatWaitSec(leftWait) + ")，跳过");
         }
+        return next();
+      }
+      var beeBefore = hiveBeeInfoById(current, bid);
+      if (!beeBefore) {
+        if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级(id=" + bid + "): 当前蜂巢未发现该蜜蜂，跳过");
         return next();
       }
       var honeyNow = Number((current && current.honey) || 0) || 0;
@@ -15521,8 +15801,24 @@ function runHive(cookie) {
         }
         return next();
       }
-      if (CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 尝试 id=" + bid + "（当前蜂蜜" + honeyNow + "）");
-      function tryOneUpgrade(attempt) {
+      if (CONFIG.DEBUG) {
+        logDebug("🐝 蜜蜂升级: 尝试 id=" + bid + " Lv" + beeBefore.lv + "（当前蜂蜜" + honeyNow + "）");
+      }
+      function markUpgradeSuccess(json, stateAfter, viaRecheck) {
+        done += 1;
+        HIVE_STATS.upgrade += 1;
+        clearHiveUpgradeBusyUntil(bid);
+        var left = Number((stateAfter && stateAfter.honey) || (json && json.honey));
+        var suffix = viaRecheck ? "（繁忙后复查确认）" : "";
+        if (isNaN(left) || left < 0) {
+          log("🐝 蜜蜂升级: id=" + bid + " 成功" + suffix);
+        } else {
+          log("🐝 蜜蜂升级: id=" + bid + " 成功" + suffix + "，剩余蜂蜜" + left);
+        }
+      }
+
+      function tryOneUpgrade() {
+        var before = current;
         return callHiveApi(
           cookie,
           "/cgi-bin/cgi_farm_hive_upgrade?act=bee",
@@ -15534,29 +15830,29 @@ function runHive(cookie) {
             if (!isHiveOk(json)) {
               var msg = hiveErrMsg(json);
               var transient = isTransientFailText(msg || "");
-              if (transient && attempt < transientRetries) {
-                log("⚠️ 蜜蜂升级繁忙(id=" + bid + ")，第" + (attempt + 1) + "次重试");
-                return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
-                  return tryOneUpgrade(attempt + 1);
-                });
-              }
               if (transient) {
-                if (busyCooldownSec > 0) {
-                  setHiveUpgradeBusyUntil(bid, getFarmTime() + busyCooldownSec);
-                  log(
-                    "⚠️ 蜜蜂升级繁忙(id=" +
-                      bid +
-                      "): 已重试" +
-                      transientRetries +
-                      "次，冷却" +
-                      formatWaitSec(busyCooldownSec) +
-                      "后再试"
-                  );
-                } else {
-                  log("⚠️ 蜜蜂升级繁忙(id=" + bid + "): 已重试" + transientRetries + "次，留待下轮");
-                }
-                return refresh("升级繁忙后").then(function (st) {
-                  if (st) current = st;
+                // 升级是写操作：繁忙后先复查，禁止对同一只蜂连续盲重试。
+                return refresh("升级繁忙复查").then(function (st) {
+                  if (st) {
+                    current = st;
+                    if (hiveBeeStateChanged(before, st, bid)) {
+                      markUpgradeSuccess(json, st, true);
+                      return;
+                    }
+                  }
+                  stopForBusy = true;
+                  if (busyCooldownSec > 0) {
+                    setHiveUpgradeBusyUntil(bid, getFarmTime() + busyCooldownSec);
+                    log(
+                      "⚠️ 蜜蜂升级繁忙(id=" +
+                        bid +
+                        ")：复查无变化，冷却" +
+                        formatWaitSec(busyCooldownSec) +
+                        "后再试"
+                    );
+                  } else {
+                    log("⚠️ 蜜蜂升级繁忙(id=" + bid + ")：复查无变化，留待下轮");
+                  }
                 });
               }
               if (isHiveNoop(json, msg)) {
@@ -15569,17 +15865,13 @@ function runHive(cookie) {
               log("⚠️ 蜜蜂升级失败(id=" + bid + "): " + msg);
               return;
             }
-            done += 1;
-            HIVE_STATS.upgrade += 1;
-            clearHiveUpgradeBusyUntil(bid);
-            var left = Number(json.honey);
-            if (isNaN(left) || left < 0) {
-              log("🐝 蜜蜂升级: id=" + bid + " 成功");
-            } else {
-              log("🐝 蜜蜂升级: id=" + bid + " 成功，剩余蜂蜜" + left);
-            }
-            return refresh("升级后").then(function (st) {
+            return refresh("蜜蜂升级后").then(function (st) {
               if (st) current = st;
+              if (hiveBeeStateChanged(before, st || current, bid)) {
+                markUpgradeSuccess(json, st || current, false);
+              } else {
+                log("ℹ️ 蜜蜂升级(id=" + bid + "): 接口成功但蜂蜜/等级未变化，按未生效处理");
+              }
             });
           })
           .then(function () {
@@ -15588,11 +15880,81 @@ function runHive(cookie) {
             return sleep(CONFIG.WAIT_MS).then(next);
           });
       }
-      return tryOneUpgrade(0);
+      return tryOneUpgrade();
     }
 
     return next().then(function () {
       if (done <= 0 && CONFIG.DEBUG) logDebug("🐝 蜜蜂升级: 本轮无新增");
+    });
+  }
+
+  function doLevelUpgrade() {
+    if (!CONFIG.HIVE_AUTO_LEVEL_UPGRADE) {
+      if (CONFIG.DEBUG) logDebug("🐝 蜂巢本体升级: 配置关闭");
+      return Promise.resolve();
+    }
+    var max = Number(CONFIG.HIVE_LEVEL_UPGRADE_MAX || 0);
+    if (isNaN(max) || max < 1) max = 1;
+    max = Math.floor(max);
+    var minHoney = Number(CONFIG.HIVE_LEVEL_UPGRADE_MIN_HONEY || 0);
+    if (isNaN(minHoney) || minHoney < 0) minHoney = 0;
+    var done = 0;
+    var stopped = false;
+
+    function one() {
+      if (stopped || done >= max) return Promise.resolve();
+      var before = current;
+      if (!before || Number(before.honey || 0) < minHoney) {
+        if (CONFIG.DEBUG) {
+          logDebug(
+            "🐝 蜂巢本体升级: 蜂蜜不足(当前" +
+              Number((before && before.honey) || 0) +
+              "，阈值" +
+              minHoney +
+              ")，跳过"
+          );
+        }
+        return Promise.resolve();
+      }
+      if (CONFIG.DEBUG) {
+        logDebug("🐝 蜂巢本体升级: 尝试 当前等级" + Number(before.level || 0));
+      }
+      // 抓包确认本体升级不带 act/id；属于写操作，繁忙后只复查一次。
+      return callHiveApi(cookie, "/cgi-bin/cgi_farm_hive_upgrade", hiveParams(ctx))
+        .then(function (json) {
+          var ok = isHiveOk(json);
+          var msg = ok ? "" : hiveErrMsg(json);
+          return refresh(ok ? "蜂巢本体升级后" : "蜂巢本体升级繁忙复查").then(function (st) {
+            if (st) current = st;
+            var after = st || current;
+            var changed = !!(before && after && Number(before.level || 0) !== Number(after.level || 0));
+            if (changed) {
+              done += 1;
+              HIVE_STATS.levelUpgrade += 1;
+              log("🐝 蜂巢本体升级: " + Number(before.level || 0) + "→" + Number(after.level || 0));
+              return;
+            }
+            if (ok) {
+              log("ℹ️ 蜂巢本体升级: 接口成功但等级未变化，按未生效处理");
+            } else if (isTransientFailText(msg || "")) {
+              log("⚠️ 蜂巢本体升级繁忙：复查无变化，留待下轮");
+            } else if (isHiveNoop(json, msg)) {
+              if (CONFIG.DEBUG) logDebug("🐝 蜂巢本体升级: 无需执行(" + msg + ")");
+            } else {
+              HIVE_STATS.errors += 1;
+              log("⚠️ 蜂巢本体升级失败: " + msg);
+            }
+            stopped = true;
+          });
+        })
+        .then(function () {
+          if (stopped || done >= max) return;
+          return sleep(CONFIG.WAIT_MS).then(one);
+        });
+    }
+
+    return one().then(function () {
+      if (done <= 0 && CONFIG.DEBUG) logDebug("🐝 蜂巢本体升级: 本轮无新增");
     });
   }
 
@@ -15651,6 +16013,10 @@ function runHive(cookie) {
       HIVE_STATS.start = formatHiveState(state);
       log("🐝 蜂巢预判(开始): " + buildHiveActionPlan(current).summary);
       return doHarvest()
+        .then(function () {
+          return sleep(CONFIG.WAIT_MS);
+        })
+        .then(doLevelUpgrade)
         .then(function () {
           return sleep(CONFIG.WAIT_MS);
         })
@@ -15983,12 +16349,7 @@ function fetchTimeFarmContext(cookie) {
 function callTimeFarmApi(cookie, act, params, seedBase) {
   var base = seedBase ? CONFIG.TIME_FARM_SEED_BASE || "https://farm.qzone.qq.com" : CONFIG.TIME_FARM_BASE || "https://nc.qzone.qq.com";
   var url = base + (seedBase ? "/cgi-bin/cgi_farm_seed_list" : "/cgi-bin/cgi_farm_time_space?act=" + act);
-  return httpRequest({
-    method: "POST",
-    url: url,
-    headers: buildFishJsonHeaders(cookie),
-    body: buildLegacyBody(params)
-  }).then(function (resp) {
+  return farmJsonPost(url, cookie, params, "时光农场 " + (act || "种子列表")).then(function (resp) {
     return tryJson(resp.body);
   });
 }
@@ -16213,7 +16574,7 @@ function runTimeFarm(cookie) {
           return;
         }
         var msg = timeFarmErrMsg(json);
-        if (isTransientFailText(msg) && retry < transientRetries) {
+        if (isTransientFailText(msg) && shouldRetryWriteTransient(retry, transientRetries)) {
           log("⚠️ 时光任务领奖繁忙(" + getTimeFarmTaskName(task) + "/T" + task.id + ")，第" + (retry + 1) + "次重试");
           return sleep(CONFIG.RETRY_WAIT_MS || 800).then(function () {
             return claimOne(task, retry + 1);
@@ -16583,6 +16944,14 @@ function main() {
       ranchCookie = res.ranchCookie || cookie;
       LAST_RANCH_COOKIE = ranchCookie;
       return ensureFarmAccess(cookie).then(function (farmRes) {
+        if (!farmRes || !farmRes.ok) {
+          var openUrl3 = buildFarmCaptureOpenUrl();
+          notify("🌾 QQ 农牧场助手", "农场入口不可用", "点击打开农场 WAP，qfarm_ck.js 将自动更新会话", {
+            "open-url": openUrl3
+          });
+          bannerEnd();
+          return Promise.reject(STOP_SIGNAL);
+        }
         if (farmRes && farmRes.cookie) cookie = farmRes.cookie;
         return probeRanchGrass(ranchCookie);
       });
@@ -16623,11 +16992,13 @@ function main() {
     })
     .then(function () {
       return runFarmAuto(cookie).then(function () {
-        return runTimeFarm(cookie).then(function () {
-          return runFarmEvents(cookie).then(function () {
-            return farmSignIn(cookie).then(function () {
-              return feedRanchFromWarehouse(CONFIG.RANCH_BASE, cookie, ranchCookie).then(function () {
-                return farmSellAll(cookie);
+        return runLandUpgradeCheck(cookie).then(function () {
+          return runTimeFarm(cookie).then(function () {
+            return runFarmEvents(cookie).then(function () {
+              return farmSignIn(cookie).then(function () {
+                return feedRanchFromWarehouse(CONFIG.RANCH_BASE, cookie, ranchCookie).then(function () {
+                  return farmSellAll(cookie);
+                });
               });
             });
           });
