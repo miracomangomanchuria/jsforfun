@@ -29,7 +29,7 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.4.5';
+const VER = 'v1.5.0';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
@@ -40,6 +40,15 @@ const MEM = {
   detailByActId: {},
   groupDetailById: {},
   actJumpByHd: {},
+};
+
+// Evidence-based one-way migrations for IDs that were previously cached as the
+// primary activity but are now an ended period or an auxiliary sub-activity.
+const ACT_ID_MIGRATIONS = {
+  daily: {
+    to: 'LOT20260629093035235438',
+    from: ['LOT20260331140621284295', 'LOT20260708155757740277'],
+  },
 };
 
 const CAPTURE_QX = String.raw`[rewrite_local]
@@ -62,8 +71,8 @@ elife_lottery_capture = type=http-request,pattern=^https:\/\/chp\.icbc\.com\.cn\
 hostname = elife.icbc.com.cn, chp.icbc.com.cn`;
 
 const ACTS = [
-  // Updated via local HAR (2026-05-22): LPARK20250801152144809773 -> LOT20260331140621284295
-  { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20260331140621284295', groupActId: 'LPARK20250801152144809773', hdActId: 'HD888813cZxswuh65d', groupSlot: 0 },
+  // Updated via local HAR (2026-07-11): Q2 ended; current primary activity is Q3.
+  { key: 'daily', name: '刷卡金天天抽', actId: 'LOT20260629093035235438', groupActId: 'LPARK20250801152144809773', hdActId: 'HD888813cZxswuh65d', groupSlot: 0 },
   // Updated via local HAR (2026-06-15): LPARK20260331181013212359 -> LOT20260529101527599103
   { key: 'park', name: '乐园刮刮乐', actId: 'LOT20260529101527599103', groupActId: 'LPARK20260331181013212359', hdActId: 'HD888813cNCaaMeLDu', groupSlot: 0 },
   // Added via local HAR (2026-06-15): LPARK20260104135652791527 -> LOT20260529145850668850
@@ -550,8 +559,9 @@ function hydrateActsFromRuntime(st) {
   const byKey = rt.byKey || {};
   return ACTS.map(function (x) {
     const cached = byKey[x.key] || {};
+    const cachedActId = migrateCachedActId(x.key, txt(cached.actId), x.actId);
     return Object.assign({}, x, {
-      actId: txt(cached.actId) || x.actId,
+      actId: cachedActId,
       groupActId: txt(cached.groupActId) || x.groupActId,
       discoverySource: txt(cached.source) || '',
       discoveryAt: txt(cached.updateAt) || '',
@@ -561,6 +571,17 @@ function hydrateActsFromRuntime(st) {
       discoveryLastExpiredActId: txt(cached.lastExpiredActId) || '',
     });
   });
+}
+
+function migrateCachedActId(key, cachedActId, fallbackActId) {
+  const current = txt(cachedActId);
+  const fallback = txt(fallbackActId);
+  const rule = ACT_ID_MIGRATIONS[txt(key)] || {};
+  const oldIds = Array.isArray(rule.from) ? rule.from : [];
+  for (let i = 0; i < oldIds.length; i++) {
+    if (current && current === txt(oldIds[i])) return txt(rule.to) || fallback;
+  }
+  return current || fallback;
 }
 
 function cloneResultForAlias(rs, aliasName) {
@@ -994,7 +1015,7 @@ async function refreshOneActByDiscovery(st, act) {
   if (gid) {
     const parsed = await getGroupDetailCached(st, gid);
     if (parsed.ok) {
-      const actId = selectActIdFromGroup(act, parsed);
+      const actId = await selectActIdFromGroup(st, act, parsed, logs);
       if (actId) {
         if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'group_detail', logs, '🧭 单活动未更新')) {
           if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
@@ -1015,7 +1036,7 @@ async function refreshOneActByDiscovery(st, act) {
       if (jump.ok && txt(jump.groupActId)) {
         const parsed = await getGroupDetailCached(st, jump.groupActId);
         if (parsed.ok) {
-          const actId = selectActIdFromGroup(act, parsed);
+          const actId = await selectActIdFromGroup(st, act, parsed, logs);
           if (actId) {
             if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'actjump', logs, '🧭 单活动ActJump未更新')) {
               if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
@@ -1067,7 +1088,7 @@ async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
     const groupActs = groupMap[gid] || [];
     for (let j = 0; j < groupActs.length; j++) {
       const a = groupActs[j];
-      const actId = selectActIdFromGroup(a, parsed);
+      const actId = await selectActIdFromGroup(st, a, parsed, logs);
       if (!actId) continue;
       if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'group_detail', logs, '🧭 组未更新')) continue;
       if (mergeDiscoveryCandidate(discovered, a.key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
@@ -1116,7 +1137,7 @@ async function resolveActsFromActJump(st, acts, discovered, logs, actjumpFails) 
     const groupActs = hdMap[hd] || [];
     for (let j = 0; j < groupActs.length; j++) {
       const a = groupActs[j];
-      const actId = selectActIdFromGroup(a, parsed);
+      const actId = await selectActIdFromGroup(st, a, parsed, logs);
       if (!actId) continue;
       if (!acceptDiscoveredAct(st, a, actId, parsed.groupName, 'actjump', logs, '🧭 ActJump未更新')) continue;
       if (mergeDiscoveryCandidate(discovered, a.key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
@@ -1166,12 +1187,102 @@ function flushActJumpFailures(logs, actjumpFails, discovered) {
   logs.push(line);
 }
 
-function selectActIdFromGroup(act, parsed) {
+async function selectActIdFromGroup(st, act, parsed, logs) {
   const ids = Array.isArray(parsed && parsed.actIds) ? parsed.actIds.filter(Boolean) : [];
   if (!ids.length) return '';
   if (ids.length === 1) return ids[0];
-  const slot = toInt(act && act.groupSlot, 0);
-  return txt(ids[slot]) || txt(ids[0]);
+
+  const candidates = [];
+  for (let i = 0; i < ids.length; i++) {
+    const actId = txt(ids[i]);
+    const detail = await getActivityDetailCached(st, actId);
+    const ended = !detail.ok || isActivityExpired(detail) || isRefreshWorthyAbnormal(detail);
+    candidates.push({
+      actId: actId,
+      detail: detail,
+      ended: ended,
+      nameScore: scoreActivityNameMatch(act, parsed && parsed.groupName, detail && detail.actName),
+      index: i,
+    });
+  }
+
+  const matching = candidates.filter(function (x) { return !x.ended && x.nameScore > 0; });
+  if (matching.length) {
+    matching.sort(compareActivityCandidates);
+    const chosen = matching[0];
+    if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 候选' + ids.length + '项 | 选择=' + chosen.actId + formatSelectedActName(chosen.detail));
+    return chosen.actId;
+  }
+
+  const current = txt(act && act.actId);
+  for (let j = 0; j < candidates.length; j++) {
+    const x = candidates[j];
+    if (!x.ended && x.actId === current && !isAuxiliaryActivityName(x.detail && x.detail.actName, act, parsed && parsed.groupName)) {
+      if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 名称未明确匹配，沿用仍有效的当前 actId=' + x.actId);
+      return x.actId;
+    }
+  }
+
+  const active = candidates.filter(function (x) {
+    return !x.ended && !isAuxiliaryActivityName(x.detail && x.detail.actName, act, parsed && parsed.groupName);
+  });
+  if (active.length === 1) {
+    if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 唯一有效主活动=' + active[0].actId + formatSelectedActName(active[0].detail));
+    return active[0].actId;
+  }
+
+  if (logs) logs.push('🧭 多子活动筛选未决: ' + act.name + ' | 候选' + ids.length + '项，未找到名称匹配的有效主活动');
+  return '';
+}
+
+function compareActivityCandidates(a, b) {
+  if (a.nameScore !== b.nameScore) return b.nameScore - a.nameScore;
+  const ad = toInt(a.detail && a.detail.drawCount, 0) > 0 ? 1 : 0;
+  const bd = toInt(b.detail && b.detail.drawCount, 0) > 0 ? 1 : 0;
+  if (ad !== bd) return bd - ad;
+  return a.index - b.index;
+}
+
+function scoreActivityNameMatch(act, groupName, detailName) {
+  const alias = normalizeActivityName(act && act.name);
+  const group = normalizeActivityName(groupName);
+  const detail = normalizeActivityName(detailName);
+  if (!detail) return 0;
+  if (isAuxiliaryActivityName(detailName, act, groupName)) return -100;
+  if (alias && detail === alias) return 100;
+  if (alias && (detail.indexOf(alias) >= 0 || alias.indexOf(detail) >= 0)) return 90;
+  if (group && detail === group) return 80;
+  if (group && (detail.indexOf(group) >= 0 || group.indexOf(detail) >= 0)) return 70;
+  const aliasCore = activityNameCore(alias);
+  const groupCore = activityNameCore(group);
+  const detailCore = activityNameCore(detail);
+  if (aliasCore && detailCore && (detailCore.indexOf(aliasCore) >= 0 || aliasCore.indexOf(detailCore) >= 0)) return 60;
+  if (groupCore && detailCore && (detailCore.indexOf(groupCore) >= 0 || groupCore.indexOf(detailCore) >= 0)) return 50;
+  return 0;
+}
+
+function normalizeActivityName(v) {
+  return txt(v).replace(/[（(][^）)]*[）)]/g, '').replace(/20\d{2}年/g, '').replace(/[一二三四1234]季度/g, '').replace(/\s+/g, '').toLowerCase();
+}
+
+function activityNameCore(v) {
+  return txt(v).replace(/周周|天天|每日|活动|刮刮乐|抽奖|福利|线上用|线下用/g, '');
+}
+
+function isAuxiliaryActivityName(detailName, act, groupName) {
+  const detail = normalizeActivityName(detailName);
+  if (!detail) return false;
+  const target = normalizeActivityName(txt(act && act.name) + txt(groupName));
+  const markers = ['邀请', '助力', '分享', '任务', '好友', '推荐有礼', '拉新'];
+  for (let i = 0; i < markers.length; i++) {
+    if (detail.indexOf(markers[i]) >= 0 && target.indexOf(markers[i]) < 0) return true;
+  }
+  return false;
+}
+
+function formatSelectedActName(detail) {
+  const name = txt(detail && detail.actName);
+  return name ? ' | 名称=' + name : '';
 }
 
 async function reqDetail(st, actId) {
@@ -1389,6 +1500,7 @@ function parseDetail(raw) {
   const rewardPool = extractRewardPool(d);
   return {
     ok: true,
+    actName: txt(pick(d, ['detail.actName', 'actName', 'detail.activityName', 'activityName'])),
     drawFlag: toBool(d.drawFlag, false),
     drawCount: toInt(d.drawCount, 0),
     totalCount: toInt(d.totalCount, -1),
@@ -1846,7 +1958,11 @@ function captureReq() {
 }
 
 function captureBackfillActDiscovery(st, actId, groupActId) {
-  const acts = findActsByCurrentOrKnownIds(st, actId, groupActId);
+  // A page can query several LOTs from one LPARK (for example its primary draw
+  // plus an invitation campaign). Do not let an arbitrary sibling LOT overwrite
+  // the primary activity cache; a fresh capture will trigger group discovery,
+  // which verifies each candidate with its server-side name and status.
+  const acts = findActsByKnownActId(st, actId);
   if (!acts.length) return { changed: false, summary: '' };
   const discovered = {};
   const names = [];
@@ -1867,16 +1983,14 @@ function captureBackfillActDiscovery(st, actId, groupActId) {
   };
 }
 
-function findActsByCurrentOrKnownIds(st, actId, groupActId) {
+function findActsByKnownActId(st, actId) {
   const aid = txt(actId);
-  const gid = txt(groupActId);
-  if (!aid && !gid) return [];
+  if (!aid) return [];
   const out = [];
   const acts = hydrateActsFromRuntime(st);
   for (let i = 0; i < acts.length; i++) {
     const act = acts[i];
     if (aid && txt(act.actId) === aid) pushActUnique(out, act);
-    if (gid && txt(act.groupActId) === gid) pushActUnique(out, act);
   }
   return out;
 }
