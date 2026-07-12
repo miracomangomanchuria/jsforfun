@@ -29,7 +29,7 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.5.5';
+const VER = 'v1.5.6';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
@@ -42,6 +42,7 @@ const MEM = {
   detailByActId: {},
   groupDetailById: {},
   actJumpByHd: {},
+  selectionByActKey: {},
 };
 
 // Evidence-based one-way migrations for IDs that were previously cached as the
@@ -840,6 +841,11 @@ function acceptDiscoveredAct(st, act, actId, groupName, source, logs, prefix) {
     return false;
   }
   if (isSameExpiredDiscovery(st, act, next)) {
+    const evidence = getSelectionEvidence(act, next);
+    if (evidence && evidence.active) {
+      logs.push('🧭 已验证当前活动有效，恢复缓存: ' + act.name + ' | actId=' + next);
+      return true;
+    }
     markActDiscoveryNoUpdate(st, act, next, groupName, source);
     logs.push(prefix + ': ' + act.name + ' | 仍为已过期 actId=' + next + '，跳过重试');
     return false;
@@ -1254,7 +1260,12 @@ function flushActJumpFailures(logs, actjumpFails, discovered) {
 async function selectActIdFromGroup(st, act, parsed, logs) {
   const ids = Array.isArray(parsed && parsed.actIds) ? parsed.actIds.filter(Boolean) : [];
   if (!ids.length) return '';
-  if (ids.length === 1) return ids[0];
+  if (ids.length === 1) {
+    const only = txt(ids[0]);
+    const detail = await getActivityDetailCached(st, only);
+    recordSelectionEvidence(act, only, detail);
+    return only;
+  }
 
   // Some groups intentionally expose several independently drawable child
   // activities while not returning child metadata. The captured display order
@@ -1262,8 +1273,11 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
   const slot = toInt(act && act.groupSlot, -1);
   if (act && act.slotVerified && slot >= 0 && slot < ids.length) {
     if (!isStoredSlotOrderConsistent(st, act, ids, logs)) return '';
-    if (logs) logs.push('🧭 多子活动按组顺序: ' + act.name + ' | slot=' + slot + ' | 选择=' + ids[slot]);
-    return ids[slot];
+    const chosenId = txt(ids[slot]);
+    const chosenDetail = await getActivityDetailCached(st, chosenId);
+    recordSelectionEvidence(act, chosenId, chosenDetail);
+    if (logs) logs.push('🧭 多子活动按组顺序: ' + act.name + ' | slot=' + slot + ' | 选择=' + chosenId);
+    return chosenId;
   }
   if (act && act.slotVerified && slot >= ids.length) {
     if (logs) logs.push('🧭 多子活动归属未决: ' + act.name + ' | slot=' + slot + ' 超出候选' + ids.length + '项，跳过自动执行');
@@ -1288,6 +1302,7 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
   if (matching.length) {
     matching.sort(compareActivityCandidates);
     const chosen = matching[0];
+    recordSelectionEvidence(act, chosen.actId, chosen.detail);
     if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 候选' + ids.length + '项 | 选择=' + chosen.actId + formatSelectedActName(chosen.detail));
     return chosen.actId;
   }
@@ -1296,6 +1311,7 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
   for (let j = 0; j < candidates.length; j++) {
     const x = candidates[j];
     if (!x.ended && x.actId === current && !isAuxiliaryActivityName(x.detail && x.detail.actName, act, parsed && parsed.groupName)) {
+      recordSelectionEvidence(act, x.actId, x.detail);
       if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 名称未明确匹配，沿用仍有效的当前 actId=' + x.actId);
       return x.actId;
     }
@@ -1305,12 +1321,32 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
     return !x.ended && !isAuxiliaryActivityName(x.detail && x.detail.actName, act, parsed && parsed.groupName);
   });
   if (active.length === 1) {
+    recordSelectionEvidence(act, active[0].actId, active[0].detail);
     if (logs) logs.push('🧭 多子活动筛选: ' + act.name + ' | 唯一有效主活动=' + active[0].actId + formatSelectedActName(active[0].detail));
     return active[0].actId;
   }
 
   if (logs) logs.push('🧭 多子活动筛选未决: ' + act.name + ' | 候选' + ids.length + '项，未找到名称匹配的有效主活动');
   return '';
+}
+
+function selectionEvidenceKey(act) {
+  return txt(act && act.key);
+}
+
+function recordSelectionEvidence(act, actId, detail) {
+  const key = selectionEvidenceKey(act);
+  const id = txt(actId);
+  if (!key || !id) return;
+  MEM.selectionByActKey[key] = {
+    actId: id,
+    active: !!(detail && detail.ok && !isActivityExpired(detail) && !isRefreshWorthyAbnormal(detail)),
+  };
+}
+
+function getSelectionEvidence(act, actId) {
+  const item = MEM.selectionByActKey[selectionEvidenceKey(act)] || null;
+  return item && txt(item.actId) === txt(actId) ? item : null;
 }
 
 function isStoredSlotOrderConsistent(st, act, ids, logs) {
