@@ -29,12 +29,14 @@ hostname = elife.icbc.com.cn, chp.icbc.com.cn
 */
 
 const $ = new Env('e生活抽奖');
-const VER = 'v1.5.0';
+const VER = 'v1.5.5';
 const STORE_KEY = 'elife_lottery_capture_state_v1';
 const LEDGER_KEY = 'elife_lottery_reward_map_ledger_v1';
 const LEGACY_LEDGER_KEY = 'elife_lottery_coupon_ledger_v1';
 const ACT_DISCOVERY_KEY = 'elife_lottery_activity_discovery_v1';
-const ACT_DISCOVERY_RECHECK_MS = 12 * 3600 * 1000;
+// A full HD discovery sweep is a fallback health check. Expired activities and
+// fresh captures still trigger an immediate targeted refresh.
+const ACT_DISCOVERY_RECHECK_MS = 24 * 3600 * 1000;
 const RECAPTURE_URL = 'weixin://dl/business/?t=Nv8N1cIIZas';
 const MEM = {
   detailByActId: {},
@@ -48,6 +50,10 @@ const ACT_ID_MIGRATIONS = {
   daily: {
     to: 'LOT20260629093035235438',
     from: ['LOT20260331140621284295', 'LOT20260708155757740277'],
+  },
+  taxi: {
+    to: 'LOT20260529155127738383',
+    from: ['LOT20260331162633816255'],
   },
 };
 
@@ -78,10 +84,12 @@ const ACTS = [
   // Added via local HAR (2026-06-15): LPARK20260104135652791527 -> LOT20260529145850668850
   { key: 'gas', name: '加油刮刮乐', actId: 'LOT20260529145850668850', groupActId: 'LPARK20260104135652791527', hdActId: 'HD888813jFA553nPHZ', groupSlot: 0 },
   // Updated via direct ActJump verification (2026-06-15): LPARK20260331153025142282 -> LOT20260529135740524357
-  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 1 },
-  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 0 },
-  // Updated via discovery replay (2026-05-22): LPARK20260104105132312187 -> LOT20260331162633816255
-  { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260331162633816255', groupActId: 'LPARK20260104105132312187', hdActId: 'HD888813iP1oQnhPJX', groupSlot: 0 },
+  { key: 'xin_offline', name: '薪动福利周周刮（线下用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 1, slotVerified: true },
+  { key: 'xin_online', name: '薪动福利周周刮（线上用）', actId: 'LOT20260529135740524357', groupActId: 'LPARK20260331153025142282', hdActId: 'HD888813cNzezmCe9d', groupSlot: 0, slotVerified: true },
+  // Verified from the page's own HD -> ActJump -> LPARK chain (2026-07-12).
+  { key: 'lifestyle', name: '美好生活打卡路线', actId: 'LOT20260618180909429065', groupActId: 'LPARK20260617144656686831', hdActId: 'HD888813t3CMmWqNjy', groupSlot: 0 },
+  // Updated via local HAR (2026-07-12): same group, Q2 LOT replaced by active Q3 LOT.
+  { key: 'taxi', name: '打车刷卡金周周抽', actId: 'LOT20260529155127738383', groupActId: 'LPARK20260104105132312187', hdActId: 'HD888813iP1oQnhPJX', groupSlot: 0 },
   // Updated via local HAR (2026-06-15): LPARK20251231162233106731 -> LOT20260529143359269898
   { key: 'food', name: '美食刮刮乐', actId: 'LOT20260529143359269898', groupActId: 'LPARK20251231162233106731', hdActId: 'HD888813cMutfHbQXh', groupSlot: 0 },
   { key: 'weekly', name: '周周好运刮刮乐', actId: 'LOT20260104093637913054', groupActId: 'LPARK20260104094508989099', hdActId: 'HD888813cNHeYjjaVu', groupSlot: 0 },
@@ -105,6 +113,9 @@ const CFG = {
   drawTimeout: toInt(arg.draw_timeout_ms, 20000),
   waitMinMs: Math.max(0, toInt(arg.wait_min_s, 1) * 1000),
   waitMaxMs: Math.max(0, toInt(arg.wait_max_s, 3) * 1000),
+  readRetries: Math.max(0, Math.min(2, toInt(arg.read_retries, 1))),
+  readRetryMinMs: Math.max(200, toInt(arg.read_retry_min_ms, 800)),
+  readRetryMaxMs: Math.max(200, toInt(arg.read_retry_max_ms, 1600)),
   waitLog: toBool(arg.wait_log, false),
   debug: toBool(arg.debug, false),
 };
@@ -209,8 +220,13 @@ async function runActivities(st, acts) {
   if (refreshKeys.length) {
     log('🧭 二阶段刷新: ' + refreshKeys.join(' / '));
     const refreshed = await refreshActsByDiscovery(st, filterActsByKeys(acts, refreshKeys));
+    if (refreshed.authExpired) {
+      return { acts: acts, unitResults: mapUnitResults(units, probeMap), aliasResults: mapAliasResults(acts, probeMap), authExpired: { actName: '活动发现', reason: friendlyMsg(refreshed.reason) || 'HTTP 401' } };
+    }
     acts = refreshed.acts || hydrateActsFromRuntime(st);
-    units = rebuildUnitsWithActs(units, acts);
+    // A shared LOT can split into several child LOTs after a period rollover.
+    // Rebuild from all aliases so newly separated activities are not omitted.
+    units = buildUniqueActUnits(acts);
     probeMap = await reprobeUnits(st, units, probeMap, refreshKeys);
     authExpired = firstAuthExpiredFromMap(units, probeMap);
     if (authExpired) return { acts: acts, unitResults: mapUnitResults(units, probeMap), aliasResults: mapAliasResults(acts, probeMap), authExpired: authExpired };
@@ -840,17 +856,10 @@ function isCandidateCompatibleWithAct(act, actId, groupName, source) {
   if (sourceName === 'group_detail') {
     return true;
   }
-  if (sourceName === 'actjump') {
-    const hint = normalizeTextKey(groupName);
-    const alias = normalizeTextKey(txt(act && act.name));
-    const knownGroup = normalizeTextKey(txt(act && act.groupName));
-    if (hint && (hint.indexOf(alias) >= 0 || alias.indexOf(hint) >= 0 || (knownGroup && (hint.indexOf(knownGroup) >= 0 || knownGroup.indexOf(hint) >= 0)))) {
-      return true;
-    }
-    if (currentActId && nextActId === currentActId) return true;
-    if (currentGroupId && txt(act && act.discoverySource) === 'actjump' && txt(act && act.groupActId) === currentGroupId) return true;
-    return false;
-  }
+  // A successful HD -> ActJump -> LPARK route is the page's own identity
+  // mapping. Campaign copy frequently changes across periods, so names must
+  // not veto this authoritative route.
+  if (sourceName === 'actjump') return true;
   return true;
 }
 
@@ -875,6 +884,10 @@ function getActDiscoveryStats(st, acts) {
 
 function shouldPreloadActDiscovery(st, acts) {
   const stats = getActDiscoveryStats(st, acts);
+  const hintedKeys = getCaptureHintKeys(st, acts);
+  if (hintedKeys.length) {
+    return { needed: true, reason: '抓包提示多子活动组待装填', keys: hintedKeys };
+  }
   if (hasFreshCaptureSinceDiscovery(st)) {
     return { needed: true, reason: '最近抓到新的活动页，请求前先同步活动缓存', keys: stats.keysAll.slice() };
   }
@@ -899,6 +912,19 @@ function shouldPreloadActDiscovery(st, acts) {
     return { needed: true, reason: '活动缓存不完整，补装填缺失项', keys: stats.keysMissing.slice() };
   }
   return { needed: false, reason: '活动缓存有效，直接执行' };
+}
+
+function getCaptureHintKeys(st, acts) {
+  const rt = getActDiscoveryState(st);
+  const hint = rt.captureHint || {};
+  const gid = txt(hint.groupActId);
+  if (!gid) return [];
+  const keys = [];
+  for (let i = 0; i < (acts || []).length; i++) {
+    const act = acts[i] || {};
+    if (txt(act.groupActId) === gid) keys.push(txt(act.key));
+  }
+  return uniqArr(keys);
 }
 
 async function preloadActsByDiscoveryIfNeeded(st, acts) {
@@ -986,22 +1012,48 @@ async function refreshActsByDiscovery(st, acts) {
   const discovered = {};
   const logs = [];
   const actjumpFails = [];
-  const groupResult = await resolveActsFromGroupDetail(st, acts, discovered, logs);
-  if (groupResult && groupResult.authExpired) {
+  // The page itself resolves its stable HD entry through ActJump before it loads
+  // the LPARK detail.  Keep that route authoritative: an old LPARK can still
+  // return a valid-looking historical response after the entry has switched.
+  const jumpResult = await resolveActsFromActJump(st, acts, discovered, logs, actjumpFails);
+  if (jumpResult && jumpResult.authExpired) {
     for (let i = 0; i < logs.length; i++) log(logs[i]);
-    return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: groupResult.reason || 'HTTP 401' };
+    return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: jumpResult.reason || 'HTTP 401' };
   }
+  // Only fall back to a cached group for entries ActJump could not resolve.
+  // This keeps legacy captures usable when the discovery token is absent while
+  // preventing a stale group from overriding a successful page-path lookup.
   if (!allActsResolved(acts, discovered)) {
-    const jumpResult = await resolveActsFromActJump(st, acts, discovered, logs, actjumpFails);
-    if (jumpResult && jumpResult.authExpired) {
+    const unresolved = filterUnresolvedActs(acts, discovered);
+    const groupResult = await resolveActsFromGroupDetail(st, unresolved, discovered, logs);
+    if (groupResult && groupResult.authExpired) {
       for (let j = 0; j < logs.length; j++) log(logs[j]);
-      return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: jumpResult.reason || 'HTTP 401' };
+      return { changed: false, acts: hydrateActsFromRuntime(st), discovered, authExpired: true, reason: groupResult.reason || 'HTTP 401' };
     }
   }
   flushActJumpFailures(logs, actjumpFails, discovered);
   for (let i = 0; i < logs.length; i++) log(logs[i]);
   const changed = saveActDiscovery(st, discovered);
+  clearCaptureHintIfCovered(st, acts, discovered);
   return { changed, acts: hydrateActsFromRuntime(st), discovered, authExpired: false, reason: '' };
+}
+
+function clearCaptureHintIfCovered(st, acts, discovered) {
+  const rt = getActDiscoveryState(st);
+  const hint = rt.captureHint || {};
+  const gid = txt(hint.groupActId);
+  if (!gid) return false;
+  const related = (acts || []).filter(function (act) { return txt(act && act.groupActId) === gid; });
+  if (!related.length) return false;
+  for (let i = 0; i < related.length; i++) {
+    const key = txt(related[i] && related[i].key);
+    if (!txt(discovered[key] && discovered[key].actId)) return false;
+  }
+  delete rt.captureHint;
+  rt.needsRefresh = hasPendingActDiscoveryRefresh(rt);
+  st.runtime[ACT_DISCOVERY_KEY] = rt;
+  saveState(st);
+  return true;
 }
 
 async function refreshOneActByDiscovery(st, act) {
@@ -1011,44 +1063,47 @@ async function refreshOneActByDiscovery(st, act) {
   const key = txt(act && act.key);
   if (!key) return { changed: false, discovered };
 
-  const gid = txt(act && act.groupActId);
-  if (gid) {
-    const parsed = await getGroupDetailCached(st, gid);
-    if (parsed.ok) {
-      const actId = await selectActIdFromGroup(st, act, parsed, logs);
-      if (actId) {
-        if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'group_detail', logs, '🧭 单活动未更新')) {
-          if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
-            logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
+  // Match the WebView navigation first.  Cached LPARK is a fallback only.
+  const token = findDiscoveryToken(st);
+  const hd = txt(act && act.hdActId);
+  if (token && hd) {
+    const jump = await getActJumpCached(st, hd, token);
+    if (jump.ok && txt(jump.groupActId)) {
+      const parsed = await getGroupDetailCached(st, jump.groupActId);
+      if (parsed.ok) {
+        const actId = await selectActIdFromGroup(st, act, parsed, logs);
+        if (actId && acceptDiscoveredAct(st, act, actId, parsed.groupName, 'actjump', logs, '🧭 单活动ActJump未更新')) {
+          if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
+            logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
           }
         }
+      } else if (parsed.authExpired) {
+        return { changed: false, discovered, authExpired: true, reason: parsed.msg || 'HTTP 401' };
+      } else {
+        logs.push('🧭 单活动新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
       }
+    } else if (jump.authExpired) {
+      return { changed: false, discovered, authExpired: true, reason: jump.msg || 'HTTP 401' };
     } else {
-      logs.push('🧭 单活动组详情失败: ' + gid + ' | ' + (parsed.msg || '未知错误'));
+      actjumpFails.push({ type: 'single', hd: hd, actName: act.name, key: key, msg: jump.msg || '未解析到 LPARK' });
     }
   }
 
   if (!txt(discovered[key] && discovered[key].actId)) {
-    const token = findDiscoveryToken(st);
-    const hd = txt(act && act.hdActId);
-    if (token && hd) {
-      const jump = await getActJumpCached(st, hd, token);
-      if (jump.ok && txt(jump.groupActId)) {
-        const parsed = await getGroupDetailCached(st, jump.groupActId);
-        if (parsed.ok) {
-          const actId = await selectActIdFromGroup(st, act, parsed, logs);
-          if (actId) {
-            if (acceptDiscoveredAct(st, act, actId, parsed.groupName, 'actjump', logs, '🧭 单活动ActJump未更新')) {
-              if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: jump.groupActId, groupName: parsed.groupName, source: 'actjump' })) {
-                logs.push('🧭 单活动ActJump装填: ' + act.name + ' | group=' + jump.groupActId + ' | actId=' + actId);
-              }
-            }
+    const gid = txt(act && act.groupActId);
+    if (gid) {
+      const parsed = await getGroupDetailCached(st, gid);
+      if (parsed.ok) {
+        const actId = await selectActIdFromGroup(st, act, parsed, logs);
+        if (actId && acceptDiscoveredAct(st, act, actId, parsed.groupName, 'group_detail', logs, '🧭 单活动未更新')) {
+          if (mergeDiscoveryCandidate(discovered, key, { actId: actId, groupActId: gid, groupName: parsed.groupName, source: 'group_detail' })) {
+            logs.push('🧭 单活动装填: ' + act.name + ' | group=' + gid + ' | actId=' + actId);
           }
-        } else {
-          logs.push('🧭 单活动新组详情失败: ' + jump.groupActId + ' | ' + (parsed.msg || '未知错误'));
         }
+      } else if (parsed.authExpired) {
+        return { changed: false, discovered, authExpired: true, reason: parsed.msg || 'HTTP 401' };
       } else {
-        actjumpFails.push({ type: 'single', hd: hd, actName: act.name, key: key, msg: jump.msg || '未解析到 LPARK' });
+        logs.push('🧭 单活动组详情失败: ' + gid + ' | ' + (parsed.msg || '未知错误'));
       }
     }
   }
@@ -1065,6 +1120,15 @@ function allActsResolved(acts, discovered) {
     if (!txt(discovered[a.key] && discovered[a.key].actId)) return false;
   }
   return true;
+}
+
+function filterUnresolvedActs(acts, discovered) {
+  const out = [];
+  for (let i = 0; i < (acts || []).length; i++) {
+    const act = acts[i] || {};
+    if (!txt(discovered[txt(act.key)] && discovered[txt(act.key)].actId)) out.push(act);
+  }
+  return out;
 }
 
 async function resolveActsFromGroupDetail(st, acts, discovered, logs) {
@@ -1192,6 +1256,20 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
   if (!ids.length) return '';
   if (ids.length === 1) return ids[0];
 
+  // Some groups intentionally expose several independently drawable child
+  // activities while not returning child metadata. The captured display order
+  // is the only stable discriminator available for those known aliases.
+  const slot = toInt(act && act.groupSlot, -1);
+  if (act && act.slotVerified && slot >= 0 && slot < ids.length) {
+    if (!isStoredSlotOrderConsistent(st, act, ids, logs)) return '';
+    if (logs) logs.push('🧭 多子活动按组顺序: ' + act.name + ' | slot=' + slot + ' | 选择=' + ids[slot]);
+    return ids[slot];
+  }
+  if (act && act.slotVerified && slot >= ids.length) {
+    if (logs) logs.push('🧭 多子活动归属未决: ' + act.name + ' | slot=' + slot + ' 超出候选' + ids.length + '项，跳过自动执行');
+    return '';
+  }
+
   const candidates = [];
   for (let i = 0; i < ids.length; i++) {
     const actId = txt(ids[i]);
@@ -1233,6 +1311,27 @@ async function selectActIdFromGroup(st, act, parsed, logs) {
 
   if (logs) logs.push('🧭 多子活动筛选未决: ' + act.name + ' | 候选' + ids.length + '项，未找到名称匹配的有效主活动');
   return '';
+}
+
+function isStoredSlotOrderConsistent(st, act, ids, logs) {
+  const gid = txt(act && act.groupActId);
+  if (!gid || !Array.isArray(ids) || ids.length < 2) return true;
+  const siblings = findActsByKnownGroupActId(st, gid).filter(function (x) { return x && x.slotVerified; });
+  let checked = 0;
+  for (let i = 0; i < siblings.length; i++) {
+    const sibling = siblings[i];
+    const oldId = txt(sibling.actId);
+    const slot = toInt(sibling.groupSlot, -1);
+    const idx = ids.indexOf(oldId);
+    if (idx < 0 || slot < 0) continue;
+    checked++;
+    if (idx !== slot) {
+      if (logs) logs.push('⚠️ 多子活动顺序疑似变化: ' + sibling.name + ' | 已知slot=' + slot + ' | 当前index=' + idx + '，停止自动装填');
+      return false;
+    }
+  }
+  if (checked && logs) logs.push('🧭 多子活动顺序校验通过: 已核对' + checked + '项');
+  return true;
 }
 
 function compareActivityCandidates(a, b) {
@@ -1353,7 +1452,7 @@ async function getActivityDetailCached(st, actId) {
   const key = txt(actId);
   if (!key) return { ok: false, msg: '缺少actId', authExpired: false };
   if (Object.prototype.hasOwnProperty.call(MEM.detailByActId, key)) return MEM.detailByActId[key];
-  const parsed = parseDetail(await reqDetail(st, key));
+  const parsed = await readWithRetry(function () { return reqDetail(st, key); }, parseDetail, '活动状态');
   MEM.detailByActId[key] = parsed;
   return parsed;
 }
@@ -1367,7 +1466,7 @@ async function getGroupDetailCached(st, groupActId) {
   const key = txt(groupActId);
   if (!key) return { ok: false, msg: '缺少groupActId' };
   if (Object.prototype.hasOwnProperty.call(MEM.groupDetailById, key)) return MEM.groupDetailById[key];
-  const parsed = parseActGroupDetail(await reqActGroupDetail(st, key));
+  const parsed = await readWithRetry(function () { return reqActGroupDetail(st, key); }, parseActGroupDetail, '活动组详情');
   MEM.groupDetailById[key] = parsed;
   return parsed;
 }
@@ -1378,7 +1477,7 @@ async function getActJumpCached(st, hdActId, token) {
   const t = summarizeSecret(token);
   const key = hd + '|' + t;
   if (Object.prototype.hasOwnProperty.call(MEM.actJumpByHd, key)) return MEM.actJumpByHd[key];
-  const parsed = parseActJump(await reqActJump(st, hd, token));
+  const parsed = await readWithRetry(function () { return reqActJump(st, hd, token); }, parseActJump, '活动入口');
   MEM.actJumpByHd[key] = parsed;
   return parsed;
 }
@@ -1449,16 +1548,46 @@ function pushUnique(arr, v) {
 }
 
 function extractGroupActId(pageUrl) {
-  const s = txt(pageUrl);
-  if (!s) return '';
-  let m = /actId=(LPARK\d+)/.exec(s);
-  if (m) return txt(m[1]);
-  const q = parseQuery(s);
-  const redirect = txt(q.redirect_uri);
-  const decoded = safeB64Decode(redirect);
-  if (decoded) {
-    m = /actId=(LPARK\d+)/.exec(decoded);
-    if (m) return txt(m[1]);
+  return extractGroupActIdNested(pageUrl, 0, {});
+}
+
+// The WebView's ActJump URL commonly nests the actual route as
+// page_url -> redirect_uri(base64) -> rdu(base64) -> route(...LPARK...).
+// The old single-layer parser stopped before the group ID, even though the
+// browser continued this chain successfully.
+function extractGroupActIdNested(source, depth, seen) {
+  // redirect_uri and rdu are each decoded in a separate recursive step.
+  // Allow enough depth for page_url -> redirect_uri -> rdu -> route query.
+  if (depth > 6) return '';
+  const raw = String(source == null ? '' : source).trim();
+  if (!raw || raw.length > 12000) return '';
+  const fingerprint = raw.length + ':' + raw.slice(0, 24);
+  if (seen[fingerprint]) return '';
+  seen[fingerprint] = true;
+
+  const direct = /(?:[?&]|^)actId=(LPARK\d+)/.exec(raw);
+  if (direct) return txt(direct[1]);
+  const loose = /LPARK\d+/.exec(raw);
+  if (loose) return txt(loose[0]);
+
+  const decodedUrl = decodeU(raw);
+  if (decodedUrl && decodedUrl !== raw) {
+    const fromDecodedUrl = extractGroupActIdNested(decodedUrl, depth + 1, seen);
+    if (fromDecodedUrl) return fromDecodedUrl;
+  }
+
+  const decodedB64 = safeB64Decode(raw);
+  if (decodedB64 && decodedB64 !== raw) {
+    const fromDecodedB64 = extractGroupActIdNested(decodedB64, depth + 1, seen);
+    if (fromDecodedB64) return fromDecodedB64;
+  }
+
+  const query = parseQuery(raw);
+  const keys = Object.keys(query);
+  for (let i = 0; i < keys.length; i++) {
+    const value = String(query[keys[i]] == null ? '' : query[keys[i]]);
+    const found = extractGroupActIdNested(value, depth + 1, seen);
+    if (found) return found;
   }
   return '';
 }
@@ -1958,12 +2087,25 @@ function captureReq() {
 }
 
 function captureBackfillActDiscovery(st, actId, groupActId) {
-  // A page can query several LOTs from one LPARK (for example its primary draw
-  // plus an invitation campaign). Do not let an arbitrary sibling LOT overwrite
-  // the primary activity cache; a fresh capture will trigger group discovery,
-  // which verifies each candidate with its server-side name and status.
-  const acts = findActsByKnownActId(st, actId);
-  if (!acts.length) return { changed: false, summary: '' };
+  // A captured LPARK can contain more than one independently drawable LOT.
+  // Directly backfill only an unambiguous one-alias group; multi-alias groups
+  // are marked for a group-detail refresh so one captured LOT never overwrites
+  // its siblings.
+  const groupActs = findActsByKnownGroupActId(st, groupActId);
+  const exactActs = findActsByKnownActId(st, actId);
+  const acts = groupActs.length === 1 ? groupActs.concat(exactActs) : exactActs.slice();
+  dedupeActsByKey(acts);
+  if (!acts.length) {
+    if (groupActs.length > 1) {
+      const rt = getActDiscoveryState(st);
+      rt.needsRefresh = true;
+      rt.captureHint = { groupActId: txt(groupActId), actId: txt(actId), updateAt: now() };
+      st.runtime[ACT_DISCOVERY_KEY] = rt;
+      saveState(st);
+      return { changed: true, summary: '多子活动组待装填 | group=' + txt(groupActId) + ' | capturedActId=' + txt(actId) };
+    }
+    return { changed: false, summary: '' };
+  }
   const discovered = {};
   const names = [];
   for (let i = 0; i < acts.length; i++) {
@@ -1981,6 +2123,28 @@ function captureBackfillActDiscovery(st, actId, groupActId) {
     changed: changed,
     summary: changed ? (uniqArr(names).join(' / ') + ' | group=' + txt(groupActId) + ' | actId=' + txt(actId)) : '',
   };
+}
+
+function findActsByKnownGroupActId(st, groupActId) {
+  const gid = txt(groupActId);
+  if (!gid) return [];
+  const out = [];
+  const acts = hydrateActsFromRuntime(st);
+  for (let i = 0; i < acts.length; i++) {
+    const act = acts[i];
+    if (txt(act.groupActId) === gid) pushActUnique(out, act);
+  }
+  return out;
+}
+
+function dedupeActsByKey(acts) {
+  const seen = {};
+  for (let i = acts.length - 1; i >= 0; i--) {
+    const key = txt(acts[i] && acts[i].key);
+    if (!key || seen[key]) acts.splice(i, 1);
+    else seen[key] = 1;
+  }
+  return acts;
 }
 
 function findActsByKnownActId(st, actId) {
@@ -2066,6 +2230,27 @@ async function httpJSON(method, url, headers, body, timeoutMs) {
   } catch (e) {
     return { error: { message: txt(e && e.message ? e.message : e) }, status: 0, text: '', json: null };
   }
+}
+
+function isTransientReadFailure(parsed) {
+  if (!parsed || parsed.ok) return false;
+  if (parsed.authExpired) return false;
+  const msg = txt(parsed.msg);
+  return /^(HTTP 0|HTTP 408|HTTP 429|HTTP 5\d\d|request failed|非JSON响应|Request timeout)/i.test(msg) || /timeout|timed out|socket|network|ECONN|ENOTFOUND/i.test(msg);
+}
+
+async function readWithRetry(requester, parser, label) {
+  let parsed = null;
+  for (let attempt = 0; attempt <= CFG.readRetries; attempt++) {
+    parsed = parser(await requester());
+    if (!isTransientReadFailure(parsed) || attempt >= CFG.readRetries) return parsed;
+    const lo = Math.min(CFG.readRetryMinMs, CFG.readRetryMaxMs);
+    const hi = Math.max(CFG.readRetryMinMs, CFG.readRetryMaxMs);
+    const delay = lo + Math.floor(Math.random() * (hi - lo + 1));
+    if (CFG.debug) log('🔁 ' + label + '读取重试 ' + (attempt + 1) + '/' + CFG.readRetries + ' | 等待' + delay + 'ms');
+    await new Promise(function (resolve) { setTimeout(resolve, delay); });
+  }
+  return parsed || { ok: false, msg: '读取失败', authExpired: false };
 }
 async function maybeWait(method, url) {
   if (CFG.waitMinMs <= 0 && CFG.waitMaxMs <= 0) return;
