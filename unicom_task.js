@@ -23,7 +23,7 @@ hostname = loginxhm.10010.com
 */
 
 var SCRIPT_NAME = "联通营业厅签到";
-var SCRIPT_VERSION = "v1.5.2";
+var SCRIPT_VERSION = "v1.5.3";
 var STORAGE_SESSION_KEY = "unicom_hall_session_v1";
 var STORAGE_UA_KEY = "unicom_hall_ua_v1";
 var UNICOM_APP_SCHEME = "chinaunicom://";
@@ -170,7 +170,7 @@ async function runTask() {
   );
   $.log(ts() + " [账号] " + formatAccountQueue(sessions));
   $.log(SEP);
-  var invalidStoreCookies = {};
+  var removedCount = 0;
 
   for (var i = 0; i < sessions.length; i++) {
     var row;
@@ -193,11 +193,11 @@ async function runTask() {
       });
       $.log(ts() + " " + accountTag(sessions[i].mobile ? maskMobile(sessions[i].mobile) : "账号" + (i + 1)) + " 运行异常: " + stringifyError(err));
     }
+    if (row && row.key_fields && row.key_fields.cookie_removed_count) {
+      removedCount += Number(row.key_fields.cookie_removed_count) || 0;
+    }
     resultRows.push(row);
     $.log(ts() + " " + accountTag(row.account || ("账号" + (i + 1))) + " 完成: " + row.summary_line);
-    if (row.result_category === "auth_expired" && sessions[i].source === "store") {
-      invalidStoreCookies[sessions[i].cookie] = 1;
-    }
     if (i < sessions.length - 1) await $.wait(accountWaitMs);
   }
 
@@ -220,7 +220,6 @@ async function runTask() {
     " | 失败:" +
     stat.fail;
 
-  var removedCount = purgeInvalidStoredSessions(invalidStoreCookies);
   if (removedCount > 0) {
     subtitle += " | 清理失效Cookie:" + removedCount;
     $.log(ts() + " [清理] 已自动删除失效账号 " + removedCount + " 个");
@@ -257,13 +256,17 @@ async function runOneAccount(session, index, total) {
     }
   }
   if (!state.ok) {
-    var autoRemoved = state.category === "auth_expired" && session.source === "store";
+    var stateRemovedCount = state.category === "auth_expired" ? removeExpiredStoredSession(session) : 0;
+    var autoRemoved = stateRemovedCount > 0;
     var failRow = buildResult({
       account: account,
       decision_path: "query_state_failed",
       action_taken: false,
       result_category: state.category || "state_undecidable",
-      key_fields: { reason: state.reason || "unknown" },
+      key_fields: {
+        reason: state.reason || "unknown",
+        cookie_removed_count: String(stateRemovedCount),
+      },
       next_step: autoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "请重新抓包更新 Cookie 后重试",
       summary_line:
         account + " | 状态失败(" + (state.reason || "unknown") + ")" + (autoRemoved ? " | 已自动移除" : ""),
@@ -322,7 +325,8 @@ async function runOneAccount(session, index, total) {
 
     if (!sign.ok) {
       if (sign.category === "auth_expired") {
-        var signAutoRemoved = session.source === "store";
+        var signRemovedCount = removeExpiredStoredSession(session);
+        var signAutoRemoved = signRemovedCount > 0;
         return buildResult({
           account: account,
           decision_path: "query_state(n)->execute_sign_failed(auth)",
@@ -332,6 +336,7 @@ async function runOneAccount(session, index, total) {
             code: sign.code,
             status: sign.status,
             desc: sign.desc,
+            cookie_removed_count: String(signRemovedCount),
           },
           next_step: signAutoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "请重新抓包更新 Cookie 后重试",
           summary_line:
@@ -371,7 +376,8 @@ async function runOneAccount(session, index, total) {
 
   var taskInfo = await processTasks(session, mode);
   if (!taskInfo.ok) {
-    var taskAutoRemoved = taskInfo.category === "auth_expired" && session.source === "store";
+    var taskRemovedCount = taskInfo.category === "auth_expired" ? removeExpiredStoredSession(session) : 0;
+    var taskAutoRemoved = taskRemovedCount > 0;
     return buildResult({
       account: account,
       decision_path: signInfo.decision + "->task_query_failed",
@@ -380,6 +386,7 @@ async function runOneAccount(session, index, total) {
       key_fields: {
         sign: signInfo.text,
         task_reason: taskInfo.reason || "unknown",
+        cookie_removed_count: String(taskRemovedCount),
       },
       next_step: taskAutoRemoved ? "该账号 Cookie 已自动移除，请重新抓包" : "建议稍后重试；若持续失败请重新抓包",
       summary_line:
@@ -1548,22 +1555,34 @@ function stringifyError(err) {
   return err.message || JSON.stringify(err);
 }
 
-function purgeInvalidStoredSessions(invalidCookieMap) {
-  var keys = Object.keys(invalidCookieMap || {});
-  if (!keys.length) return 0;
+function removeExpiredStoredSession(session) {
+  if (!session || session.source !== "store") return 0;
   var list = readSessionList();
   if (!list.length) return 0;
-  var remain = [];
-  var removed = 0;
+  var targetCookie = String(session.cookie || "");
+  var targetMobile = String(session.mobile || detectAccountId(targetCookie) || "");
+  var targetIndex = -1;
+
   for (var i = 0; i < list.length; i++) {
-    if (invalidCookieMap[list[i].cookie]) {
-      removed += 1;
-      continue;
+    if (targetCookie && String(list[i].cookie || "") === targetCookie) {
+      targetIndex = i;
+      break;
     }
-    remain.push(list[i]);
   }
-  if (removed > 0) saveSessionList(remain);
-  return removed;
+  if (targetIndex < 0 && targetMobile) {
+    for (var j = 0; j < list.length; j++) {
+      var storedMobile = String(list[j].mobile || detectAccountId(list[j].cookie || "") || "");
+      if (storedMobile === targetMobile) {
+        targetIndex = j;
+        break;
+      }
+    }
+  }
+  if (targetIndex < 0) return 0;
+
+  list.splice(targetIndex, 1);
+  saveSessionList(list);
+  return 1;
 }
 
 function pickApiMessage(obj) {
