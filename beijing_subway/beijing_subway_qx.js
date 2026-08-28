@@ -75,7 +75,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.17";
+const SCRIPT_VERSION = "1.6.18";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -87,7 +87,7 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 6;
+const SCHEDULE_COMPACT_INDEX_VERSION = 7;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
@@ -2237,19 +2237,33 @@ function buildCompactScheduleIndex(schedule) {
 
       for (const stops of Object.values(trains)) {
         if (!Array.isArray(stops)) continue;
-        const parsed = [];
+        const rawParsed = [];
         let prevMin = null;
         let dayOff = 0;
 
         for (const stop of stops) {
           if (!Array.isArray(stop) || stop.length < 2) continue;
           const stName = String(stop[0] || "").trim();
-          const t = parseHHMMLoose(stop[1]);
+          const rawTime = String(stop[1] || "").trim();
+          const t = parseHHMMLoose(rawTime);
           if (!t) continue;
           const cur = t[0] * 60 + t[1];
           if (prevMin != null && cur < prevMin) dayOff += 1440;
           prevMin = cur;
-          parsed.push([stName, cur + dayOff]);
+          rawParsed.push([
+            stName,
+            cur + dayOff,
+            rawTime.startsWith("("),
+            rawTime.endsWith("-")
+          ]);
+        }
+        const parsed = [];
+        for (let pi = 0; pi < rawParsed.length; pi++) {
+          const current = rawParsed[pi];
+          if (current[2]) continue;
+          const next = rawParsed[pi + 1];
+          if (current[3] && next && !next[2] && next[0] === current[0]) continue;
+          parsed.push([current[0], current[1]]);
         }
         if (!parsed.length) continue;
 
