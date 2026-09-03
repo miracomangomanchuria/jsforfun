@@ -75,7 +75,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.18";
+const SCRIPT_VERSION = "1.6.20";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -87,7 +87,8 @@ const HOLIDAY_HTTP_TIMEOUT_MS = 5000;
 const CACHE_KEY_PREFIX = "bjsubway_qx_v1";
 const CACHE_CHUNK_SIZE = 180000;
 const CACHE_MAX_CHUNKS = 120;
-const SCHEDULE_COMPACT_INDEX_VERSION = 7;
+const SCHEDULE_COMPACT_INDEX_VERSION = 9;
+const MAP_DATA_CACHE_VERSION = 2;
 const LEGACY_CLEANUP_ONCE_KEY = `${CACHE_KEY_PREFIX}:cleanup_once:v140`;
 const AMAP_EXIT_CACHE_KEY = `${CACHE_KEY_PREFIX}:amap:station_exits:v1`;
 const AMAP_EXIT_CACHE_MAX_PER_STATION = 96;
@@ -1144,10 +1145,8 @@ function analyzeAutoPrewarmNeed(mapPeriodKey, schedulePeriodKey) {
     cachedMap &&
     typeof cachedMap === "object" &&
     cachedMap.period_key === mapPeriod &&
-    cachedMap.data &&
-    typeof cachedMap.data === "object" &&
-    Array.isArray(cachedMap.data.stations_data) &&
-    Array.isArray(cachedMap.data.lines_data)
+    Number(cachedMap.version) === MAP_DATA_CACHE_VERSION &&
+    isValidMapData(cachedMap.data)
   ) {
     needMapCache = false;
   }
@@ -1230,6 +1229,18 @@ async function loadHolidayYearData(year) {
   return { data: remote, source: `holiday-cn:${year}` };
 }
 
+function isValidMapData(obj) {
+  return !!(
+    obj &&
+    typeof obj === "object" &&
+    !Array.isArray(obj) &&
+    Array.isArray(obj.stations_data) &&
+    obj.stations_data.length > 0 &&
+    Array.isArray(obj.lines_data) &&
+    obj.lines_data.length > 0
+  );
+}
+
 async function loadMapWithMonthlyCache(periodKey, forceRefresh = false) {
   const cacheKey = `${CACHE_KEY_PREFIX}:map:monthly`;
   const cached = readLargeJsonCache(cacheKey);
@@ -1238,17 +1249,19 @@ async function loadMapWithMonthlyCache(periodKey, forceRefresh = false) {
     cached &&
     typeof cached === "object" &&
     cached.period_key === periodKey &&
-    cached.data &&
-    typeof cached.data === "object" &&
-    Array.isArray(cached.data.stations_data) &&
-    Array.isArray(cached.data.lines_data)
+    Number(cached.version) === MAP_DATA_CACHE_VERSION &&
+    isValidMapData(cached.data)
   ) {
     writePeriodMarker(MAP_PERIOD_MARKER_KEY, periodKey);
     return cached.data;
   }
   try {
     const remote = await fetchJson(MAP_APP_URL);
+    if (!isValidMapData(remote)) {
+      throw new Error("地图数据为空或格式无效");
+    }
     writeLargeJsonCache(cacheKey, {
+      version: MAP_DATA_CACHE_VERSION,
       period_key: periodKey,
       updated_at: new Date().toISOString(),
       data: remote
@@ -1258,10 +1271,7 @@ async function loadMapWithMonthlyCache(periodKey, forceRefresh = false) {
   } catch (e) {
     if (
       cached &&
-      cached.data &&
-      typeof cached.data === "object" &&
-      Array.isArray(cached.data.stations_data) &&
-      Array.isArray(cached.data.lines_data)
+      isValidMapData(cached.data)
     ) {
       return cached.data;
     }
@@ -1286,7 +1296,12 @@ function scheduleHalfMonthIndexCacheKey() {
 }
 
 function isValidScheduleDayData(obj) {
-  return !!(obj && typeof obj === "object" && !Array.isArray(obj));
+  return !!(
+    obj &&
+    typeof obj === "object" &&
+    !Array.isArray(obj) &&
+    Object.keys(obj).length > 0
+  );
 }
 
 function isValidScheduleRawBundle(bundle) {
@@ -1298,19 +1313,33 @@ function isValidScheduleRawBundle(bundle) {
   );
 }
 
+function hasCompactScheduleEntries(stations) {
+  if (!stations || typeof stations !== "object" || Array.isArray(stations)) return false;
+  return Object.values(stations).some((lineMap) => {
+    if (!lineMap || typeof lineMap !== "object" || Array.isArray(lineMap)) return false;
+    return Object.values(lineMap).some((cell) => {
+      if (!cell || typeof cell !== "object") return false;
+      if (typeof cell.q === "string" && cell.q.trim()) return true;
+      return Array.isArray(cell.m) && cell.m.length > 0;
+    });
+  });
+}
+
 function isValidCompactScheduleIndex(idx) {
   return !!(
     idx &&
     typeof idx === "object" &&
     Number(idx.version) === SCHEDULE_COMPACT_INDEX_VERSION &&
     Array.isArray(idx.line_dirs) &&
+    idx.line_dirs.length > 0 &&
     Array.isArray(idx.terminals) &&
     Array.isArray(idx.origins) &&
     Array.isArray(idx.next_stations) &&
     Array.isArray(idx.tails) &&
     idx.stations &&
     typeof idx.stations === "object" &&
-    !Array.isArray(idx.stations)
+    !Array.isArray(idx.stations) &&
+    hasCompactScheduleEntries(idx.stations)
   );
 }
 
@@ -1365,10 +1394,16 @@ async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey, force
       fetchJsonWithFallback(getScheduleUrlsByKind("weekend"))
     ]);
     const rawBundle = { weekday: weekdayRemote, weekend: weekendRemote };
+    if (!isValidScheduleRawBundle(rawBundle)) {
+      throw new Error("时刻表数据为空或格式无效");
+    }
     const idxBundle = {
       weekday: buildCompactScheduleIndex(rawBundle.weekday),
       weekend: buildCompactScheduleIndex(rawBundle.weekend)
     };
+    if (!isValidCompactScheduleIndexBundle(idxBundle)) {
+      throw new Error("时刻表索引为空或格式无效");
+    }
 
     writeLargeJsonCache(rawKey, {
       period_key: periodKey,
@@ -1392,11 +1427,14 @@ async function loadScheduleCompactIndexBundleWithHalfMonthCache(periodKey, force
       ? cachedRawWrap.data
       : (isValidScheduleRawBundle(cachedRawWrap) ? cachedRawWrap : null);
     if (cachedRawData) {
-      writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
-      return {
+      const rebuiltBundle = {
         weekday: buildCompactScheduleIndex(cachedRawData.weekday),
         weekend: buildCompactScheduleIndex(cachedRawData.weekend)
       };
+      if (isValidCompactScheduleIndexBundle(rebuiltBundle)) {
+        writePeriodMarker(SCHEDULE_PERIOD_MARKER_KEY, periodKey);
+        return rebuiltBundle;
+      }
     }
     throw e;
   }
@@ -2201,7 +2239,69 @@ function packCompactCellArrays(cell) {
   return out.join(",");
 }
 
+function scheduleStopMinute(stop) {
+  if (!Array.isArray(stop) || stop.length < 2) return null;
+  const t = parseHHMMLoose(String(stop[1] || "").trim());
+  if (!t) return null;
+  return t[0] * 60 + t[1];
+}
+
+function isBoardableBoundaryStop(stop, stationName) {
+  if (!Array.isArray(stop) || stop.length < 2) return false;
+  if (String(stop[0] || "").trim() !== stationName) return false;
+  const rawTime = String(stop[1] || "").trim();
+  return !!rawTime && !rawTime.startsWith("(") && !rawTime.endsWith("-");
+}
+
+function fuseNineFangshanThroughSchedules(schedule) {
+  if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) return schedule;
+  const nineLine = schedule["9号线"];
+  const fangshanLine = schedule["房山线"];
+  const nineSouthbound = nineLine && nineLine["南行"];
+  const fangshanOutbound = fangshanLine && fangshanLine["出城"];
+  if (!nineSouthbound || typeof nineSouthbound !== "object" || Array.isArray(nineSouthbound)) return schedule;
+  if (!fangshanOutbound || typeof fangshanOutbound !== "object" || Array.isArray(fangshanOutbound)) return schedule;
+
+  const continuationsByMinute = {};
+  for (const stops of Object.values(fangshanOutbound)) {
+    if (!Array.isArray(stops)) continue;
+    if (!isBoardableBoundaryStop(stops[0], "郭公庄")) continue;
+    const minute = scheduleStopMinute(stops[0]);
+    if (!Number.isFinite(minute)) continue;
+    const key = String(minute);
+    if (!continuationsByMinute[key]) continuationsByMinute[key] = [];
+    continuationsByMinute[key].push(stops);
+  }
+  if (!Object.keys(continuationsByMinute).length) return schedule;
+
+  const fusedSchedule = Object.assign({}, schedule);
+  const fusedNineLine = Object.assign({}, nineLine);
+  const fusedSouthbound = Object.assign({}, nineSouthbound);
+  fusedNineLine["南行"] = fusedSouthbound;
+  fusedSchedule["9号线"] = fusedNineLine;
+
+  for (const [trainId, stops] of Object.entries(nineSouthbound)) {
+    if (!Array.isArray(stops)) continue;
+    const boundary = stops[stops.length - 1];
+    if (!isBoardableBoundaryStop(boundary, "郭公庄")) continue;
+    const minute = scheduleStopMinute(boundary);
+    if (!Number.isFinite(minute)) continue;
+    const candidates = continuationsByMinute[String(minute)] || [];
+    if (candidates.length !== 1) continue;
+
+    const mergedStops = stops.slice();
+    const continuation = candidates[0];
+    for (let index = 1; index < continuation.length; index++) {
+      const stop = continuation[index];
+      mergedStops.push(Array.isArray(stop) ? stop.slice() : stop);
+    }
+    fusedSouthbound[trainId] = mergedStops;
+  }
+  return fusedSchedule;
+}
+
 function buildCompactScheduleIndex(schedule) {
+  const fusedSchedule = fuseNineFangshanThroughSchedules(schedule);
   const lineDirIds = {};
   const lineDirs = [];
   const terminalIds = {};
@@ -2227,7 +2327,7 @@ function buildCompactScheduleIndex(schedule) {
     };
   }
 
-  for (const [lineName, dirs] of Object.entries(schedule)) {
+  for (const [lineName, dirs] of Object.entries(fusedSchedule)) {
     if (!dirs || typeof dirs !== "object") continue;
     for (const [direction, trains] of Object.entries(dirs)) {
       if (!trains || typeof trains !== "object") continue;
