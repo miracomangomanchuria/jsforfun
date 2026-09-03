@@ -75,7 +75,7 @@ const AMAP_PER_STATION_BUDGET_MS = 3000;
 const AMAP_EXIT_SEARCH_RADIUS_M = 1500;
 const AMAP_EXIT_TYPECODE = "150501";
 
-const SCRIPT_VERSION = "1.6.20";
+const SCRIPT_VERSION = "1.6.21";
 const CROSSLINE_LOOKBACK = 5;
 const CROSSLINE_MIN_OTHER = 3;
 const STATION_THRESHOLD_M = 300;
@@ -2726,6 +2726,20 @@ function pickDirectionArrow8(directionText, toText, fromLat, fromLon, terminalNa
   return "";
 }
 
+const NINE_FANGSHAN_LINES = new Set(["9号线", "房山线"]);
+
+function resolveNineFangshanSegmentLine(currentStationName, nextStationName, stationLinesIndex) {
+  if (!stationLinesIndex || typeof stationLinesIndex !== "object") return null;
+  const currentLines = stationLinesIndex[normName(currentStationName)] || new Set();
+  const currentSegmentLines = Array.from(currentLines).filter((line) => NINE_FANGSHAN_LINES.has(line));
+  if (currentSegmentLines.length === 1) return currentSegmentLines[0];
+  if (currentSegmentLines.length !== 2) return null;
+
+  const nextLines = stationLinesIndex[normName(nextStationName)] || new Set();
+  const nextSegmentLines = Array.from(nextLines).filter((line) => NINE_FANGSHAN_LINES.has(line));
+  return nextSegmentLines.length === 1 ? nextSegmentLines[0] : null;
+}
+
 function detectCrosslineDisplay(curLine, tailStops, stationLinesIndex) {
   if (!curLine || !Array.isArray(tailStops) || !tailStops.length) return null;
   const counts = {};
@@ -2745,11 +2759,21 @@ function detectCrosslineDisplay(curLine, tailStops, stationLinesIndex) {
       bestCnt = cnt;
     }
   }
+  if (NINE_FANGSHAN_LINES.has(String(curLine).trim())) return null;
   if (bestLine && bestCnt >= CROSSLINE_MIN_OTHER && bestCnt > curCnt) {
     if (String(curLine).includes(bestLine)) return String(curLine);
     return `${curLine}-${bestLine}`;
   }
   return null;
+}
+
+function resolveLineDisplay(curLine, currentStationName, nextStationName, tailStops, stationLinesIndex) {
+  const baseLine = String(curLine || "").trim();
+  if (!baseLine) return "";
+  if (NINE_FANGSHAN_LINES.has(baseLine)) {
+    return resolveNineFangshanSegmentLine(currentStationName, nextStationName, stationLinesIndex) || baseLine;
+  }
+  return detectCrosslineDisplay(baseLine, tailStops, stationLinesIndex) || baseLine;
 }
 
 function boundaryStatusByMinuteRange(now, serviceDate, firstMin, lastMin) {
@@ -3695,7 +3719,7 @@ async function main() {
   mapObj = null;
   catalog = filterCatalogByNormSet(catalog, validStationNormSet);
   const stationCoordIndex = buildStationCoordIndex(catalog);
-  let stationLinesIndex = {};
+  const stationLinesIndex = buildStationLineIndex(catalog);
   let nearStations = [];
   const systemDistByNorm = {};
   const accessByNorm = {};
@@ -3757,9 +3781,6 @@ async function main() {
       nearestQueryStation.query_label = "📍";
       nearStations.push(nearestQueryStation);
     }
-    if (nearStations.length > 1) {
-      stationLinesIndex = buildStationLineIndex(catalog);
-    }
     if (!backend) {
       console.log(
         `[INFO][v${SCRIPT_VERSION}] 站名已就绪 station=${queryStation.name}${nearestQueryStation ? ` 最近站=${nearestQueryStation.name}` : ""}`
@@ -3772,9 +3793,6 @@ async function main() {
       const sd = haversineM(inputLat, inputLon, st.lat, st.lon);
       st.system_distance_m = Math.round(sd * 10) / 10;
       systemDistByNorm[st.norm] = st.system_distance_m;
-    }
-    if (nearStations.length > 1) {
-      stationLinesIndex = buildStationLineIndex(catalog);
     }
     if (!nearStations.length) {
       catalog = null;
@@ -3980,7 +3998,7 @@ async function main() {
       }
 
       const tailStops = tails.length ? tails : (tripsSorted[0] && tripsSorted[0].tail) || [];
-      const lineNameDisplay = detectCrosslineDisplay(lineName, tailStops, stationLinesIndex) || lineName;
+      const lineNameDisplay = resolveLineDisplay(lineName, st.name, nextStationName, tailStops, stationLinesIndex);
       let termNames = tm.terms.map((x) => String(x.name || "").trim()).filter(Boolean);
       if (!termNames.length) termNames = displayTerms.slice();
       const useFarthestTerminalArrow = isNonRingLineDisplayName(lineName) && displayTerms.length >= 2;
