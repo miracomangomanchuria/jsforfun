@@ -33,7 +33,7 @@ const QUERY_ONLY = false;
 const CLAIM_COMPLETED_TASKS = true;
 const CLAIM_SIGN_PACKAGE = true;
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.4';
 const MEMBER_KEY = 'sysy_member_session_v1';
 const APP_KEY = 'sysy_app_capture_v1';
 const CHAVY_KEY = 'chavy_login_sfexpress';
@@ -239,57 +239,149 @@ async function runTasks(call, session, lines, queryOnly) {
   const channels = session.deviceId && canClaim ? ['1', '2', '3', '4'] : ['1'];
   const tasks = new Map();
   let points = null;
-  let failures = 0;
+  let listedGroups = 0;
+  let failedGroups = 0;
+  let missingLists = 0;
+  let missingIds = 0;
+  let expired = false;
+  log(`任务中心 · 查询分组 ${channels.join('、')} · ${canClaim ? '领取待领奖励' : '仅查询'}`);
   for (const channel of channels) {
     const result = await listTasks(call, session, channel);
-    if (result.expired) return true;
+    if (result.expired) {
+      expired = true;
+      log(`任务分组 ${channel} 查询中断 · 登录态失效（${detail(result)}）`);
+      break;
+    }
     if (!result.ok || !result.obj) {
-      failures += 1;
+      failedGroups += 1;
       log(`任务分组 ${channel} 查询失败（${detail(result)}）`);
       continue;
     }
     if (points === null) points = numeric(result.obj.totalPoint);
     const items = result.obj.taskTitleLevels;
-    if (!Array.isArray(items)) continue;
+    if (!Array.isArray(items)) {
+      missingLists += 1;
+      log(`任务分组 ${channel} · 服务端未返回任务列表字段 taskTitleLevels`);
+      continue;
+    }
+    listedGroups += 1;
+    log(`任务分组 ${channel} · 返回 ${items.length} 项`);
     for (const task of items) {
-      if (!task || ![task.strategyId, task.taskId, task.taskCode].every((id) => typeof id === 'number' || (typeof id === 'string' && id.trim()))) continue;
-      const key = JSON.stringify([task.strategyId, task.taskId, task.taskCode].map(String));
-      const prior = tasks.get(key);
+      if (!task || typeof task !== 'object') continue;
+      const ids = [task.strategyId, task.taskId, task.taskCode];
+      const hasIds = ids.every((id) => (typeof id === 'number' && Number.isFinite(id)) || (typeof id === 'string' && id.trim()));
       const status = numeric(task.status);
+      if (!hasIds) {
+        missingIds += 1;
+        const name = label(task.title || task.description) || '未命名任务';
+        log(`${name} · 缺少领取字段 · 状态 ${status ?? '未返回'}`);
+        continue;
+      }
+      const key = JSON.stringify(ids.map(String));
+      const prior = tasks.get(key);
       if (!prior || status === 3 || (status === 1 && prior.status !== 3)) tasks.set(key, { task, status, channel });
     }
   }
-  const ready = [...tasks.values()].filter(({ status }) => status === 1);
-  let claimed = false;
-  if (canClaim) {
-    for (const [index, { task, channel }] of ready.entries()) {
+
+  const ready = [];
+  const browseTitles = new Set();
+  let incomplete = 0;
+  let alreadyClaimed = 0;
+  let unknown = 0;
+  for (const item of tasks.values()) {
+    const { task, status } = item;
+    const description = label(task.description);
+    const title = label(task.title) || description;
+    if (status === 1) ready.push(item);
+    else if (status === 3) alreadyClaimed += 1;
+    else if (status === 0 || status === 2) {
+      incomplete += 1;
+      if (title && (/浏览|停留/.test(title) || /浏览|停留/.test(description))) browseTitles.add(title);
+    } else {
+      unknown += 1;
+    }
+  }
+
+  const claimLines = [];
+  let claimed = 0;
+  let claimPoints = 0;
+  let pointsUnreported = 0;
+  let claimFailures = 0;
+  if (canClaim && !expired) {
+    for (const { task, channel } of ready) {
       const { strategyId, taskId, taskCode } = task;
-      const name = label(task.title || task.description) || `任务 ${index + 1}`;
+      const name = label(task.title || task.description) || '未命名任务';
       const body = { strategyId, taskId, taskCode };
       if (session.deviceId) body.deviceId = session.deviceId;
       else body.channelType = channel;
       const result = await call(TASK_PATH + 'fetchIntegral', body);
-      if (result.expired) return true;
-      if (result.code === '600005') log(`${name} · 已领取`);
-      else if (result.ok && result.obj !== false) {
-        claimed = true;
+      if (result.expired) {
+        expired = true;
+        claimLines.push(`${name} · 领取中断，登录态失效`);
+        break;
+      }
+      if (result.code === '600005') {
+        alreadyClaimed += 1;
+        log(`${name} · 已领取过`);
+      } else if (result.ok && result.obj !== false) {
+        claimed += 1;
         const point = numeric(result.obj && result.obj.point);
-        lines.push(`${name} · ${point === null ? '已领取，积分未返回' : `+${point} 积分`}`);
-      } else lines.push(`${name} · 领取未确认（${detail(result)}）`);
+        if (point === null) pointsUnreported += 1;
+        else claimPoints += point;
+        claimLines.push(`${name} · ${point === null ? '已领取，积分未返回' : `+${point} 积分`}`);
+      } else {
+        claimFailures += 1;
+        const reason = result.code === '600006' ? '服务端判定任务未完成' : '领取未确认';
+        claimLines.push(`${name} · ${reason}（${detail(result)}）`);
+      }
     }
-  } else if (failures < channels.length) lines.push(`待领任务 ${ready.length} 项`);
+  }
+
+  if (listedGroups) {
+    const parts = [];
+    if (tasks.size) parts.push(`发现 ${tasks.size} 项`);
+    else if (!missingIds) parts.push('列表为空');
+    parts.push(`待领 ${ready.length} 项`);
+    if (alreadyClaimed) parts.push(`此前已领 ${alreadyClaimed} 项`);
+    if (incomplete) parts.push(`未完成 ${incomplete} 项`);
+    if (unknown) parts.push(`状态未识别 ${unknown} 项`);
+    if (missingIds) parts.push(`缺少领取字段 ${missingIds} 条`);
+    lines.push(`任务中心 · ${parts.join(' · ')}`);
+  } else if (expired) lines.push('任务中心 · 登录态失效，查询中断');
+  else if (missingLists) lines.push('任务中心 · 服务端未返回任务列表');
+  else lines.push('任务中心 · 查询失败');
+  if (listedGroups && missingLists) lines.push(`${missingLists} 个分组未返回任务列表`);
+  if (failedGroups && failedGroups < channels.length) lines.push(`${failedGroups} 个任务分组查询失败`);
+
+  if (browseTitles.size) {
+    const titles = [...browseTitles];
+    const more = titles.length > 4 ? ` 等 ${titles.length} 项` : '';
+    lines.push(`待浏览 · ${titles.slice(0, 4).join('、')}${more}`);
+  }
+  if (listedGroups && !canClaim) lines.push('本次仅查询任务');
+  if (claimed) {
+    const earned = pointsUnreported === claimed ? '到账积分未返回' : `到账 ${claimPoints} 积分`;
+    const unreported = pointsUnreported && pointsUnreported !== claimed ? ` · 另有 ${pointsUnreported} 项积分未返回` : '';
+    lines.push(`本次任务领奖 ${claimed} 项 · ${earned}${unreported}`);
+  } else if (listedGroups && canClaim && !expired) {
+    lines.push(ready.length ? '本次任务未确认新增积分' : '本次没有可领取的任务积分');
+  }
+  if (claimFailures) lines.push(`${claimFailures} 项任务领取未确认`);
+  lines.push(...claimLines);
 
   if (claimed) {
+    if (expired) {
+      if (points !== null) lines.push(`领奖前积分 ${points}`);
+      return true;
+    }
     const after = await listTasks(call, session, '1');
-    if (after.expired) return true;
+    expired = after.expired;
     const latest = after.ok && after.obj ? numeric(after.obj.totalPoint) : null;
-    if (latest === null && points !== null) lines.push(`领奖前积分 ${points}`);
+    if (latest === null && points !== null) lines.push(`领奖前积分 ${points} · 最新余额未确认`);
     points = latest;
   }
   if (points !== null) lines.push(`可用积分 ${points}`);
-  if (failures === channels.length) lines.push('任务及积分查询失败');
-  else if (failures) lines.push(`${failures} 个任务分组查询失败`);
-  return false;
+  return expired;
 }
 
 function useQueryMode() {
@@ -316,7 +408,8 @@ async function run(queryOnly) {
   if (!session || state.expired) {
     const title = saved || app ? '会员会话不可用' : '缺少顺丰登录态';
     log(title);
-    notify(title, `请在顺丰速运打开积分页更新会话。\n\n${GUIDE}`, true);
+    log('任务中心 · 会员会话不可用，本次未查询');
+    notify(title, `任务中心 · 会员会话不可用，本次未查询\n请在顺丰速运打开积分页更新会话。\n\n${GUIDE}`, true);
     return;
   }
 
@@ -345,7 +438,8 @@ async function run(queryOnly) {
       else lines.push(numeric(pack.hasFinishSign) === 1 ? '签到礼包已领' : '签到礼包奖励未返回');
     } else if (!expired) lines.push(`签到礼包未确认（${detail(result)}）`);
   }
-  if (!expired) expired = await runTasks(call, session, lines, queryOnly);
+  if (expired) lines.push('任务中心 · 登录态失效，本次未查询');
+  else expired = await runTasks(call, session, lines, queryOnly);
   if (expired) lines.push('登录态已失效，请重新打开积分页抓包');
   for (const line of lines) log(line);
   const title = lines.shift() || '顺丰会员状态';
